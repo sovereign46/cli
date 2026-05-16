@@ -1,0 +1,54 @@
+version: 2
+
+project_name: s46
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: s46
+    main: ./cmd/s46
+    binary: s46
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: s46
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}
+
+checksum:
+  name_template: checksums.txt
+
+brews:
+  - name: s46
+    repository:
+      owner: sovereign46
+      name: homebrew-tap
+    directory: Formula
+    homepage: https://sovereign46.com
+    description: Sovereign46 CLI control plane for coding-agent harnesses
+    license: BUSL-1.1
+    install: |
+      bin.install "s46"
+      generate_completions_from_executable(bin/"s46", "completion")
+    test: |
+      system "#{bin}/s46", "--help"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'

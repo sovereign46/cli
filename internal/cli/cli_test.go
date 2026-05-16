@@ -1,0 +1,216 @@
+package cli
+
+import (
+	"bytes"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"testing"
+)
+
+type commandResult struct {
+	stdout string
+	stderr string
+	err    error
+}
+
+func testEnv(t *testing.T) map[string]string {
+	t.Helper()
+	home := t.TempDir()
+	return map[string]string{
+		"HOME":                home,
+		"XDG_CONFIG_HOME":     filepath.Join(home, ".config"),
+		"XDG_DATA_HOME":       filepath.Join(home, ".data"),
+		"XDG_CACHE_HOME":      filepath.Join(home, ".cache"),
+		"S46_KEYRING_BACKEND": "file",
+	}
+}
+
+func run(t *testing.T, env map[string]string, args ...string) commandResult {
+	t.Helper()
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	root := NewRootCommand(Runtime{Stdout: stdout, Stderr: stderr, Env: env})
+	root.SetArgs(args)
+	err := root.Execute()
+	return commandResult{stdout: stdout.String(), stderr: stderr.String(), err: err}
+}
+
+func requireOK(t *testing.T, result commandResult) string {
+	t.Helper()
+	if result.err != nil {
+		t.Fatalf("command failed: %v\nstdout:\n%s\nstderr:\n%s", result.err, result.stdout, result.stderr)
+	}
+	return result.stdout
+}
+
+func TestHelpMatchesGolden(t *testing.T) {
+	env := testEnv(t)
+	out := requireOK(t, run(t, env, "--help"))
+	golden, err := os.ReadFile(filepath.Join("..", "..", "testdata", "help.golden"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != string(golden) {
+		t.Fatalf("help output changed\n--- got ---\n%s\n--- want ---\n%s", out, string(golden))
+	}
+}
+
+func TestLoginTokenWhoamiLogout(t *testing.T) {
+	env := testEnv(t)
+	out := requireOK(t, run(t, env, "login"))
+	if !strings.Contains(out, "authenticated as dscape@acme.s46.dev") {
+		t.Fatalf("unexpected login output: %s", out)
+	}
+	if got := strings.TrimSpace(requireOK(t, run(t, env, "whoami"))); got != "dscape@acme.s46.dev" {
+		t.Fatalf("whoami = %q", got)
+	}
+	token := strings.TrimSpace(requireOK(t, run(t, env, "token", "--refresh")))
+	if !strings.HasPrefix(token, "s46_mock_access_") {
+		t.Fatalf("unexpected token %q", token)
+	}
+	requireOK(t, run(t, env, "logout"))
+	if result := run(t, env, "whoami"); result.err == nil || !strings.Contains(result.err.Error(), "not authenticated") {
+		t.Fatalf("expected not authenticated error, got %#v", result)
+	}
+}
+
+func TestConnectClaudeDryRunAndWrite(t *testing.T) {
+	env := testEnv(t)
+	requireOK(t, run(t, env, "login"))
+	out := requireOK(t, run(t, env, "connect", "acme", "--harness=claude-code", "--dry-run"))
+	if !strings.Contains(out, "dry-run: would connect acme") || !strings.Contains(out, "https://acme.s46.dev/anthropic") {
+		t.Fatalf("unexpected dry run output:\n%s", out)
+	}
+	settingsPath := filepath.Join(env["HOME"], ".claude", "settings.json")
+	if _, err := os.Stat(settingsPath); !os.IsNotExist(err) {
+		t.Fatalf("dry-run wrote settings")
+	}
+	requireOK(t, run(t, env, "connect", "acme", "--harness=claude-code"))
+	settings := map[string]any{}
+	readJSON(t, settingsPath, &settings)
+	if settings["apiKeyHelper"] != "s46 token --refresh" {
+		t.Fatalf("unexpected apiKeyHelper: %#v", settings["apiKeyHelper"])
+	}
+	envMap := settings["env"].(map[string]any)
+	if envMap["ANTHROPIC_BASE_URL"] != "https://acme.s46.dev/anthropic" {
+		t.Fatalf("unexpected base url: %#v", envMap["ANTHROPIC_BASE_URL"])
+	}
+}
+
+func TestConnectCodexAndPi(t *testing.T) {
+	env := testEnv(t)
+	requireOK(t, run(t, env, "login"))
+	requireOK(t, run(t, env, "connect", "acme", "--harness=codex"))
+	codexConfig, err := os.ReadFile(filepath.Join(env["HOME"], ".codex", "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	codexText := string(codexConfig)
+	for _, want := range []string{"# BEGIN s46", "[model_providers.s46]", `base_url = "https://acme.s46.dev/codex"`, `token_helper = "s46 token --refresh"`, "[profiles.s46]"} {
+		if !strings.Contains(codexText, want) {
+			t.Fatalf("codex config missing %q:\n%s", want, codexText)
+		}
+	}
+
+	requireOK(t, run(t, env, "connect", "acme", "--harness=pi"))
+	models := map[string]any{}
+	readJSON(t, filepath.Join(env["HOME"], ".pi", "agent", "models.json"), &models)
+	providers := models["providers"].(map[string]any)
+	s46 := providers["s46"].(map[string]any)
+	if s46["baseUrl"] != "https://acme.s46.dev/v1" || s46["apiKey"] != "!s46 token --refresh" || s46["authHeader"] != true {
+		t.Fatalf("unexpected pi provider: %#v", s46)
+	}
+	if got := len(s46["models"].([]any)); got != 5 {
+		t.Fatalf("models len = %d", got)
+	}
+}
+
+func TestStatusModeSessionsAndShare(t *testing.T) {
+	env := testEnv(t)
+	requireOK(t, run(t, env, "login"))
+	requireOK(t, run(t, env, "connect", "acme", "--harness=standard"))
+	requireOK(t, run(t, env, "mode", "--set", "local"))
+	statusRaw := requireOK(t, run(t, env, "status", "--json"))
+	var status struct {
+		ActiveTeam string `json:"activeTeam"`
+		Team       struct {
+			Endpoint       string `json:"endpoint"`
+			Mode           string `json:"mode"`
+			DefaultHarness string `json:"defaultHarness"`
+		} `json:"team"`
+	}
+	if err := json.Unmarshal([]byte(statusRaw), &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.ActiveTeam != "acme" || status.Team.Endpoint != "https://acme.s46.dev" || status.Team.Mode != "local" || status.Team.DefaultHarness != "standard" {
+		t.Fatalf("unexpected status: %s", statusRaw)
+	}
+	if out := requireOK(t, run(t, env, "sessions")); !strings.Contains(out, "@dscape/auth-redirect-fix") {
+		t.Fatalf("sessions missing default: %s", out)
+	}
+	share := requireOK(t, run(t, env, "share", "@dscape/auth-redirect-fix"))
+	if !regexp.MustCompile(`Share URL: https://acme\.s46\.dev/session/#[a-f0-9]{32}`).MatchString(share) {
+		t.Fatalf("unexpected share output:\n%s", share)
+	}
+	if !strings.Contains(share, "Gist:      https://gist.github.com/s46-mock/") {
+		t.Fatalf("missing gist output:\n%s", share)
+	}
+}
+
+func TestSessionLifecycleAndRunSlug(t *testing.T) {
+	env := testEnv(t)
+	requireOK(t, run(t, env, "login"))
+	if out := requireOK(t, run(t, env, "detach", "@dscape/auth-redirect-fix")); !strings.Contains(out, "detached claude-code session") {
+		t.Fatalf("unexpected detach: %s", out)
+	}
+	if out := requireOK(t, run(t, env, "resume", "@dscape/auth-redirect-fix")); !strings.Contains(out, "resumed @dscape/auth-redirect-fix on localhost") {
+		t.Fatalf("unexpected resume: %s", out)
+	}
+	if out := requireOK(t, run(t, env, "session", "land")); !strings.Contains(out, "Review package:") || !strings.Contains(out, "gh pr create --fill") {
+		t.Fatalf("unexpected land output: %s", out)
+	}
+	runRaw := requireOK(t, run(t, env, "run", "fix the failing auth redirect test", "--json"))
+	var result struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(runRaw), &result); err != nil {
+		t.Fatal(err)
+	}
+	if !regexp.MustCompile(`^@dscape/fix-the-failing-auth-redirect-test-[a-f0-9]{10}$`).MatchString(result.ID) {
+		t.Fatalf("bad run id: %s", result.ID)
+	}
+}
+
+func TestBackupsBeforeOverwrite(t *testing.T) {
+	env := testEnv(t)
+	requireOK(t, run(t, env, "login"))
+	requireOK(t, run(t, env, "connect", "acme", "--harness=claude-code"))
+	requireOK(t, run(t, env, "connect", "acme", "--harness=claude-code", "--model=s46/qwen3-coder"))
+	entries, err := os.ReadDir(filepath.Join(env["HOME"], ".claude"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	backups := 0
+	for _, entry := range entries {
+		if strings.Contains(entry.Name(), ".s46-backup-") {
+			backups++
+		}
+	}
+	if backups != 1 {
+		t.Fatalf("expected 1 backup, got %d", backups)
+	}
+}
+
+func readJSON(t *testing.T, path string, target any) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, target); err != nil {
+		t.Fatal(err)
+	}
+}

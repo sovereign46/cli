@@ -1,0 +1,143 @@
+package api
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+)
+
+type HTTPClient struct {
+	BaseURL string
+	Client  *http.Client
+}
+
+func NewHTTPClient(baseURL string) *HTTPClient {
+	return &HTTPClient{BaseURL: strings.TrimRight(baseURL, "/"), Client: http.DefaultClient}
+}
+
+func (c *HTTPClient) StartDeviceLogin(ctx context.Context) (DeviceLogin, error) {
+	var response struct {
+		DeviceCode      string `json:"deviceCode"`
+		UserCode        string `json:"userCode"`
+		VerificationURI string `json:"verificationUri"`
+		IntervalSeconds int    `json:"intervalSeconds"`
+		ExpiresAt       string `json:"expiresAt"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/v1/auth/device/start", "", nil, &response); err != nil {
+		return DeviceLogin{}, err
+	}
+	expiresAt, _ := time.Parse(time.RFC3339, response.ExpiresAt)
+	return DeviceLogin{DeviceCode: response.DeviceCode, UserCode: response.UserCode, VerificationURI: response.VerificationURI, Interval: time.Duration(response.IntervalSeconds) * time.Second, ExpiresAt: expiresAt}, nil
+}
+
+func (c *HTTPClient) PollDeviceLogin(ctx context.Context, deviceCode string, userHint string) (TokenSet, error) {
+	var tokens TokenSet
+	err := c.do(ctx, http.MethodPost, "/v1/auth/device/poll", "", map[string]string{"deviceCode": deviceCode, "userHint": userHint}, &tokens)
+	return tokens, err
+}
+
+func (c *HTTPClient) RefreshToken(ctx context.Context, refreshToken string, account string) (TokenSet, error) {
+	var tokens TokenSet
+	err := c.do(ctx, http.MethodPost, "/v1/auth/token/refresh", "", map[string]string{"refreshToken": refreshToken, "account": account}, &tokens)
+	return tokens, err
+}
+
+func (c *HTTPClient) Me(ctx context.Context, accessToken string) (User, error) {
+	var user User
+	err := c.do(ctx, http.MethodGet, "/v1/me", accessToken, nil, &user)
+	return user, err
+}
+
+func (c *HTTPClient) Team(ctx context.Context, name string, opts TeamOptions) (Team, error) {
+	query := url.Values{}
+	if opts.Endpoint != "" {
+		query.Set("endpoint", opts.Endpoint)
+	}
+	if opts.Lane != "" {
+		query.Set("lane", opts.Lane)
+	}
+	if opts.Mode != "" {
+		query.Set("mode", opts.Mode)
+	}
+	if opts.DefaultModel != "" {
+		query.Set("defaultModel", opts.DefaultModel)
+	}
+	endpoint := "/v1/teams/" + url.PathEscape(name)
+	if encoded := query.Encode(); encoded != "" {
+		endpoint += "?" + encoded
+	}
+	var team Team
+	err := c.do(ctx, http.MethodGet, endpoint, "", nil, &team)
+	return team, err
+}
+
+func (c *HTTPClient) Sessions(ctx context.Context, team Team) ([]Session, error) {
+	var response struct {
+		Sessions []Session `json:"sessions"`
+	}
+	err := c.do(ctx, http.MethodGet, "/v1/sessions", "", nil, &response)
+	return response.Sessions, err
+}
+
+func (c *HTTPClient) Detach(ctx context.Context, req DetachRequest) (Session, error) {
+	var session Session
+	err := c.do(ctx, http.MethodPost, "/v1/sessions/"+url.PathEscape(req.SessionID)+"/detach", "", req, &session)
+	return session, err
+}
+
+func (c *HTTPClient) Resume(ctx context.Context, req ResumeRequest) (Session, error) {
+	var session Session
+	err := c.do(ctx, http.MethodPost, "/v1/sessions/"+url.PathEscape(req.SessionID)+"/resume", "", req, &session)
+	return session, err
+}
+
+func (c *HTTPClient) Land(ctx context.Context, req LandRequest) (LandResult, error) {
+	var result LandResult
+	err := c.do(ctx, http.MethodPost, "/v1/sessions/"+url.PathEscape(req.SessionID)+"/land", "", req, &result)
+	return result, err
+}
+
+func (c *HTTPClient) do(ctx context.Context, method string, endpoint string, bearer string, body any, target any) error {
+	var reader *bytes.Reader
+	if body == nil {
+		reader = bytes.NewReader(nil)
+	} else {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		reader = bytes.NewReader(raw)
+	}
+	request, err := http.NewRequestWithContext(ctx, method, c.BaseURL+endpoint, reader)
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Accept", "application/json")
+	if body != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	if bearer != "" {
+		request.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	client := c.Client
+	if client == nil {
+		client = http.DefaultClient
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return fmt.Errorf("%s %s: %s", method, endpoint, response.Status)
+	}
+	if target == nil {
+		return nil
+	}
+	return json.NewDecoder(response.Body).Decode(target)
+}

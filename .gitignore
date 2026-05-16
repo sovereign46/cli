@@ -1,0 +1,9 @@
+# Build outputs
+/s46
+/dist/
+
+# Local editor/system files
+.DS_Store
+
+# Local test state
+.coverage/

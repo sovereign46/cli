@@ -1,0 +1,31 @@
+s46 is the Sovereign46 CLI control plane for coding-agent harnesses.
+
+Usage:
+  s46 [command]
+
+Available Commands:
+  completion  Generate the autocompletion script for the specified shell
+  connect     connect a team and configure a harness
+  detach      mock-detach a session to an S46 box
+  help        Help about any command
+  login       authenticate with Sovereign46 using device-code auth
+  logout      clear local credentials
+  mode        view or set operating mode
+  resume      mock-resume a session locally
+  run         start a direct mocked s46 session
+  session     session subcommands
+  sessions    list local and remote sessions
+  share       mock Pi-style HTML share via secret gist
+  status      show active team, lane, harness, and mode
+  token       print a bearer token for harness helpers
+  whoami      print the authenticated user
+
+Flags:
+      --config string   path to s46 config.json
+      --dry-run         show planned mutations without writing
+  -h, --help            help for s46
+      --json            write machine-readable JSON
+      --no-color        disable color output
+      --verbose         print extra diagnostics
+
+Use "s46 [command] --help" for more information about a command.

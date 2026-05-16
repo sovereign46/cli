@@ -1,0 +1,41 @@
+package pi
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/sovereign46/s46-cli/internal/api"
+	"github.com/sovereign46/s46-cli/internal/harness"
+)
+
+func TestPlanConnectPreservesProvidersAndAddsS46(t *testing.T) {
+	home := t.TempDir()
+	env := map[string]string{"HOME": home}
+	modelsPath := filepath.Join(home, ".pi", "agent", "models.json")
+	if err := os.MkdirAll(filepath.Dir(modelsPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(modelsPath, []byte(`{"providers":{"ollama":{"baseUrl":"http://localhost:11434/v1"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	team := api.Team{Name: "acme", Endpoint: "https://acme.s46.dev", Models: api.DefaultModels, DefaultModel: api.DefaultModel}
+	plan, err := New().PlanConnect(context.Background(), harness.ConnectRequest{Env: env, Team: team, Model: api.DefaultModel})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var models map[string]any
+	if err := json.Unmarshal(plan.Files[0].Content, &models); err != nil {
+		t.Fatal(err)
+	}
+	providers := models["providers"].(map[string]any)
+	if _, ok := providers["ollama"]; !ok {
+		t.Fatalf("existing provider not preserved: %#v", providers)
+	}
+	s46 := providers["s46"].(map[string]any)
+	if s46["baseUrl"] != "https://acme.s46.dev/v1" || s46["apiKey"] != "!s46 token --refresh" || s46["authHeader"] != true {
+		t.Fatalf("unexpected s46 provider: %#v", s46)
+	}
+}
