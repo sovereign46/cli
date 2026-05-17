@@ -1,4 +1,4 @@
-.PHONY: test build shell release-patch release-minor release-major
+.PHONY: test build shell release-changelog-context release-patch release-minor release-major
 
 build:
 	go build ./cmd/s46
@@ -8,6 +8,9 @@ test:
 
 shell:
 	./scripts/shell
+
+release-changelog-context:
+	go run ./scripts/release.go changelog-context
 
 release-patch:
 	go run ./scripts/release.go patch

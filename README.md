@@ -115,7 +115,13 @@ GoReleaser configuration is in `.goreleaser.yml` and targets:
 - Linux amd64/arm64
 - Homebrew formula generation
 
-Release state is tracked in `VERSION` and `internal/version/version.go`. The Go release helper mirrors pi-mono's flow: verify a clean tree, bump the version, move `CHANGELOG.md` from `[Unreleased]` to `[x.y.z] - YYYY-MM-DD`, run tests, commit and tag, add a fresh `[Unreleased]` section, commit, and push. The pushed tag triggers `.github/workflows/release.yml` and GoReleaser.
+Release state is tracked in `VERSION` and `internal/version/version.go`. The Go release helper mirrors pi-mono's flow: verify a clean tree, require `[Unreleased]` changelog bullets, bump the version, move `CHANGELOG.md` from `[Unreleased]` to `[x.y.z] - YYYY-MM-DD`, run tests, commit and tag, add a fresh `[Unreleased]` section, commit, and push. The pushed tag triggers `.github/workflows/release.yml` and GoReleaser.
+
+Before releasing, generate changelog context for the diff from the last version/changelog edit to HEAD and add any missing user-facing entries:
+
+```sh
+make release-changelog-context
+```
 
 ```sh
 make release-patch

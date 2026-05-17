@@ -1,3 +1,11 @@
+// LLM release checklist:
+//
+// If you are an LLM/agent asked to cut a release, do not run the bump command
+// first. Run `go run ./scripts/release.go changelog-context`, review the commits,
+// file changes, and the current [Unreleased] section, then add any missing
+// user-facing CHANGELOG.md entries before releasing. The release path enforces
+// that [Unreleased] contains at least one bullet because every release must
+// promote real changelog content into the versioned section.
 package main
 
 import (
@@ -13,12 +21,19 @@ import (
 )
 
 const (
-	versionFile   = "VERSION"
-	versionGoFile = "internal/version/version.go"
-	changelogFile = "CHANGELOG.md"
+	versionFile    = "VERSION"
+	versionGoFile  = "internal/version/version.go"
+	changelogFile  = "CHANGELOG.md"
+	contextCommand = "changelog-context"
 )
 
-var semverPattern = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
+var (
+	semverPattern           = regexp.MustCompile(`^\d+\.\d+\.\d+$`)
+	versionAssignmentRegexp = regexp.MustCompile(`Version\s*=\s*"[^"]+"`)
+	changelogVersionRegexp  = regexp.MustCompile(`(?m)^## \[(\d+\.\d+\.\d+)\](?:\s+-\s+.*)?\s*$`)
+	changelogHeaderRegexp   = regexp.MustCompile(`(?m)^## `)
+	changelogBulletRegexp   = regexp.MustCompile(`(?m)^-\s+\S`)
+)
 
 func main() {
 	if err := release(os.Args[1:]); err != nil {
@@ -28,8 +43,17 @@ func main() {
 }
 
 func release(args []string) error {
+	if len(args) == 1 {
+		switch args[0] {
+		case contextCommand, "context":
+			return printChangelogContext()
+		case "-h", "--help", "help":
+			fmt.Println(usage())
+			return nil
+		}
+	}
 	if len(args) != 1 || (!isBumpType(args[0]) && !semverPattern.MatchString(args[0])) {
-		return errors.New("usage: go run ./scripts/release.go <major|minor|patch|x.y.z>")
+		return errors.New(usage())
 	}
 	target := args[0]
 
@@ -44,6 +68,12 @@ func release(args []string) error {
 		return fmt.Errorf("uncommitted changes detected; commit or stash first:\n%s", status)
 	}
 	fmt.Print("  Working directory clean\n\n")
+
+	fmt.Println("Checking changelog...")
+	if err := requireUnreleasedChangelogEntries(); err != nil {
+		return err
+	}
+	fmt.Print("  CHANGELOG.md has [Unreleased] entries\n\n")
 
 	currentVersion, err := readVersion()
 	if err != nil {
@@ -112,6 +142,131 @@ func release(args []string) error {
 
 	fmt.Printf("=== Released v%s ===\n", version)
 	return nil
+}
+
+func usage() string {
+	return strings.Join([]string{
+		"usage:",
+		"  go run ./scripts/release.go changelog-context",
+		"  go run ./scripts/release.go <major|minor|patch|x.y.z>",
+	}, "\n")
+}
+
+func printChangelogContext() error {
+	currentVersion, err := readVersion()
+	if err != nil {
+		return err
+	}
+	latestChangelogVersion, err := latestChangelogReleaseVersion()
+	if err != nil {
+		return err
+	}
+	unreleased, err := unreleasedChangelogSection()
+	if err != nil {
+		return err
+	}
+
+	fmt.Println("# s46 release changelog context")
+	fmt.Println()
+	fmt.Println("LLM/agent release checklist:")
+	fmt.Println("1. Review the diffs below before bumping VERSION.")
+	fmt.Println("2. Add missing user-facing entries to CHANGELOG.md under [Unreleased].")
+	fmt.Println("3. Commit code and changelog changes.")
+	fmt.Println("4. Run `go run ./scripts/release.go <major|minor|patch|x.y.z>` only after the tree is clean.")
+	fmt.Println()
+	fmt.Printf("Current VERSION: %s\n", currentVersion)
+	if head, err := captureOutput("git", "rev-parse", "--short", "HEAD"); err == nil {
+		fmt.Printf("HEAD before bump: %s\n", strings.TrimSpace(head))
+	}
+	if latestChangelogVersion == "" {
+		fmt.Println("Latest versioned changelog section: none")
+	} else {
+		fmt.Printf("Latest versioned changelog section: %s\n", latestChangelogVersion)
+	}
+	fmt.Println()
+
+	fmt.Println("## Current [Unreleased] section")
+	fmt.Println()
+	printFenced(strings.TrimSpace(unreleased))
+	fmt.Println()
+
+	if latestChangelogVersion != "" {
+		tag := "v" + latestChangelogVersion
+		if gitRefExists(tag) {
+			if err := printRangeContext("Changes since latest changelog release tag", tag+"..HEAD"); err != nil {
+				return err
+			}
+		} else {
+			fmt.Printf("## Changes since latest changelog release tag\n\n")
+			fmt.Printf("Tag `%s` does not exist locally, so release-tag diff context is unavailable.\n\n", tag)
+		}
+	} else if root, ok := firstCommit(); ok {
+		if err := printRangeContext("Changes after repository root commit", root+"..HEAD"); err != nil {
+			return err
+		}
+	}
+
+	if commit, ok := lastChangelogCommit(); ok {
+		if err := printRangeContext("Changes since the last CHANGELOG.md edit", commit+"..HEAD"); err != nil {
+			return err
+		}
+	}
+
+	status, err := captureOutput("git", "status", "--short")
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(status) != "" {
+		fmt.Println("## Working tree changes")
+		fmt.Println()
+		printCommandOutput("git status --short", status)
+		diffstat, err := captureOutput("git", "diff", "--stat")
+		if err != nil {
+			return err
+		}
+		printCommandOutput("git diff --stat", diffstat)
+	}
+
+	fmt.Println("If the diffs include user-visible behavior not described above, update CHANGELOG.md before releasing.")
+	return nil
+}
+
+func printRangeContext(title string, rangeSpec string) error {
+	fmt.Printf("## %s\n\n", title)
+	log, err := captureOutput("git", "log", "--oneline", rangeSpec)
+	if err != nil {
+		return err
+	}
+	printCommandOutput(commandString("git", "log", "--oneline", rangeSpec), log)
+
+	nameStatus, err := captureOutput("git", "diff", "--name-status", rangeSpec)
+	if err != nil {
+		return err
+	}
+	printCommandOutput(commandString("git", "diff", "--name-status", rangeSpec), nameStatus)
+
+	diffstat, err := captureOutput("git", "diff", "--stat", rangeSpec)
+	if err != nil {
+		return err
+	}
+	printCommandOutput(commandString("git", "diff", "--stat", rangeSpec), diffstat)
+	return nil
+}
+
+func printCommandOutput(command string, output string) {
+	fmt.Printf("`%s`\n\n", command)
+	printFenced(strings.TrimSpace(output))
+	fmt.Println()
+}
+
+func printFenced(output string) {
+	fmt.Println("```")
+	if output == "" {
+		fmt.Println("(none)")
+	} else {
+		fmt.Println(output)
+	}
+	fmt.Println("```")
 }
 
 func readVersion() (string, error) {
@@ -189,8 +344,7 @@ func updateVersionFiles(version string) error {
 	if err != nil {
 		return err
 	}
-	assignment := regexp.MustCompile(`Version\s*=\s*"[^"]+"`)
-	updated := assignment.ReplaceAllString(string(raw), fmt.Sprintf(`Version = "%s"`, version))
+	updated := versionAssignmentRegexp.ReplaceAllString(string(raw), fmt.Sprintf("Version = %q", version))
 	if updated == string(raw) {
 		return fmt.Errorf("could not find Version assignment in %s", versionGoFile)
 	}
@@ -226,6 +380,73 @@ func addUnreleasedSection() error {
 	}
 	updated := content[:index[0]] + "## [Unreleased]\n\n" + content[index[0]:]
 	return os.WriteFile(changelogFile, []byte(updated), 0o644)
+}
+
+func requireUnreleasedChangelogEntries() error {
+	section, err := unreleasedChangelogSection()
+	if err != nil {
+		return err
+	}
+	if !changelogBulletRegexp.MatchString(section) {
+		return fmt.Errorf("%s [Unreleased] has no bullet entries; run `go run ./scripts/release.go %s`, add missing user-facing changes, commit them, then release", changelogFile, contextCommand)
+	}
+	return nil
+}
+
+func unreleasedChangelogSection() (string, error) {
+	raw, err := os.ReadFile(changelogFile)
+	if err != nil {
+		return "", err
+	}
+	content := string(raw)
+	header := regexp.MustCompile(`(?m)^## \[Unreleased\]\s*$`).FindStringIndex(content)
+	if header == nil {
+		return "", fmt.Errorf("%s has no [Unreleased] section", changelogFile)
+	}
+	remainder := content[header[1]:]
+	nextHeader := changelogHeaderRegexp.FindStringIndex(remainder)
+	if nextHeader != nil {
+		remainder = remainder[:nextHeader[0]]
+	}
+	return strings.TrimSpace(remainder), nil
+}
+
+func latestChangelogReleaseVersion() (string, error) {
+	raw, err := os.ReadFile(changelogFile)
+	if err != nil {
+		return "", err
+	}
+	match := changelogVersionRegexp.FindStringSubmatch(string(raw))
+	if len(match) < 2 {
+		return "", nil
+	}
+	return match[1], nil
+}
+
+func gitRefExists(ref string) bool {
+	cmd := exec.Command("git", "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+	return cmd.Run() == nil
+}
+
+func firstCommit() (string, bool) {
+	output, err := captureOutput("git", "rev-list", "--max-parents=0", "HEAD")
+	if err != nil {
+		return "", false
+	}
+	commits := splitLines(output)
+	if len(commits) == 0 {
+		return "", false
+	}
+	return commits[0], true
+}
+
+func lastChangelogCommit() (string, bool) {
+	output, err := captureOutput("git", "log", "-n", "1", "--format=%H", "--", changelogFile)
+	if err != nil {
+		return "", false
+	}
+	commit := strings.TrimSpace(output)
+	return commit, commit != ""
 }
 
 func stageChangedFiles() error {
@@ -278,6 +499,10 @@ func run(name string, args ...string) error {
 
 func runOutput(name string, args ...string) (string, error) {
 	fmt.Printf("$ %s\n", commandString(name, args...))
+	return captureOutput(name, args...)
+}
+
+func captureOutput(name string, args ...string) (string, error) {
 	cmd := exec.Command(name, args...)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

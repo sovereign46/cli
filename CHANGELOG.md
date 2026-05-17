@@ -17,4 +17,4 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Homebrew-safe `s46 update` release check with GitHub latest-release lookup and package-manager upgrade instructions.
 - XDG config/state paths: `~/.config/s46/config.json`, `~/.local/share/s46/state.json`.
 - OS keychain abstraction with macOS `security`, Linux `secret-tool`, and test-only file backend.
-- GoReleaser/Homebrew release scaffolding, tag-based release workflow, and Go-based pi-mono-style release helper for version/changelog updates.
+- GoReleaser/Homebrew release scaffolding, tag-based release workflow, and Go-based pi-mono-style release helper with changelog context and release-time `[Unreleased]` validation.

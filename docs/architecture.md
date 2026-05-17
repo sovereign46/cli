@@ -434,4 +434,4 @@ brew install s46
 - GoReleaser
 - Homebrew tap
 - CI release workflow
-- Go-based pi-mono-style release script for version/changelog/tag flow
+- Go-based pi-mono-style release script for version/changelog/tag flow with changelog context output

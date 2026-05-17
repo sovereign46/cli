@@ -133,7 +133,13 @@ If `gofmt` is not found, Go is not on your `PATH`; install Go with Homebrew or a
 
 ## Releases
 
-Releases use the Go-based pi-mono-style helper. It requires a clean working tree, updates `VERSION`, `internal/version/version.go`, and `CHANGELOG.md`, runs tests, creates the release commit and tag, adds a fresh `[Unreleased]` section, commits again, then pushes `main` and the tag.
+Releases use the Go-based pi-mono-style helper. It requires a clean working tree, requires `[Unreleased]` changelog bullets, updates `VERSION`, `internal/version/version.go`, and `CHANGELOG.md`, runs tests, creates the release commit and tag, adds a fresh `[Unreleased]` section, commits again, then pushes `main` and the tag.
+
+Before releasing, generate changelog context for the diff from the last version/changelog edit to HEAD and add any missing user-facing entries:
+
+```sh
+make release-changelog-context
+```
 
 ```sh
 make release-patch
