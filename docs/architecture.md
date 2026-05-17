@@ -420,6 +420,7 @@ brew install s46
 - `use`
 - `doctor`
 - `version`
+- `update`
 - fake/dev backend support
 
 ### Phase 5: Pi integration
@@ -433,3 +434,4 @@ brew install s46
 - GoReleaser
 - Homebrew tap
 - CI release workflow
+- Go-based pi-mono-style release script for version/changelog/tag flow

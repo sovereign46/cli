@@ -77,6 +77,7 @@ s46 use <team>
 s46 doctor
 s46 status
 s46 version
+s46 update
 ```
 
 Responsibilities:

@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -22,6 +23,7 @@ import (
 	"github.com/sovereign46/s46-cli/internal/keyring"
 	"github.com/sovereign46/s46-cli/internal/output"
 	sessioncmd "github.com/sovereign46/s46-cli/internal/session"
+	"github.com/sovereign46/s46-cli/internal/updater"
 	"github.com/sovereign46/s46-cli/internal/version"
 )
 
@@ -82,6 +84,7 @@ func NewRootCommand(runtime Runtime) *cobra.Command {
 	root.AddCommand(whoamiCommand(runtime, opts))
 	root.AddCommand(tokenCommand(runtime, opts))
 	root.AddCommand(versionCommand(runtime, opts))
+	root.AddCommand(updateCommand(runtime, opts))
 	root.AddCommand(connectCommand(runtime, opts))
 	root.AddCommand(disconnectCommand(runtime, opts))
 	root.AddCommand(useCommand(runtime, opts))
@@ -262,6 +265,61 @@ func versionCommand(runtime Runtime, opts *options) *cobra.Command {
 			)
 		},
 	}
+}
+
+func updateCommand(runtime Runtime, opts *options) *cobra.Command {
+	return &cobra.Command{
+		Use:   "update",
+		Short: "check for updates using Homebrew-safe instructions",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			out := runtime.Stdout
+			if out == nil {
+				out = io.Discard
+			}
+			renderer := output.Renderer{JSON: opts.json, Out: out}
+			check, err := updater.Updater{CurrentVersion: version.Get().Version, Env: runtime.Env}.Check(cmd.Context())
+			if opts.json {
+				if errors.Is(err, updater.ErrCheckDisabled) || errors.Is(err, updater.ErrNoRelease) {
+					return renderer.WriteJSON(check)
+				}
+				if err != nil {
+					return err
+				}
+				return renderer.WriteJSON(check)
+			}
+			if errors.Is(err, updater.ErrCheckDisabled) {
+				return renderer.Lines("[s46] update check disabled")
+			}
+			if errors.Is(err, updater.ErrNoRelease) {
+				return renderer.Lines(renderUpdateCheck(check)...)
+			}
+			if err != nil {
+				return err
+			}
+			return renderer.Lines(renderUpdateCheck(check)...)
+		},
+	}
+}
+
+func renderUpdateCheck(check updater.CheckResult) []string {
+	if check.LatestVersion == "" {
+		return []string{"[s46] no release information available"}
+	}
+	if !check.Comparable {
+		return []string{
+			fmt.Sprintf("[s46] latest release: %s", check.LatestVersion),
+			fmt.Sprintf("[s46] current build version %q is not a released version", check.CurrentVersion),
+			fmt.Sprintf("[s46] update with: %s", check.Instruction),
+		}
+	}
+	if check.UpdateAvailable {
+		return []string{
+			fmt.Sprintf("[s46] update available: %s (current %s)", check.LatestVersion, check.CurrentVersion),
+			fmt.Sprintf("[s46] update with: %s", check.Instruction),
+		}
+	}
+	return []string{fmt.Sprintf("[s46] s46 is already up to date (%s)", check.CurrentVersion)}
 }
 
 func connectCommand(runtime Runtime, opts *options) *cobra.Command {

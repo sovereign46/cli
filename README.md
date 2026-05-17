@@ -53,6 +53,7 @@ s46 use <team>
 s46 doctor
 s46 status
 s46 version
+s46 update                         # check latest GitHub release and print Homebrew-safe upgrade command
 s46 sessions
 s46 detach <session>
 s46 resume <session>
@@ -96,6 +97,16 @@ Harness config written by `s46 connect`:
 
 Mutation commands support `--dry-run`. Existing harness config files are merged and backed up with `.s46-backup-<timestamp>` before writes.
 
+## Updates
+
+`s46 update` checks the latest GitHub release and follows Homebrew formula best practice: it does not replace a Homebrew-managed binary itself. For Homebrew installs it prints the package-manager command, normally:
+
+```sh
+brew upgrade s46
+```
+
+Set `S46_SKIP_UPDATE_CHECK=1` or `S46_OFFLINE=1` to disable release checks.
+
 ## Release
 
 GoReleaser configuration is in `.goreleaser.yml` and targets:
@@ -103,3 +114,13 @@ GoReleaser configuration is in `.goreleaser.yml` and targets:
 - macOS amd64/arm64
 - Linux amd64/arm64
 - Homebrew formula generation
+
+Release state is tracked in `VERSION` and `internal/version/version.go`. The Go release helper mirrors pi-mono's flow: verify a clean tree, bump the version, move `CHANGELOG.md` from `[Unreleased]` to `[x.y.z] - YYYY-MM-DD`, run tests, commit and tag, add a fresh `[Unreleased]` section, commit, and push. The pushed tag triggers `.github/workflows/release.yml` and GoReleaser.
+
+```sh
+make release-patch
+make release-minor
+make release-major
+# or an explicit version:
+go run ./scripts/release.go 0.2.0
+```

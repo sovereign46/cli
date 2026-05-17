@@ -130,3 +130,17 @@ gofmt -w cmd internal
 ```
 
 If `gofmt` is not found, Go is not on your `PATH`; install Go with Homebrew or add your Go toolchain to `PATH`.
+
+## Releases
+
+Releases use the Go-based pi-mono-style helper. It requires a clean working tree, updates `VERSION`, `internal/version/version.go`, and `CHANGELOG.md`, runs tests, creates the release commit and tag, adds a fresh `[Unreleased]` section, commits again, then pushes `main` and the tag.
+
+```sh
+make release-patch
+make release-minor
+make release-major
+# or:
+go run ./scripts/release.go 0.2.0
+```
+
+The pushed `v*.*.*` tag triggers `.github/workflows/release.yml` and GoReleaser. Set `GORELEASER_TOKEN` in GitHub secrets when the workflow must update the external Homebrew tap.
