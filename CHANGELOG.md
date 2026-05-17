@@ -9,6 +9,9 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 
 - Changed `s46 login` to print the device verification URL before polling and wait for approval/expiry instead of relying on dev-mode auto-approval.
+- Changed `s46 login` to report the existing authenticated user without starting a new device flow when valid credentials are already present.
+- Changed the default API client to use the production API unless a local shell/API base URL or explicit mock mode is configured.
+- Changed `make shell` to default `S46_API_BASE_URL` to `http://127.0.0.1:8080` so shell commands hit a local HTTP API instead of the mock backend.
 - Changed authenticated API calls for team and session operations to send bearer tokens after login.
 
 ### Fixed

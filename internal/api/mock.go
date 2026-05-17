@@ -50,26 +50,6 @@ func NewMockClient() *MockClient {
 	return &MockClient{Fixtures: DefaultMockFixtures}
 }
 
-func NewLocalMockClient(baseURL string) *MockClient {
-	origin, host := localMockOrigin(baseURL)
-	fixtures := DefaultMockFixtures
-	fixtures.Endpoint = origin
-	fixtures.VerificationURI = origin + "/device"
-	fixtures.DefaultBox = host
-	return &MockClient{Fixtures: fixtures}
-}
-
-func localMockOrigin(baseURL string) (string, string) {
-	if baseURL == "" {
-		baseURL = "http://127.0.0.1:8080"
-	}
-	parsed, err := url.Parse(strings.TrimRight(baseURL, "/"))
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return "http://127.0.0.1:8080", "127.0.0.1:8080"
-	}
-	return parsed.Scheme + "://" + parsed.Host, parsed.Host
-}
-
 func (c *MockClient) StartDeviceLogin(ctx context.Context) (DeviceLogin, error) {
 	fixtures := c.fixtures()
 	return DeviceLogin{

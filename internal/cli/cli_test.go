@@ -28,6 +28,7 @@ func testEnv(t *testing.T) map[string]string {
 		"XDG_DATA_HOME":       filepath.Join(home, ".data"),
 		"XDG_CACHE_HOME":      filepath.Join(home, ".cache"),
 		"S46_KEYRING_BACKEND": "file",
+		"S46_API_MODE":        "mock",
 		"S46_SHARE_BACKEND":   "mock",
 		"S46_MOCK_GIST_ID":    "0123456789abcdef0123456789abcdef",
 	}
@@ -135,6 +136,10 @@ func TestLoginTokenWhoamiLogout(t *testing.T) {
 	out := requireOK(t, run(t, env, "login"))
 	if !strings.Contains(out, "authenticated as dscape@acme.s46.dev") {
 		t.Fatalf("unexpected login output: %s", out)
+	}
+	second := requireOK(t, run(t, env, "login"))
+	if strings.Contains(second, "visit ") || !strings.Contains(second, "authenticated as dscape@acme.s46.dev") {
+		t.Fatalf("unexpected second login output: %s", second)
 	}
 	if got := strings.TrimSpace(requireOK(t, run(t, env, "whoami"))); got != "dscape@acme.s46.dev" {
 		t.Fatalf("whoami = %q", got)

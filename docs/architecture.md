@@ -7,67 +7,6 @@ Scope: local CLI client and its API boundary
 
 The current checked-in CLI is a Go/Cobra implementation with mocked backend behavior behind typed interfaces. The command surface, local config/state handling, harness adapters, keyring abstraction, tests, and release scaffolding are implemented in the architecture described below.
 
-## Recommended stack
-
-Use Go for the CLI.
-
-Reasons:
-
-- single static-ish binary for Homebrew distribution
-- good fit for file-system operations, subprocess execution, HTTP, WebSocket, and terminal UX
-- no runtime dependency on Node/Python/Ruby
-- predictable behavior on locked-down developer machines
-- mature cross-compilation and release tooling
-- straightforward integration with OS keychains
-
-Recommended libraries and tooling:
-
-| Concern | Choice |
-|---|---|
-| Language | Go |
-| CLI framework | Cobra |
-| Config/state serialization | JSON via Go stdlib |
-| Secrets | OS keychain through a small keyring wrapper |
-| HTTP API | Go `net/http` with typed client package |
-| WebSocket | `nhooyr.io/websocket` or Gorilla WebSocket when remote attach is implemented |
-| Terminal tables | small internal formatter first; add dependency only if needed |
-| Testing | Go `testing`, golden tests for CLI output |
-| Releases | GoReleaser |
-| Install | Homebrew tap |
-| CI | GitHub Actions |
-| License | BUSL if matching the website product claim |
-
-Avoid a TypeScript CLI for the first implementation unless npm distribution becomes the primary requirement. The product copy says `brew install s46`, and a single Go binary fits that path better.
-
-## High-level design
-
-`s46` is split into thin command handlers and testable internal packages.
-
-```txt
-s46-cli/
-  cmd/s46/
-    main.go
-  internal/
-    cli/          command construction, flags, command IO
-    config/       config paths, load/save, validation
-    auth/         login, refresh, token lifecycle
-    keyring/      OS credential storage abstraction
-    api/          Sovereign46 HTTP/WebSocket clients
-    harness/      harness adapters
-      claude/
-      codex/
-      pi/
-      standard/
-    session/      session commands and local session metadata
-    output/       text/json renderers
-  docs/
-    product.md
-    architecture.md
-  testdata/
-```
-
-The command layer should be boring. Each Cobra command should parse flags, call an internal service, and render the result. Mutating commands acquire an advisory workspace lock around config/state and harness-file mutations.
-
 ## Local files
 
 Use XDG-style paths by default:

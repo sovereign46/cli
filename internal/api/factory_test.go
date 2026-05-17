@@ -5,33 +5,41 @@ import (
 	"testing"
 )
 
-func TestDevShellUsesLocalMockURLs(t *testing.T) {
+func TestDevShellUsesLocalHTTPAPI(t *testing.T) {
 	client := NewClientFromEnv(map[string]string{"S46_DEV_SHELL": "1", "S46_DEV_BASE_URL": "http://127.0.0.1:8080"})
-	device, err := client.StartDeviceLogin(context.Background())
-	if err != nil {
-		t.Fatal(err)
+	httpClient, ok := client.(*HTTPClient)
+	if !ok {
+		t.Fatalf("client = %T, want *HTTPClient", client)
 	}
-	if device.VerificationURI != "http://127.0.0.1:8080/device" {
-		t.Fatalf("verification URI = %q", device.VerificationURI)
-	}
-	team, err := client.Team(context.Background(), "acme", TeamOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if team.Endpoint != "http://127.0.0.1:8080" {
-		t.Fatalf("team endpoint = %q", team.Endpoint)
-	}
-	sessions, err := client.Sessions(context.Background(), team, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(sessions) != 1 || sessions[0].Location != "127.0.0.1:8080" {
-		t.Fatalf("sessions = %#v", sessions)
+	if httpClient.BaseURL != "http://127.0.0.1:8080" {
+		t.Fatalf("base URL = %q", httpClient.BaseURL)
 	}
 }
 
-func TestDefaultMockUsesProductionURLs(t *testing.T) {
+func TestDevShellDefaultsToLocalHTTPAPI(t *testing.T) {
+	client := NewClientFromEnv(map[string]string{"S46_DEV_SHELL": "1"})
+	httpClient, ok := client.(*HTTPClient)
+	if !ok {
+		t.Fatalf("client = %T, want *HTTPClient", client)
+	}
+	if httpClient.BaseURL != DefaultDevelopmentBaseURL {
+		t.Fatalf("base URL = %q", httpClient.BaseURL)
+	}
+}
+
+func TestDefaultUsesProductionAPI(t *testing.T) {
 	client := NewClientFromEnv(nil)
+	httpClient, ok := client.(*HTTPClient)
+	if !ok {
+		t.Fatalf("client = %T, want *HTTPClient", client)
+	}
+	if httpClient.BaseURL != DefaultProductionBaseURL {
+		t.Fatalf("base URL = %q", httpClient.BaseURL)
+	}
+}
+
+func TestMockModeUsesProductionURLs(t *testing.T) {
+	client := NewClientFromEnv(map[string]string{"S46_API_MODE": "mock"})
 	device, err := client.StartDeviceLogin(context.Background())
 	if err != nil {
 		t.Fatal(err)

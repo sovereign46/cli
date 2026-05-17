@@ -50,7 +50,7 @@ go run ./cmd/s46 session land
 
 ## Test without touching real user config
 
-Recommended for manual testing: start the development shell. It builds a temporary `s46` binary, creates an isolated temporary `HOME`, and sets safe mock environment variables for you. The shell marks itself with `S46_DEV_SHELL=1`, defaults local mock URLs to `http://127.0.0.1:8080`, and preserves `S46_API_BASE_URL` when you want to point at a real local backend.
+Recommended for manual testing: start the development shell. It builds a temporary `s46` binary, creates an isolated temporary `HOME`, and sets safe local environment variables for you. The shell marks itself with `S46_DEV_SHELL=1` and defaults `S46_API_BASE_URL` to `http://127.0.0.1:8080`, so commands use a local HTTP API unless you override the base URL.
 
 ```sh
 make shell

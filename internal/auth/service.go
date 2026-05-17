@@ -38,6 +38,12 @@ func (s Service) Login(ctx context.Context, userHint string, teamHint string) (L
 }
 
 func (s Service) LoginWithDeviceCallback(ctx context.Context, userHint string, teamHint string, onDevice DeviceCallback) (LoginResult, error) {
+	if userHint == "" && teamHint == "" {
+		if result, ok := s.currentLogin(ctx); ok {
+			return result, nil
+		}
+	}
+
 	device, err := s.API.StartDeviceLogin(ctx)
 	if err != nil {
 		return LoginResult{}, err
@@ -96,6 +102,42 @@ func (s Service) LoginWithDeviceCallback(ctx context.Context, userHint string, t
 		ExpiresAt:       tokens.ExpiresAt,
 		Mock:            true,
 	}, nil
+}
+
+func (s Service) currentLogin(ctx context.Context) (LoginResult, bool) {
+	if s.Keyring == nil {
+		return LoginResult{}, false
+	}
+	state, err := s.Config.LoadState()
+	if err != nil || !state.Authenticated || state.CurrentUser == "" {
+		return LoginResult{}, false
+	}
+	tokens, err := s.loadTokens(ctx, state.CurrentUser)
+	if err != nil || tokens.AccessToken == "" {
+		return LoginResult{}, false
+	}
+	if !tokens.ExpiresAt.IsZero() && time.Until(tokens.ExpiresAt) < 30*time.Second {
+		if tokens.RefreshToken == "" {
+			return LoginResult{}, false
+		}
+		tokens, err = s.API.RefreshToken(ctx, tokens.RefreshToken, state.CurrentUser)
+		if err != nil || tokens.AccessToken == "" {
+			return LoginResult{}, false
+		}
+		if err := s.storeTokens(ctx, tokens); err != nil {
+			return LoginResult{}, false
+		}
+	}
+	cfg, err := s.Config.LoadConfig()
+	if err != nil {
+		return LoginResult{}, false
+	}
+	return LoginResult{
+		Authenticated: true,
+		User:          state.CurrentUser,
+		Team:          cfg.ActiveTeam,
+		ExpiresAt:     tokens.ExpiresAt,
+	}, true
 }
 
 func (s Service) pollDeviceLogin(ctx context.Context, device api.DeviceLogin, userHint string) (api.TokenSet, error) {
