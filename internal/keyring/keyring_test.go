@@ -1,26 +1,27 @@
 package keyring
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 )
 
 func TestFileStore(t *testing.T) {
 	store := FileStore{Path: filepath.Join(t.TempDir(), "keyring.json")}
-	if err := store.Set("s46.tokens", "dscape@acme.s46.dev", "secret"); err != nil {
+	if err := store.Set(context.Background(), "s46.tokens", "dscape@acme.s46.dev", "secret"); err != nil {
 		t.Fatal(err)
 	}
-	value, err := store.Get("s46.tokens", "dscape@acme.s46.dev")
+	value, err := store.Get(context.Background(), "s46.tokens", "dscape@acme.s46.dev")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if value != "secret" {
 		t.Fatalf("value = %q", value)
 	}
-	if err := store.Delete("s46.tokens", "dscape@acme.s46.dev"); err != nil {
+	if err := store.Delete(context.Background(), "s46.tokens", "dscape@acme.s46.dev"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Get("s46.tokens", "dscape@acme.s46.dev"); err == nil {
+	if _, err := store.Get(context.Background(), "s46.tokens", "dscape@acme.s46.dev"); err == nil {
 		t.Fatal("expected missing credential after delete")
 	}
 }

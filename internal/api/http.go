@@ -11,13 +11,20 @@ import (
 	"time"
 )
 
+const DefaultHTTPTimeout = 30 * time.Second
+
 type HTTPClient struct {
 	BaseURL string
 	Client  *http.Client
+	Timeout time.Duration
 }
 
 func NewHTTPClient(baseURL string) *HTTPClient {
-	return &HTTPClient{BaseURL: strings.TrimRight(baseURL, "/"), Client: http.DefaultClient}
+	return &HTTPClient{
+		BaseURL: strings.TrimRight(baseURL, "/"),
+		Client:  &http.Client{Timeout: DefaultHTTPTimeout},
+		Timeout: DefaultHTTPTimeout,
+	}
 }
 
 func (c *HTTPClient) StartDeviceLogin(ctx context.Context) (DeviceLogin, error) {
@@ -96,6 +103,12 @@ func (c *HTTPClient) Resume(ctx context.Context, req ResumeRequest) (Session, er
 	return session, err
 }
 
+func (c *HTTPClient) Attach(ctx context.Context, req AttachRequest) (AttachResult, error) {
+	var result AttachResult
+	err := c.do(ctx, http.MethodPost, "/v1/sessions/"+url.PathEscape(req.SessionID)+"/attach", "", req, &result)
+	return result, err
+}
+
 func (c *HTTPClient) Land(ctx context.Context, req LandRequest) (LandResult, error) {
 	var result LandResult
 	err := c.do(ctx, http.MethodPost, "/v1/sessions/"+url.PathEscape(req.SessionID)+"/land", "", req, &result)
@@ -103,6 +116,15 @@ func (c *HTTPClient) Land(ctx context.Context, req LandRequest) (LandResult, err
 }
 
 func (c *HTTPClient) do(ctx context.Context, method string, endpoint string, bearer string, body any, target any) error {
+	if _, ok := ctx.Deadline(); !ok {
+		timeout := c.Timeout
+		if timeout == 0 {
+			timeout = DefaultHTTPTimeout
+		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
 	var reader *bytes.Reader
 	if body == nil {
 		reader = bytes.NewReader(nil)
@@ -126,7 +148,7 @@ func (c *HTTPClient) do(ctx context.Context, method string, endpoint string, bea
 	}
 	client := c.Client
 	if client == nil {
-		client = http.DefaultClient
+		client = &http.Client{Timeout: DefaultHTTPTimeout}
 	}
 	response, err := client.Do(request)
 	if err != nil {

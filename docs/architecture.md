@@ -66,7 +66,7 @@ s46-cli/
   testdata/
 ```
 
-The command layer should be boring. Each Cobra command should parse flags, call an internal service, and render the result.
+The command layer should be boring. Each Cobra command should parse flags, call an internal service, and render the result. Mutating commands acquire an advisory workspace lock around config/state and harness-file mutations.
 
 ## Local files
 
@@ -162,7 +162,6 @@ Global flags:
 --json
 --verbose
 --dry-run
---no-color
 ```
 
 `--dry-run` should be available for commands that mutate local config or remote state. It may be rejected for commands where it does not make sense.
@@ -184,6 +183,7 @@ GET  /v1/teams/{team}
 GET  /v1/sessions
 POST /v1/sessions/{id}/detach
 POST /v1/sessions/{id}/resume
+POST /v1/sessions/{id}/attach
 POST /v1/sessions/{id}/land
 ```
 
@@ -214,6 +214,7 @@ type Adapter interface {
 
 For any command that writes user-owned config:
 
+0. Acquire the S46 advisory lock under `~/.cache/s46/lock`.
 1. Read the existing file.
 2. Parse it into the target format.
 3. Merge S46 settings into the existing config, preserving unrelated settings, like adding/updating a Git remote.
@@ -287,9 +288,9 @@ Expected behavior:
 
 Session IDs use the website shape `@user/slug`. CLI-generated slugs should be readable but include a cryptographically random suffix to avoid collisions and make guessing impractical.
 
-`share` follows Pi's approach: export the session to HTML, create a secret GitHub gist, and return a viewer URL. For S46, the viewer should live under the tenant endpoint, for example `https://acme.s46.dev/session/#<gist-id>`. The current CLI mocks this flow.
+`share` follows Pi's approach: export the session to HTML, create a secret GitHub gist, and return a viewer URL. For S46, the viewer should live under the tenant endpoint, for example `https://acme.s46.dev/session/#<gist-id>`. Tests can select a deterministic mock share backend with `S46_SHARE_BACKEND=mock`.
 
-`session land` should minimize developer work without bypassing review. It should prepare review-ready metadata: branch name, session summary, harness/model/cost provenance, checklist, and suggested PR commands.
+`session land` should minimize developer work without bypassing review. It should prepare review-ready metadata: branch name, session summary, harness/model/cost provenance, local Git metadata where available, checklist, and suggested PR commands.
 
 The CLI should not fake remote execution. Until backend support exists, these commands should either call a mock/dev API or return a clear `not implemented against real backend` error.
 
@@ -415,6 +416,10 @@ brew install s46
 - `resume`
 - `share`
 - `session land`
+- `disconnect`
+- `use`
+- `doctor`
+- `version`
 - fake/dev backend support
 
 ### Phase 5: Pi integration

@@ -25,6 +25,8 @@ func testEnv(t *testing.T) map[string]string {
 		"XDG_DATA_HOME":       filepath.Join(home, ".data"),
 		"XDG_CACHE_HOME":      filepath.Join(home, ".cache"),
 		"S46_KEYRING_BACKEND": "file",
+		"S46_SHARE_BACKEND":   "mock",
+		"S46_MOCK_GIST_ID":    "0123456789abcdef0123456789abcdef",
 	}
 }
 
@@ -81,9 +83,7 @@ func TestConnectClaudeDryRunAndWrite(t *testing.T) {
 	env := testEnv(t)
 	requireOK(t, run(t, env, "login"))
 	out := requireOK(t, run(t, env, "connect", "acme", "--harness=claude-code", "--dry-run"))
-	if !strings.Contains(out, "dry-run: would connect acme") || !strings.Contains(out, "https://acme.s46.dev/anthropic") {
-		t.Fatalf("unexpected dry run output:\n%s", out)
-	}
+	assertGolden(t, "connect-claude-dry-run.golden", out)
 	settingsPath := filepath.Join(env["HOME"], ".claude", "settings.json")
 	if _, err := os.Stat(settingsPath); !os.IsNotExist(err) {
 		t.Fatalf("dry-run wrote settings")
@@ -102,6 +102,8 @@ func TestConnectClaudeDryRunAndWrite(t *testing.T) {
 
 func TestConnectCodexAndPi(t *testing.T) {
 	env := testEnv(t)
+	assertGolden(t, "connect-codex-dry-run.golden", requireOK(t, run(t, env, "connect", "acme", "--harness=codex", "--dry-run")))
+	assertGolden(t, "connect-pi-dry-run.golden", requireOK(t, run(t, env, "connect", "acme", "--harness=pi", "--dry-run")))
 	requireOK(t, run(t, env, "login"))
 	requireOK(t, run(t, env, "connect", "acme", "--harness=codex"))
 	codexConfig, err := os.ReadFile(filepath.Join(env["HOME"], ".codex", "config.toml"))
@@ -133,6 +135,7 @@ func TestStatusModeSessionsAndShare(t *testing.T) {
 	requireOK(t, run(t, env, "login"))
 	requireOK(t, run(t, env, "connect", "acme", "--harness=standard"))
 	requireOK(t, run(t, env, "mode", "--set", "local"))
+	assertGolden(t, "status.golden", requireOK(t, run(t, env, "status")))
 	statusRaw := requireOK(t, run(t, env, "status", "--json"))
 	var status struct {
 		ActiveTeam string `json:"activeTeam"`
@@ -148,10 +151,13 @@ func TestStatusModeSessionsAndShare(t *testing.T) {
 	if status.ActiveTeam != "acme" || status.Team.Endpoint != "https://acme.s46.dev" || status.Team.Mode != "local" || status.Team.DefaultHarness != "standard" {
 		t.Fatalf("unexpected status: %s", statusRaw)
 	}
-	if out := requireOK(t, run(t, env, "sessions")); !strings.Contains(out, "@dscape/auth-redirect-fix") {
-		t.Fatalf("sessions missing default: %s", out)
+	sessions := requireOK(t, run(t, env, "sessions"))
+	assertGolden(t, "sessions.golden", sessions)
+	if !strings.Contains(sessions, "@dscape/auth-redirect-fix") {
+		t.Fatalf("sessions missing default: %s", sessions)
 	}
 	share := requireOK(t, run(t, env, "share", "@dscape/auth-redirect-fix"))
+	assertGolden(t, "share.golden", share)
 	if !regexp.MustCompile(`Share URL: https://acme\.s46\.dev/session/#[a-f0-9]{32}`).MatchString(share) {
 		t.Fatalf("unexpected share output:\n%s", share)
 	}
@@ -184,10 +190,23 @@ func TestSessionLifecycleAndRunSlug(t *testing.T) {
 	}
 }
 
-func TestBackupsBeforeOverwrite(t *testing.T) {
+func TestBackupsBeforeOverwriteAndIdempotency(t *testing.T) {
 	env := testEnv(t)
 	requireOK(t, run(t, env, "login"))
 	requireOK(t, run(t, env, "connect", "acme", "--harness=claude-code"))
+	settingsPath := filepath.Join(env["HOME"], ".claude", "settings.json")
+	first, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireOK(t, run(t, env, "connect", "acme", "--harness=claude-code"))
+	second, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(first) != string(second) {
+		t.Fatalf("connect is not idempotent\nfirst=%s\nsecond=%s", first, second)
+	}
 	requireOK(t, run(t, env, "connect", "acme", "--harness=claude-code", "--model=s46/qwen3-coder"))
 	entries, err := os.ReadDir(filepath.Join(env["HOME"], ".claude"))
 	if err != nil {
@@ -199,8 +218,42 @@ func TestBackupsBeforeOverwrite(t *testing.T) {
 			backups++
 		}
 	}
-	if backups != 1 {
-		t.Fatalf("expected 1 backup, got %d", backups)
+	if backups != 2 {
+		t.Fatalf("expected 2 backups after two overwrites, got %d", backups)
+	}
+}
+
+func TestDisconnectUseDoctorAndModeRequireActiveTeam(t *testing.T) {
+	env := testEnv(t)
+	if result := run(t, env, "mode", "--set", "local"); result.err == nil || !strings.Contains(result.err.Error(), "no active team") {
+		t.Fatalf("expected no active team error, got %#v", result)
+	}
+	requireOK(t, run(t, env, "login"))
+	requireOK(t, run(t, env, "connect", "acme", "--harness=claude-code"))
+	if out := requireOK(t, run(t, env, "doctor")); !strings.Contains(out, "[ok] tenant") || !strings.Contains(out, "[ok] harness") {
+		t.Fatalf("unexpected doctor output: %s", out)
+	}
+	requireOK(t, run(t, env, "use", "acme"))
+	settingsPath := filepath.Join(env["HOME"], ".claude", "settings.json")
+	requireOK(t, run(t, env, "disconnect", "acme", "--harness=claude-code"))
+	settings := map[string]any{}
+	readJSON(t, settingsPath, &settings)
+	if _, ok := settings["apiKeyHelper"]; ok {
+		t.Fatalf("disconnect left apiKeyHelper: %#v", settings)
+	}
+	if result := run(t, env, "use", "acme"); result.err == nil || !strings.Contains(result.err.Error(), "not connected") {
+		t.Fatalf("expected use failure after disconnect, got %#v", result)
+	}
+}
+
+func assertGolden(t *testing.T, name string, got string) {
+	t.Helper()
+	golden, err := os.ReadFile(filepath.Join("..", "..", "testdata", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != string(golden) {
+		t.Fatalf("golden %s mismatch\n--- got ---\n%s\n--- want ---\n%s", name, got, string(golden))
 	}
 }
 

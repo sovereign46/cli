@@ -30,6 +30,16 @@ func (a Adapter) PlanConnect(ctx context.Context, req harness.ConnectRequest) (h
 	}, nil
 }
 
+func (a Adapter) PlanDisconnect(ctx context.Context, req harness.DisconnectRequest) (harness.Plan, error) {
+	return harness.Plan{
+		Harness:    "standard",
+		Title:      "Disconnect direct s46 runner",
+		Env:        req.Env,
+		Summary:    "harness: s46 (no third-party harness config)",
+		Operations: []string{"remove team/default harness from s46 config only"},
+	}, nil
+}
+
 func (a Adapter) ApplyConnect(ctx context.Context, plan harness.Plan) (harness.AppliedPlan, error) {
 	return harness.AppliedPlan{Plan: plan}, nil
 }

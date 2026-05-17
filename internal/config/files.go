@@ -83,7 +83,7 @@ func BackupIfExists(path string) (string, error) {
 }
 
 func Timestamp(t time.Time) string {
-	return t.UTC().Format("20060102T150405Z")
+	return t.UTC().Format("20060102T150405.000000000Z")
 }
 
 func ReadTextIfExists(path string) (string, error) {

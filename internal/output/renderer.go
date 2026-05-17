@@ -9,6 +9,11 @@ import (
 	"github.com/sovereign46/s46-cli/internal/harness"
 )
 
+type Interface interface {
+	WriteJSON(value any) error
+	Lines(lines ...string) error
+}
+
 type Renderer struct {
 	JSON bool
 	Out  io.Writer
@@ -41,14 +46,37 @@ func SimpleDiff(oldContent []byte, newContent []byte) []string {
 	if string(oldContent) == string(newContent) {
 		return []string{"  no changes"}
 	}
-	lines := []string{}
 	oldLines := splitLines(oldContent)
 	newLines := splitLines(newContent)
-	for _, line := range oldLines {
-		lines = append(lines, "-"+line)
+	lcs := make([][]int, len(oldLines)+1)
+	for i := range lcs {
+		lcs[i] = make([]int, len(newLines)+1)
 	}
-	for _, line := range newLines {
-		lines = append(lines, "+"+line)
+	for i := len(oldLines) - 1; i >= 0; i-- {
+		for j := len(newLines) - 1; j >= 0; j-- {
+			if oldLines[i] == newLines[j] {
+				lcs[i][j] = lcs[i+1][j+1] + 1
+			} else if lcs[i+1][j] >= lcs[i][j+1] {
+				lcs[i][j] = lcs[i+1][j]
+			} else {
+				lcs[i][j] = lcs[i][j+1]
+			}
+		}
+	}
+	lines := []string{fmt.Sprintf("@@ -1,%d +1,%d @@", len(oldLines), len(newLines))}
+	for i, j := 0, 0; i < len(oldLines) || j < len(newLines); {
+		switch {
+		case i < len(oldLines) && j < len(newLines) && oldLines[i] == newLines[j]:
+			lines = append(lines, " "+oldLines[i])
+			i++
+			j++
+		case j < len(newLines) && (i == len(oldLines) || lcs[i][j+1] >= lcs[i+1][j]):
+			lines = append(lines, "+"+newLines[j])
+			j++
+		case i < len(oldLines):
+			lines = append(lines, "-"+oldLines[i])
+			i++
+		}
 	}
 	return lines
 }

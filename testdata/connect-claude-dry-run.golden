@@ -1,0 +1,22 @@
+[s46] dry-run: would connect acme
+[s46] team:    acme · lane: EU-OPO · endpoint: https://acme.s46.dev
+[s46] Configure Claude Code for Sovereign46
+[s46] harness: claude-code (would write ~/.claude/settings.json)
+  - set apiKeyHelper to 's46 token --refresh'
+  - set ANTHROPIC_BASE_URL to https://acme.s46.dev/anthropic
+  - set default Claude model aliases to s46/kimi-k2.6
+
+--- ~/.claude/settings.json
++++ ~/.claude/settings.json
+@@ -1,0 +1,9 @@
++{
++  "apiKeyHelper": "s46 token --refresh",
++  "env": {
++    "ANTHROPIC_BASE_URL": "https://acme.s46.dev/anthropic",
++    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "s46/kimi-k2.6",
++    "ANTHROPIC_DEFAULT_OPUS_MODEL": "s46/kimi-k2.6",
++    "ANTHROPIC_DEFAULT_SONNET_MODEL": "s46/kimi-k2.6"
++  }
++}
+
+[s46] dry-run: no files written

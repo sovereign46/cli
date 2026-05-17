@@ -24,6 +24,7 @@ type Client interface {
 	Sessions(ctx context.Context, team Team) ([]Session, error)
 	Detach(ctx context.Context, req DetachRequest) (Session, error)
 	Resume(ctx context.Context, req ResumeRequest) (Session, error)
+	Attach(ctx context.Context, req AttachRequest) (AttachResult, error)
 	Land(ctx context.Context, req LandRequest) (LandResult, error)
 }
 
@@ -86,6 +87,16 @@ type DetachRequest struct {
 type ResumeRequest struct {
 	SessionID string  `json:"sessionId"`
 	Session   Session `json:"session"`
+}
+
+type AttachRequest struct {
+	SessionID string `json:"sessionId"`
+}
+
+type AttachResult struct {
+	SessionID string `json:"sessionId"`
+	URL       string `json:"url"`
+	Protocol  string `json:"protocol"`
 }
 
 type LandRequest struct {

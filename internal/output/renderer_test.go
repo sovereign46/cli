@@ -10,8 +10,8 @@ func TestTable(t *testing.T) {
 }
 
 func TestSimpleDiff(t *testing.T) {
-	lines := SimpleDiff([]byte("old\n"), []byte("new\n"))
-	if len(lines) != 2 || lines[0] != "-old" || lines[1] != "+new" {
+	lines := SimpleDiff([]byte("keep\nold\n"), []byte("keep\nnew\n"))
+	if len(lines) != 4 || lines[0] != "@@ -1,2 +1,2 @@" || lines[1] != " keep" || lines[2] != "+new" || lines[3] != "-old" {
 		t.Fatalf("unexpected diff: %#v", lines)
 	}
 	unchanged := SimpleDiff([]byte("same\n"), []byte("same\n"))

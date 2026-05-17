@@ -1,0 +1,27 @@
+[s46] dry-run: would connect acme
+[s46] team:    acme · lane: EU-OPO · endpoint: https://acme.s46.dev
+[s46] Configure Codex profile for Sovereign46
+[s46] harness: codex (would write ~/.codex/config.toml, profile: s46)
+  - add or replace [model_providers.s46]
+  - add or replace [profiles.s46]
+  - set token_helper to 's46 token --refresh'
+  - set model to s46/kimi-k2.6
+
+--- ~/.codex/config.toml
++++ ~/.codex/config.toml
+@@ -1,0 +1,13 @@
++# BEGIN s46
++# checksum: sha256:6a8cb441443306dfe1ab14b5b4f344e269729034bd0e4daa1e04cb8339aa5a23
++[model_providers.s46]
++name = "Sovereign46"
++base_url = "https://acme.s46.dev/codex"
++wire_api = "responses"
++token_helper = "s46 token --refresh"
++
++[profiles.s46]
++model_provider = "s46"
++model = "s46/kimi-k2.6"
++approval_policy = "on-request"
++# END s46
+
+[s46] dry-run: no files written

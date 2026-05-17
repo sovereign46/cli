@@ -5,6 +5,10 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"html"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -41,47 +45,46 @@ type RunResult struct {
 }
 
 func (s Service) List(ctx context.Context) ([]api.Session, error) {
-	cfg, state, _, teamConfig, team, err := s.contextState()
-	_ = cfg
+	ctxState, err := s.contextState()
 	if err != nil {
 		return nil, err
 	}
-	if len(state.Sessions) > 0 {
-		sessions := make([]api.Session, 0, len(state.Sessions))
-		for _, session := range state.Sessions {
+	if len(ctxState.State.Sessions) > 0 {
+		sessions := make([]api.Session, 0, len(ctxState.State.Sessions))
+		for _, session := range ctxState.State.Sessions {
 			sessions = append(sessions, session)
 		}
 		sort.Slice(sessions, func(i, j int) bool { return sessions[i].ID < sessions[j].ID })
 		return sessions, nil
 	}
-	sessions, err := s.API.Sessions(ctx, team)
+	sessions, err := s.API.Sessions(ctx, ctxState.Team)
 	if err != nil {
 		return nil, err
 	}
 	for i := range sessions {
-		if teamConfig.DefaultHarness != "" {
-			sessions[i].Harness = teamConfig.DefaultHarness
+		if ctxState.TeamConfig.DefaultHarness != "" {
+			sessions[i].Harness = ctxState.TeamConfig.DefaultHarness
 		}
 	}
 	return sessions, nil
 }
 
 func (s Service) Detach(ctx context.Context, sessionID string, harness string, box string, dryRun bool) (api.Session, error) {
-	_, state, _, teamConfig, team, err := s.contextState()
+	ctxState, err := s.contextState()
 	if err != nil {
 		return api.Session{}, err
 	}
-	existing := findOrDefault(state, sessionID, team, teamConfig)
+	existing := findOrDefault(ctxState.State, sessionID, ctxState.Team, ctxState.TeamConfig)
 	if harness == "" {
 		harness = existing.Harness
 	}
-	result, err := s.API.Detach(ctx, api.DetachRequest{SessionID: sessionID, Harness: harness, Box: box, Team: team})
+	result, err := s.API.Detach(ctx, api.DetachRequest{SessionID: sessionID, Harness: harness, Box: box, Team: ctxState.Team})
 	if err != nil {
 		return api.Session{}, err
 	}
 	if !dryRun {
-		state.Sessions[sessionID] = result
-		if err := s.Config.SaveState(state); err != nil {
+		ctxState.State.Sessions[sessionID] = result
+		if err := s.Config.SaveState(ctxState.State); err != nil {
 			return api.Session{}, err
 		}
 	}
@@ -89,19 +92,19 @@ func (s Service) Detach(ctx context.Context, sessionID string, harness string, b
 }
 
 func (s Service) Resume(ctx context.Context, sessionID string, dryRun bool) (api.Session, string, error) {
-	_, state, _, teamConfig, team, err := s.contextState()
+	ctxState, err := s.contextState()
 	if err != nil {
 		return api.Session{}, "", err
 	}
-	existing := findOrDefault(state, sessionID, team, teamConfig)
+	existing := findOrDefault(ctxState.State, sessionID, ctxState.Team, ctxState.TeamConfig)
 	previous := existing.Location
 	result, err := s.API.Resume(ctx, api.ResumeRequest{SessionID: sessionID, Session: existing})
 	if err != nil {
 		return api.Session{}, "", err
 	}
 	if !dryRun {
-		state.Sessions[sessionID] = result
-		if err := s.Config.SaveState(state); err != nil {
+		ctxState.State.Sessions[sessionID] = result
+		if err := s.Config.SaveState(ctxState.State); err != nil {
 			return api.Session{}, "", err
 		}
 	}
@@ -109,29 +112,16 @@ func (s Service) Resume(ctx context.Context, sessionID string, dryRun bool) (api
 }
 
 func (s Service) Share(ctx context.Context, sessionID string, dryRun bool) (ShareResult, error) {
-	_, state, _, _, team, err := s.contextState()
+	ctxState, err := s.contextState()
 	if err != nil {
 		return ShareResult{}, err
 	}
-	gistID := ""
-	if existing, ok := state.Shares[sessionID]; ok {
-		gistID = existing.GistID
-	}
-	if gistID == "" {
-		gistID = secureToken(16)
-	}
-	result := ShareResult{
-		ID:         sessionID,
-		ViewerURL:  fmt.Sprintf("%s/session/#%s", team.Endpoint, gistID),
-		GistURL:    fmt.Sprintf("https://gist.github.com/s46-mock/%s", gistID),
-		GistID:     gistID,
-		Visibility: "secret",
-		Format:     "html",
-		DryRun:     dryRun,
-		Mock:       true,
+	result, err := s.buildShare(ctx, ctxState, sessionID, dryRun)
+	if err != nil {
+		return ShareResult{}, err
 	}
 	if !dryRun {
-		state.Shares[sessionID] = config.Share{
+		ctxState.State.Shares[sessionID] = config.Share{
 			ID:         result.ID,
 			ViewerURL:  result.ViewerURL,
 			GistURL:    result.GistURL,
@@ -140,58 +130,121 @@ func (s Service) Share(ctx context.Context, sessionID string, dryRun bool) (Shar
 			Format:     result.Format,
 			Mock:       true,
 		}
-		if err := s.Config.SaveState(state); err != nil {
+		if err := s.Config.SaveState(ctxState.State); err != nil {
 			return ShareResult{}, err
 		}
 	}
 	return result, nil
 }
 
+func (s Service) buildShare(ctx context.Context, ctxState workspaceContext, sessionID string, dryRun bool) (ShareResult, error) {
+	if s.Config.Env["S46_SHARE_BACKEND"] == "mock" || dryRun {
+		return s.mockShare(ctxState, sessionID, dryRun), nil
+	}
+	return s.ghShare(ctx, ctxState, sessionID, dryRun)
+}
+
+func (s Service) mockShare(ctxState workspaceContext, sessionID string, dryRun bool) ShareResult {
+	gistID := ""
+	if existing, ok := ctxState.State.Shares[sessionID]; ok {
+		gistID = existing.GistID
+	}
+	if gistID == "" {
+		gistID = s.Config.Env["S46_MOCK_GIST_ID"]
+	}
+	if gistID == "" {
+		gistID = secureToken(16)
+	}
+	return ShareResult{ID: sessionID, ViewerURL: fmt.Sprintf("%s/session/#%s", ctxState.Team.Endpoint, gistID), GistURL: fmt.Sprintf("https://gist.github.com/s46-mock/%s", gistID), GistID: gistID, Visibility: "secret", Format: "html", DryRun: dryRun, Mock: true}
+}
+
+func (s Service) ghShare(ctx context.Context, ctxState workspaceContext, sessionID string, dryRun bool) (ShareResult, error) {
+	if out, err := exec.CommandContext(ctx, "gh", "auth", "status").CombinedOutput(); err != nil {
+		return ShareResult{}, fmt.Errorf("GitHub CLI is not logged in or unavailable; run `gh auth login` first: %s", strings.TrimSpace(string(out)))
+	}
+	session := findOrDefault(ctxState.State, sessionID, ctxState.Team, ctxState.TeamConfig)
+	tmpDir, err := os.MkdirTemp("", "s46-share-*")
+	if err != nil {
+		return ShareResult{}, err
+	}
+	defer os.RemoveAll(tmpDir)
+	htmlPath := filepath.Join(tmpDir, "session.html")
+	if err := os.WriteFile(htmlPath, []byte(renderShareHTML(session)), 0o600); err != nil {
+		return ShareResult{}, err
+	}
+	out, err := exec.CommandContext(ctx, "gh", "gist", "create", "--public=false", htmlPath).CombinedOutput()
+	if err != nil {
+		return ShareResult{}, fmt.Errorf("failed to create secret gist: %s", strings.TrimSpace(string(out)))
+	}
+	gistURL := strings.TrimSpace(string(out))
+	gistID := gistURL[strings.LastIndex(gistURL, "/")+1:]
+	if gistID == "" || gistID == gistURL {
+		return ShareResult{}, fmt.Errorf("failed to parse gist id from gh output %q", gistURL)
+	}
+	return ShareResult{ID: sessionID, ViewerURL: fmt.Sprintf("%s/session/#%s", ctxState.Team.Endpoint, gistID), GistURL: gistURL, GistID: gistID, Visibility: "secret", Format: "html", DryRun: dryRun, Mock: false}, nil
+}
+
+func renderShareHTML(session api.Session) string {
+	return fmt.Sprintf(`<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>s46 session %s</title></head>
+<body><main><h1>%s</h1><dl><dt>State</dt><dd>%s</dd><dt>Harness</dt><dd>%s</dd><dt>Location</dt><dd>%s</dd><dt>Model</dt><dd>%s</dd><dt>Cost</dt><dd>%s</dd></dl><pre>%s</pre></main></body></html>
+`, html.EscapeString(session.ID), html.EscapeString(session.ID), html.EscapeString(session.State), html.EscapeString(session.Harness), html.EscapeString(session.Location), html.EscapeString(session.Model), html.EscapeString(session.Spent), html.EscapeString(session.Task))
+}
+
 func (s Service) Land(ctx context.Context, sessionID string, title string) (api.LandResult, error) {
-	_, state, _, teamConfig, team, err := s.contextState()
+	ctxState, err := s.contextState()
 	if err != nil {
 		return api.LandResult{}, err
 	}
-	session := findOrDefault(state, sessionID, team, teamConfig)
-	return s.API.Land(ctx, api.LandRequest{SessionID: sessionID, Session: session, Team: team, Title: title})
+	session := findOrDefault(ctxState.State, sessionID, ctxState.Team, ctxState.TeamConfig)
+	result, err := s.API.Land(ctx, api.LandRequest{SessionID: sessionID, Session: session, Team: ctxState.Team, Title: title})
+	if err != nil {
+		return api.LandResult{}, err
+	}
+	return enrichLandWithGit(ctx, result), nil
 }
 
 func (s Service) Run(ctx context.Context, task string, model string, sessionID string, dryRun bool) (RunResult, error) {
-	_, state, _, teamConfig, team, err := s.contextState()
+	ctxState, err := s.contextState()
 	if err != nil {
 		return RunResult{}, err
 	}
 	if model == "" {
-		model = team.DefaultModel
+		model = ctxState.Team.DefaultModel
 	}
 	if sessionID == "" {
-		sessionID = IDForTask(state.CurrentUser, task)
+		sessionID = IDForTask(ctxState.State.CurrentUser, task)
 	}
 	location := "local"
-	if team.Mode == "local" {
+	if ctxState.Team.Mode == "local" {
 		location = "localhost"
 	}
-	result := RunResult{ID: sessionID, Task: task, State: "running", Location: location, Harness: "s46", Model: model, Lane: team.Lane, DryRun: dryRun}
+	result := RunResult{ID: sessionID, Task: task, State: "mocked", Location: location, Harness: "s46", Model: model, Lane: ctxState.Team.Lane, DryRun: dryRun}
 	if !dryRun {
-		state.Sessions[sessionID] = api.Session{ID: sessionID, State: "running", Harness: "s46", Location: location, Lane: team.Lane, Model: model, Age: "0m", Spent: "€0.00", Task: task}
-		if teamConfig.DefaultHarness == "" {
-			teamConfig.DefaultHarness = "standard"
-		}
-		if err := s.Config.SaveState(state); err != nil {
+		ctxState.State.Sessions[sessionID] = api.Session{ID: sessionID, State: "mocked", Harness: "s46", Location: location, Lane: ctxState.Team.Lane, Model: model, Age: "0m", Spent: "€0.00", Task: task}
+		if err := s.Config.SaveState(ctxState.State); err != nil {
 			return RunResult{}, err
 		}
 	}
 	return result, nil
 }
 
-func (s Service) contextState() (config.Config, config.State, string, config.TeamConfig, api.Team, error) {
+type workspaceContext struct {
+	Config     config.Config
+	State      config.State
+	TeamName   string
+	TeamConfig config.TeamConfig
+	Team       api.Team
+}
+
+func (s Service) contextState() (workspaceContext, error) {
 	cfg, err := s.Config.LoadConfig()
 	if err != nil {
-		return config.Config{}, config.State{}, "", config.TeamConfig{}, api.Team{}, err
+		return workspaceContext{}, err
 	}
 	state, err := s.Config.LoadState()
 	if err != nil {
-		return config.Config{}, config.State{}, "", config.TeamConfig{}, api.Team{}, err
+		return workspaceContext{}, err
 	}
 	teamName := cfg.ActiveTeam
 	if teamName == "" {
@@ -201,8 +254,13 @@ func (s Service) contextState() (config.Config, config.State, string, config.Tea
 	if teamConfig.Endpoint == "" {
 		teamConfig = config.TeamConfigFromAPI(api.Team{Name: teamName, Endpoint: fmt.Sprintf("https://%s.s46.dev", teamName), Lane: "EU-OPO", Mode: "cloud", Boxes: []string{"box-01", "box-02"}, DefaultModel: api.DefaultModel, Models: api.DefaultModels}, "claude-code", api.DefaultModel)
 	}
-	team := teamConfig.API(teamName)
-	return cfg, state, teamName, teamConfig, team, nil
+	return workspaceContext{
+		Config:     cfg,
+		State:      state,
+		TeamName:   teamName,
+		TeamConfig: teamConfig,
+		Team:       teamConfig.API(teamName),
+	}, nil
 }
 
 func findOrDefault(state config.State, sessionID string, team api.Team, teamConfig config.TeamConfig) api.Session {
@@ -234,6 +292,41 @@ func IDForTask(user string, task string) string {
 		slug = "session"
 	}
 	return fmt.Sprintf("@%s/%s-%s", name, slug, secureToken(5))
+}
+
+func enrichLandWithGit(ctx context.Context, result api.LandResult) api.LandResult {
+	branch := gitOutput(ctx, "rev-parse", "--abbrev-ref", "HEAD")
+	head := gitOutput(ctx, "rev-parse", "--short", "HEAD")
+	stat := gitOutput(ctx, "diff", "--stat")
+	status := gitOutput(ctx, "status", "--short")
+	log := gitOutput(ctx, "log", "--oneline", "-5")
+	if branch != "" {
+		result.Branch = branch
+	}
+	parts := []string{result.Review.Summary}
+	if head != "" {
+		parts = append(parts, "HEAD "+head)
+	}
+	if stat != "" {
+		parts = append(parts, "Diff stat: "+stat)
+	}
+	if status != "" {
+		parts = append(parts, "Working tree: "+status)
+	}
+	if log != "" {
+		parts = append(parts, "Recent commits: "+log)
+	}
+	result.Review.Summary = strings.Join(parts, "\n")
+	return result
+}
+
+func gitOutput(ctx context.Context, args ...string) string {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	raw, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(raw))
 }
 
 func secureToken(bytes int) string {

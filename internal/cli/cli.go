@@ -2,9 +2,11 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -20,6 +22,7 @@ import (
 	"github.com/sovereign46/s46-cli/internal/keyring"
 	"github.com/sovereign46/s46-cli/internal/output"
 	sessioncmd "github.com/sovereign46/s46-cli/internal/session"
+	"github.com/sovereign46/s46-cli/internal/version"
 )
 
 type Runtime struct {
@@ -34,7 +37,6 @@ type options struct {
 	json       bool
 	dryRun     bool
 	verbose    bool
-	noColor    bool
 }
 
 type app struct {
@@ -74,13 +76,16 @@ func NewRootCommand(runtime Runtime) *cobra.Command {
 	root.PersistentFlags().BoolVar(&opts.json, "json", false, "write machine-readable JSON")
 	root.PersistentFlags().BoolVar(&opts.dryRun, "dry-run", false, "show planned mutations without writing")
 	root.PersistentFlags().BoolVar(&opts.verbose, "verbose", false, "print extra diagnostics")
-	root.PersistentFlags().BoolVar(&opts.noColor, "no-color", false, "disable color output")
 
 	root.AddCommand(loginCommand(runtime, opts))
 	root.AddCommand(logoutCommand(runtime, opts))
 	root.AddCommand(whoamiCommand(runtime, opts))
 	root.AddCommand(tokenCommand(runtime, opts))
+	root.AddCommand(versionCommand(runtime, opts))
 	root.AddCommand(connectCommand(runtime, opts))
+	root.AddCommand(disconnectCommand(runtime, opts))
+	root.AddCommand(useCommand(runtime, opts))
+	root.AddCommand(doctorCommand(runtime, opts))
 	root.AddCommand(statusCommand(runtime, opts))
 	root.AddCommand(sessionsCommand(runtime, opts))
 	root.AddCommand(detachCommand(runtime, opts))
@@ -107,7 +112,7 @@ func newApp(runtime Runtime, opts *options) (*app, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &app{
+	app := &app{
 		runtime: runtime,
 		options: opts,
 		config:  store,
@@ -118,7 +123,9 @@ func newApp(runtime Runtime, opts *options) (*app, error) {
 			JSON: opts.json,
 			Out:  runtime.Stdout,
 		},
-	}, nil
+	}
+	app.debug("config=%s state=%s api=%T", store.ConfigPath, store.StatePath, app.api)
+	return app, nil
 }
 
 func loginCommand(runtime Runtime, opts *options) *cobra.Command {
@@ -134,8 +141,12 @@ func loginCommand(runtime Runtime, opts *options) *cobra.Command {
 				return err
 			}
 			service := auth.Service{API: app.api, Config: app.config, Keyring: app.keyring}
-			result, err := service.Login(cmd.Context(), user, team)
-			if err != nil {
+			var result auth.LoginResult
+			if err := app.withLock(cmd.Context(), func() error {
+				var err error
+				result, err = service.Login(cmd.Context(), user, team)
+				return err
+			}); err != nil {
 				return err
 			}
 			if opts.json {
@@ -163,8 +174,12 @@ func logoutCommand(runtime Runtime, opts *options) *cobra.Command {
 				return err
 			}
 			service := auth.Service{API: app.api, Config: app.config, Keyring: app.keyring}
-			user, err := service.Logout(cmd.Context())
-			if err != nil {
+			var user string
+			if err := app.withLock(cmd.Context(), func() error {
+				var err error
+				user, err = service.Logout(cmd.Context())
+				return err
+			}); err != nil {
 				return err
 			}
 			if opts.json {
@@ -225,12 +240,37 @@ func tokenCommand(runtime Runtime, opts *options) *cobra.Command {
 	return cmd
 }
 
+func versionCommand(runtime Runtime, opts *options) *cobra.Command {
+	return &cobra.Command{
+		Use:   "version",
+		Short: "print build version information",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := newApp(runtime, opts)
+			if err != nil {
+				return err
+			}
+			info := version.Get()
+			if opts.json {
+				return app.renderer.WriteJSON(info)
+			}
+			return app.renderer.Lines(
+				fmt.Sprintf("s46 %s", info.Version),
+				fmt.Sprintf("commit: %s", info.Commit),
+				fmt.Sprintf("date:   %s", info.Date),
+				fmt.Sprintf("go:     %s", info.GoVersion),
+			)
+		},
+	}
+}
+
 func connectCommand(runtime Runtime, opts *options) *cobra.Command {
 	var harnessName string
 	var lane string
 	var model string
 	var endpoint string
 	var mode string
+	var scope string
 	cmd := &cobra.Command{
 		Use:   "connect <team>",
 		Short: "connect a team and configure a harness",
@@ -240,11 +280,276 @@ func connectCommand(runtime Runtime, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			teamName := args[0]
-			if harnessName == "" {
-				harnessName = "claude-code"
+			return app.withLock(cmd.Context(), func() error {
+				return runConnect(cmd.Context(), app, connectRequest{
+					TeamName: args[0],
+					Harness:  harnessName,
+					Lane:     lane,
+					Model:    model,
+					Endpoint: endpoint,
+					Mode:     mode,
+					Scope:    scope,
+				})
+			})
+		},
+	}
+	cmd.Flags().StringVar(&harnessName, "harness", "", "harness to configure: pi, claude-code, codex, standard")
+	cmd.Flags().StringVar(&lane, "lane", "", "sovereign lane")
+	cmd.Flags().StringVar(&model, "model", "", "default S46 model")
+	cmd.Flags().StringVar(&endpoint, "endpoint", "", "tenant endpoint")
+	cmd.Flags().StringVar(&mode, "mode", "", "operating mode")
+	cmd.Flags().StringVar(&scope, "scope", "user", "settings scope for supported harnesses: user or project")
+	return cmd
+}
+
+type connectRequest struct {
+	TeamName string
+	Harness  string
+	Lane     string
+	Model    string
+	Endpoint string
+	Mode     string
+	Scope    string
+}
+
+func runConnect(ctx context.Context, app *app, req connectRequest) error {
+	if req.Scope != "" && req.Scope != "user" && req.Scope != "project" {
+		return fmt.Errorf("unknown scope %q; expected user or project", req.Scope)
+	}
+	harnessName, err := resolveHarnessName(ctx, app, req.Harness)
+	if err != nil {
+		return err
+	}
+	adapter, err := app.harness.Get(harnessName)
+	if err != nil {
+		return err
+	}
+	cfg, err := app.config.LoadConfig()
+	if err != nil {
+		return err
+	}
+	existing := cfg.Teams[req.TeamName]
+	team, err := app.api.Team(ctx, req.TeamName, api.TeamOptions{
+		Endpoint:     firstNonEmpty(req.Endpoint, existing.Endpoint),
+		Lane:         firstNonEmpty(req.Lane, existing.Lane),
+		Mode:         firstNonEmpty(req.Mode, existing.Mode),
+		DefaultModel: firstNonEmpty(req.Model, existing.DefaultModel, api.DefaultModel),
+	})
+	if err != nil {
+		return err
+	}
+	selectedModel := firstNonEmpty(req.Model, team.DefaultModel, api.DefaultModel)
+	plan, err := adapter.PlanConnect(ctx, harness.ConnectRequest{Env: app.runtime.Env, Team: team, Model: selectedModel, Mode: team.Mode, Scope: req.Scope, DryRun: app.options.dryRun})
+	if err != nil {
+		return err
+	}
+	result := map[string]any{
+		"team":       team.Name,
+		"lane":       team.Lane,
+		"mode":       team.Mode,
+		"harness":    harnessName,
+		"model":      selectedModel,
+		"endpoint":   team.Endpoint,
+		"dryRun":     app.options.dryRun,
+		"operations": plan.Operations,
+		"files":      plan.Files,
+	}
+	if app.options.dryRun {
+		return renderConnectDryRun(app, team, plan, result)
+	}
+	applied, err := adapter.ApplyConnect(ctx, plan)
+	if err != nil {
+		return err
+	}
+	cfg.ActiveTeam = team.Name
+	cfg.Teams[team.Name] = config.TeamConfigFromAPI(team, harnessName, selectedModel)
+	if err := app.config.SaveConfig(cfg); err != nil {
+		return err
+	}
+	result["files"] = applied.Files
+	return renderConnectApplied(app, team, plan, applied, result)
+}
+
+func renderConnectDryRun(app *app, team api.Team, plan harness.Plan, result map[string]any) error {
+	if app.options.json {
+		return app.renderer.WriteJSON(result)
+	}
+	lines := []string{
+		fmt.Sprintf("[s46] dry-run: would connect %s", team.Name),
+		fmt.Sprintf("[s46] team:    %s · lane: %s · endpoint: %s", team.Name, team.Lane, team.Endpoint),
+	}
+	lines = append(lines, output.RenderPlan(plan)...)
+	lines = append(lines, "", "[s46] dry-run: no files written")
+	return app.renderer.Lines(lines...)
+}
+
+func renderConnectApplied(app *app, team api.Team, plan harness.Plan, applied harness.AppliedPlan, result map[string]any) error {
+	if app.options.json {
+		return app.renderer.WriteJSON(result)
+	}
+	lines := []string{
+		fmt.Sprintf("[s46] %s", plan.Summary),
+		fmt.Sprintf("[s46] team:    %s · lane: %s · boxes: %s", team.Name, team.Lane, strings.Join(team.Boxes, ", ")),
+	}
+	for _, file := range applied.Files {
+		lines = append(lines, fmt.Sprintf("[s46] wrote %s", file.Path))
+		if file.BackupPath != "" {
+			lines = append(lines, fmt.Sprintf("[s46] backup: %s", file.BackupPath))
+		}
+	}
+	return app.renderer.Lines(lines...)
+}
+
+func resolveHarnessName(ctx context.Context, app *app, explicit string) (string, error) {
+	if explicit != "" {
+		return explicit, nil
+	}
+	detected := []string{}
+	for _, name := range app.harness.Names() {
+		if name == "standard" {
+			continue
+		}
+		adapter, err := app.harness.Get(name)
+		if err != nil {
+			return "", err
+		}
+		detection, err := adapter.Detect(ctx, app.runtime.Env)
+		if err != nil {
+			return "", err
+		}
+		if detection.Installed {
+			detected = append(detected, name)
+		}
+	}
+	if len(detected) == 1 {
+		return detected[0], nil
+	}
+	if len(detected) == 0 {
+		return "", fmt.Errorf("no harness detected; pass --harness=pi, --harness=claude-code, --harness=codex, or --harness=standard")
+	}
+	return "", fmt.Errorf("multiple harnesses detected (%s); pass --harness explicitly", strings.Join(detected, ", "))
+}
+
+func disconnectCommand(runtime Runtime, opts *options) *cobra.Command {
+	var harnessName string
+	var scope string
+	cmd := &cobra.Command{
+		Use:   "disconnect <team>",
+		Short: "remove S46 configuration for a team and harness",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := newApp(runtime, opts)
+			if err != nil {
+				return err
 			}
-			adapter, err := app.harness.Get(harnessName)
+			return app.withLock(cmd.Context(), func() error {
+				return runDisconnect(cmd.Context(), app, args[0], harnessName, scope)
+			})
+		},
+	}
+	cmd.Flags().StringVar(&harnessName, "harness", "", "harness to disconnect; defaults to team's configured harness")
+	cmd.Flags().StringVar(&scope, "scope", "user", "settings scope for supported harnesses: user or project")
+	return cmd
+}
+
+func runDisconnect(ctx context.Context, app *app, teamName string, harnessName string, scope string) error {
+	cfg, err := app.config.LoadConfig()
+	if err != nil {
+		return err
+	}
+	teamConfig, ok := cfg.Teams[teamName]
+	if !ok {
+		return fmt.Errorf("team %q is not connected", teamName)
+	}
+	if harnessName == "" {
+		harnessName = teamConfig.DefaultHarness
+	}
+	if harnessName == "" {
+		harnessName = "standard"
+	}
+	adapter, err := app.harness.Get(harnessName)
+	if err != nil {
+		return err
+	}
+	team := teamConfig.API(teamName)
+	plan, err := adapter.PlanDisconnect(ctx, harness.DisconnectRequest{Env: app.runtime.Env, Team: team, Harness: harnessName, Scope: scope, DryRun: app.options.dryRun})
+	if err != nil {
+		return err
+	}
+	result := map[string]any{"team": teamName, "harness": harnessName, "dryRun": app.options.dryRun, "operations": plan.Operations, "files": plan.Files}
+	if app.options.dryRun {
+		if app.options.json {
+			return app.renderer.WriteJSON(result)
+		}
+		lines := []string{fmt.Sprintf("[s46] dry-run: would disconnect %s", teamName)}
+		lines = append(lines, output.RenderPlan(plan)...)
+		lines = append(lines, "", "[s46] dry-run: no files written")
+		return app.renderer.Lines(lines...)
+	}
+	applied, err := adapter.ApplyConnect(ctx, plan)
+	if err != nil {
+		return err
+	}
+	delete(cfg.Teams, teamName)
+	if cfg.ActiveTeam == teamName {
+		cfg.ActiveTeam = ""
+	}
+	if err := app.config.SaveConfig(cfg); err != nil {
+		return err
+	}
+	result["files"] = applied.Files
+	if app.options.json {
+		return app.renderer.WriteJSON(result)
+	}
+	lines := []string{fmt.Sprintf("[s46] disconnected %s", teamName)}
+	for _, file := range applied.Files {
+		lines = append(lines, fmt.Sprintf("[s46] wrote %s", file.Path))
+		if file.BackupPath != "" {
+			lines = append(lines, fmt.Sprintf("[s46] backup: %s", file.BackupPath))
+		}
+	}
+	return app.renderer.Lines(lines...)
+}
+
+func useCommand(runtime Runtime, opts *options) *cobra.Command {
+	return &cobra.Command{
+		Use:   "use <team>",
+		Short: "switch the active connected team",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := newApp(runtime, opts)
+			if err != nil {
+				return err
+			}
+			return app.withLock(cmd.Context(), func() error {
+				cfg, err := app.config.LoadConfig()
+				if err != nil {
+					return err
+				}
+				teamName := args[0]
+				if _, ok := cfg.Teams[teamName]; !ok {
+					return fmt.Errorf("team %q is not connected; run `s46 connect %s` first", teamName, teamName)
+				}
+				cfg.ActiveTeam = teamName
+				if err := app.config.SaveConfig(cfg); err != nil {
+					return err
+				}
+				if opts.json {
+					return app.renderer.WriteJSON(map[string]any{"activeTeam": teamName})
+				}
+				return app.renderer.Lines(fmt.Sprintf("[s46] active team: %s", teamName))
+			})
+		},
+	}
+}
+
+func doctorCommand(runtime Runtime, opts *options) *cobra.Command {
+	return &cobra.Command{
+		Use:   "doctor",
+		Short: "verify local S46 and harness configuration",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := newApp(runtime, opts)
 			if err != nil {
 				return err
 			}
@@ -252,77 +557,129 @@ func connectCommand(runtime Runtime, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			existing := cfg.Teams[teamName]
-			team, err := app.api.Team(cmd.Context(), teamName, api.TeamOptions{
-				Endpoint:     firstNonEmpty(endpoint, existing.Endpoint),
-				Lane:         firstNonEmpty(lane, existing.Lane),
-				Mode:         firstNonEmpty(mode, existing.Mode),
-				DefaultModel: firstNonEmpty(model, existing.DefaultModel, api.DefaultModel),
-			})
-			if err != nil {
-				return err
+			if cfg.ActiveTeam == "" {
+				return fmt.Errorf("no active team; run `s46 login` or `s46 connect <team>` first")
 			}
-			selectedModel := firstNonEmpty(model, team.DefaultModel, api.DefaultModel)
-			plan, err := adapter.PlanConnect(cmd.Context(), harness.ConnectRequest{Env: runtime.Env, Team: team, Model: selectedModel, Mode: team.Mode, DryRun: opts.dryRun})
-			if err != nil {
-				return err
+			teamConfig, ok := cfg.Teams[cfg.ActiveTeam]
+			if !ok {
+				return fmt.Errorf("active team %q is missing from config", cfg.ActiveTeam)
 			}
-			result := map[string]any{
-				"team":       team.Name,
-				"lane":       team.Lane,
-				"mode":       team.Mode,
-				"harness":    harnessName,
-				"model":      selectedModel,
-				"endpoint":   team.Endpoint,
-				"dryRun":     opts.dryRun,
-				"operations": plan.Operations,
-				"files":      plan.Files,
-			}
-			if opts.dryRun {
-				if opts.json {
-					return app.renderer.WriteJSON(result)
-				}
-				lines := []string{
-					fmt.Sprintf("[s46] dry-run: would connect %s", team.Name),
-					fmt.Sprintf("[s46] team:    %s · lane: %s · endpoint: %s", team.Name, team.Lane, team.Endpoint),
-				}
-				lines = append(lines, output.RenderPlan(plan)...)
-				lines = append(lines, "", "[s46] dry-run: no files written")
-				return app.renderer.Lines(lines...)
-			}
-
-			applied, err := adapter.ApplyConnect(cmd.Context(), plan)
-			if err != nil {
-				return err
-			}
-			cfg.ActiveTeam = team.Name
-			cfg.Teams[team.Name] = config.TeamConfigFromAPI(team, harnessName, selectedModel)
-			if err := app.config.SaveConfig(cfg); err != nil {
-				return err
-			}
-			result["files"] = applied.Files
+			checks := doctorChecks(cmd.Context(), app, cfg.ActiveTeam, teamConfig)
 			if opts.json {
-				return app.renderer.WriteJSON(result)
+				return app.renderer.WriteJSON(map[string]any{"team": cfg.ActiveTeam, "checks": checks})
 			}
-			lines := []string{
-				fmt.Sprintf("[s46] %s", plan.Summary),
-				fmt.Sprintf("[s46] team:    %s · lane: %s · boxes: %s", team.Name, team.Lane, strings.Join(team.Boxes, ", ")),
-			}
-			for _, file := range applied.Files {
-				lines = append(lines, fmt.Sprintf("[s46] wrote %s", file.Path))
-				if file.BackupPath != "" {
-					lines = append(lines, fmt.Sprintf("[s46] backup: %s", file.BackupPath))
+			lines := []string{fmt.Sprintf("[s46] doctor: team %s", cfg.ActiveTeam)}
+			failed := false
+			for _, check := range checks {
+				status := "ok"
+				if !check.OK {
+					status = "fail"
+					failed = true
 				}
+				lines = append(lines, fmt.Sprintf("[%s] %s: %s", status, check.Name, check.Message))
 			}
-			return app.renderer.Lines(lines...)
+			if err := app.renderer.Lines(lines...); err != nil {
+				return err
+			}
+			if failed {
+				return fmt.Errorf("doctor found configuration problems")
+			}
+			return nil
 		},
 	}
-	cmd.Flags().StringVar(&harnessName, "harness", "claude-code", "harness to configure: pi, claude-code, codex, standard")
-	cmd.Flags().StringVar(&lane, "lane", "", "sovereign lane")
-	cmd.Flags().StringVar(&model, "model", "", "default S46 model")
-	cmd.Flags().StringVar(&endpoint, "endpoint", "", "tenant endpoint")
-	cmd.Flags().StringVar(&mode, "mode", "", "operating mode")
-	return cmd
+}
+
+type doctorCheck struct {
+	Name    string `json:"name"`
+	OK      bool   `json:"ok"`
+	Message string `json:"message"`
+}
+
+func doctorChecks(ctx context.Context, app *app, teamName string, teamConfig config.TeamConfig) []doctorCheck {
+	checks := []doctorCheck{
+		{Name: "tenant", OK: teamConfig.Endpoint == fmt.Sprintf("https://%s.s46.dev", teamName), Message: teamConfig.Endpoint},
+	}
+	adapter, err := app.harness.Get(teamConfig.DefaultHarness)
+	if err != nil {
+		checks = append(checks, doctorCheck{Name: "harness", OK: false, Message: err.Error()})
+		return checks
+	}
+	detection, err := adapter.Detect(ctx, app.runtime.Env)
+	if err != nil {
+		checks = append(checks, doctorCheck{Name: "harness", OK: false, Message: err.Error()})
+		return checks
+	}
+	checks = append(checks, doctorCheck{Name: "harness", OK: detection.Installed || teamConfig.DefaultHarness == "standard", Message: firstNonEmpty(detection.Path, teamConfig.DefaultHarness)})
+	checks = append(checks, doctorHarnessConfig(app, teamConfig)...)
+	return checks
+}
+
+func doctorHarnessConfig(app *app, teamConfig config.TeamConfig) []doctorCheck {
+	switch teamConfig.DefaultHarness {
+	case "claude-code":
+		return doctorClaude(app.runtime.Env, teamConfig)
+	case "codex":
+		return doctorCodex(app.runtime.Env, teamConfig)
+	case "pi":
+		return doctorPi(app.runtime.Env, teamConfig)
+	case "standard":
+		return []doctorCheck{{Name: "standard", OK: true, Message: "no third-party harness config required"}}
+	default:
+		return []doctorCheck{{Name: "harness-config", OK: false, Message: "unknown harness " + teamConfig.DefaultHarness}}
+	}
+}
+
+func doctorClaude(env map[string]string, teamConfig config.TeamConfig) []doctorCheck {
+	path := filepath.Join(config.HomeDir(env), ".claude", "settings.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return []doctorCheck{{Name: "claude-config", OK: false, Message: err.Error()}}
+	}
+	settings := map[string]any{}
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		return []doctorCheck{{Name: "claude-config", OK: false, Message: err.Error()}}
+	}
+	envMap, _ := settings["env"].(map[string]any)
+	return []doctorCheck{
+		{Name: "claude-token-helper", OK: settings["apiKeyHelper"] == "s46 token --refresh", Message: fmt.Sprint(settings["apiKeyHelper"])},
+		{Name: "claude-base-url", OK: envMap["ANTHROPIC_BASE_URL"] == teamConfig.Endpoint+"/anthropic", Message: fmt.Sprint(envMap["ANTHROPIC_BASE_URL"])},
+		{Name: "claude-model", OK: envMap["ANTHROPIC_DEFAULT_SONNET_MODEL"] == teamConfig.DefaultModel, Message: fmt.Sprint(envMap["ANTHROPIC_DEFAULT_SONNET_MODEL"])},
+	}
+}
+
+func doctorCodex(env map[string]string, teamConfig config.TeamConfig) []doctorCheck {
+	path := filepath.Join(config.HomeDir(env), ".codex", "config.toml")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return []doctorCheck{{Name: "codex-config", OK: false, Message: err.Error()}}
+	}
+	text := string(raw)
+	return []doctorCheck{
+		{Name: "codex-provider", OK: strings.Contains(text, "[model_providers.s46]"), Message: path},
+		{Name: "codex-base-url", OK: strings.Contains(text, fmt.Sprintf("base_url = %q", teamConfig.Endpoint+"/codex")), Message: teamConfig.Endpoint + "/codex"},
+		{Name: "codex-token-helper", OK: strings.Contains(text, `token_helper = "s46 token --refresh"`), Message: "s46 token --refresh"},
+		{Name: "codex-profile", OK: strings.Contains(text, "[profiles.s46]"), Message: "profile s46"},
+	}
+}
+
+func doctorPi(env map[string]string, teamConfig config.TeamConfig) []doctorCheck {
+	path := filepath.Join(config.HomeDir(env), ".pi", "agent", "models.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return []doctorCheck{{Name: "pi-config", OK: false, Message: err.Error()}}
+	}
+	models := map[string]any{}
+	if err := json.Unmarshal(raw, &models); err != nil {
+		return []doctorCheck{{Name: "pi-config", OK: false, Message: err.Error()}}
+	}
+	providers, _ := models["providers"].(map[string]any)
+	s46, _ := providers["s46"].(map[string]any)
+	return []doctorCheck{
+		{Name: "pi-provider", OK: s46 != nil, Message: path},
+		{Name: "pi-base-url", OK: s46["baseUrl"] == teamConfig.Endpoint+"/v1", Message: fmt.Sprint(s46["baseUrl"])},
+		{Name: "pi-token-helper", OK: s46["apiKey"] == "!s46 token --refresh", Message: fmt.Sprint(s46["apiKey"])},
+		{Name: "pi-auth-header", OK: s46["authHeader"] == true, Message: fmt.Sprint(s46["authHeader"])},
+	}
 }
 
 func statusCommand(runtime Runtime, opts *options) *cobra.Command {
@@ -423,8 +780,12 @@ func detachCommand(runtime Runtime, opts *options) *cobra.Command {
 				return err
 			}
 			service := sessioncmd.Service{API: app.api, Config: app.config}
-			result, err := service.Detach(cmd.Context(), args[0], harnessName, box, opts.dryRun)
-			if err != nil {
+			var result api.Session
+			if err := app.withLock(cmd.Context(), func() error {
+				var err error
+				result, err = service.Detach(cmd.Context(), args[0], harnessName, box, opts.dryRun)
+				return err
+			}); err != nil {
 				return err
 			}
 			if opts.json {
@@ -460,8 +821,13 @@ func resumeCommand(runtime Runtime, opts *options) *cobra.Command {
 				return err
 			}
 			service := sessioncmd.Service{API: app.api, Config: app.config}
-			result, previous, err := service.Resume(cmd.Context(), args[0], opts.dryRun)
-			if err != nil {
+			var result api.Session
+			var previous string
+			if err := app.withLock(cmd.Context(), func() error {
+				var err error
+				result, previous, err = service.Resume(cmd.Context(), args[0], opts.dryRun)
+				return err
+			}); err != nil {
 				return err
 			}
 			if opts.json {
@@ -490,8 +856,12 @@ func shareCommand(runtime Runtime, opts *options) *cobra.Command {
 				return err
 			}
 			service := sessioncmd.Service{API: app.api, Config: app.config}
-			result, err := service.Share(cmd.Context(), args[0], opts.dryRun)
-			if err != nil {
+			var result sessioncmd.ShareResult
+			if err := app.withLock(cmd.Context(), func() error {
+				var err error
+				result, err = service.Share(cmd.Context(), args[0], opts.dryRun)
+				return err
+			}); err != nil {
 				return err
 			}
 			if opts.json {
@@ -504,10 +874,14 @@ func shareCommand(runtime Runtime, opts *options) *cobra.Command {
 					fmt.Sprintf("[s46] dry-run: viewer would be %s", result.ViewerURL),
 				)
 			}
+			provider := "GitHub gist"
+			if result.Mock {
+				provider += " (mock)"
+			}
 			return app.renderer.Lines(
 				fmt.Sprintf("[s46] Share URL: %s", result.ViewerURL),
 				fmt.Sprintf("[s46] Gist:      %s", result.GistURL),
-				"[s46] Visibility: secret · Format: HTML · Provider: GitHub gist (mock)",
+				fmt.Sprintf("[s46] Visibility: secret · Format: HTML · Provider: %s", provider),
 			)
 		},
 	}
@@ -580,51 +954,53 @@ func modeCommand(runtime Runtime, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			cfg, err := app.config.LoadConfig()
-			if err != nil {
-				return err
-			}
-			teamName := cfg.ActiveTeam
-			if teamName == "" {
-				teamName = "acme"
-			}
-			teamConfig, ok := cfg.Teams[teamName]
-			if !ok || teamConfig.Endpoint == "" {
-				team, err := app.api.Team(context.Background(), teamName, api.TeamOptions{})
-				if err != nil {
-					return err
-				}
-				teamConfig = config.TeamConfigFromAPI(team, "claude-code", team.DefaultModel)
-			}
-			if set != "" {
-				if !validMode(set) {
-					return fmt.Errorf("unknown mode %q; expected one of: cloud, on-prem, local, air-gapped", set)
-				}
-				if !opts.dryRun {
-					teamConfig.Mode = set
-					cfg.ActiveTeam = teamName
-					cfg.Teams[teamName] = teamConfig
-					if err := app.config.SaveConfig(cfg); err != nil {
-						return err
-					}
-				}
-			}
-			mode := firstNonEmpty(set, teamConfig.Mode, "cloud")
-			result := map[string]any{"team": teamName, "mode": mode, "dryRun": opts.dryRun}
-			if opts.json {
-				return app.renderer.WriteJSON(result)
-			}
-			if set != "" && opts.dryRun {
-				return app.renderer.Lines(fmt.Sprintf("[s46] dry-run: would set mode to %s", set))
-			}
-			if set != "" {
-				return app.renderer.Lines(fmt.Sprintf("[s46] mode: %s · stack reconciled in 0.4s (mock)", mode))
-			}
-			return app.renderer.Lines(fmt.Sprintf("[s46] mode: %s", mode))
+			return app.withLock(cmd.Context(), func() error {
+				return runMode(app, set)
+			})
 		},
 	}
 	cmd.Flags().StringVar(&set, "set", "", "mode: cloud, on-prem, local, air-gapped")
 	return cmd
+}
+
+func runMode(app *app, set string) error {
+	cfg, err := app.config.LoadConfig()
+	if err != nil {
+		return err
+	}
+	teamName := cfg.ActiveTeam
+	if teamName == "" {
+		return fmt.Errorf("no active team; run `s46 login` or `s46 connect <team>` first")
+	}
+	teamConfig, ok := cfg.Teams[teamName]
+	if !ok || teamConfig.Endpoint == "" {
+		return fmt.Errorf("active team %q is not connected; run `s46 connect %s` first", teamName, teamName)
+	}
+	if set != "" {
+		if !validMode(set) {
+			return fmt.Errorf("unknown mode %q; expected one of: cloud, on-prem, local, air-gapped", set)
+		}
+		if !app.options.dryRun {
+			teamConfig.Mode = set
+			cfg.ActiveTeam = teamName
+			cfg.Teams[teamName] = teamConfig
+			if err := app.config.SaveConfig(cfg); err != nil {
+				return err
+			}
+		}
+	}
+	mode := firstNonEmpty(set, teamConfig.Mode, "cloud")
+	result := map[string]any{"team": teamName, "mode": mode, "dryRun": app.options.dryRun}
+	if app.options.json {
+		return app.renderer.WriteJSON(result)
+	}
+	if set != "" && app.options.dryRun {
+		return app.renderer.Lines(fmt.Sprintf("[s46] dry-run: would set mode to %s", set))
+	}
+	if set != "" {
+		return app.renderer.Lines(fmt.Sprintf("[s46] mode: %s · stack reconciled in 0.4s (mock)", mode))
+	}
+	return app.renderer.Lines(fmt.Sprintf("[s46] mode: %s", mode))
 }
 
 func runCommand(runtime Runtime, opts *options) *cobra.Command {
@@ -640,8 +1016,12 @@ func runCommand(runtime Runtime, opts *options) *cobra.Command {
 				return err
 			}
 			service := sessioncmd.Service{API: app.api, Config: app.config}
-			result, err := service.Run(cmd.Context(), strings.Join(args, " "), model, sessionID, opts.dryRun)
-			if err != nil {
+			var result sessioncmd.RunResult
+			if err := app.withLock(cmd.Context(), func() error {
+				var err error
+				result, err = service.Run(cmd.Context(), strings.Join(args, " "), model, sessionID, opts.dryRun)
+				return err
+			}); err != nil {
 				return err
 			}
 			if opts.json {
@@ -653,7 +1033,7 @@ func runCommand(runtime Runtime, opts *options) *cobra.Command {
 			}
 			return app.renderer.Lines(
 				fmt.Sprintf("%s %s", prefix, result.ID),
-				"[s46] state:   running locally",
+				fmt.Sprintf("[s46] state:   %s locally", result.State),
 				fmt.Sprintf("[s46] harness: s46 (direct) · model: %s", result.Model),
 				fmt.Sprintf("[s46] task:    %s", result.Task),
 			)
@@ -678,6 +1058,21 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func (a *app) withLock(ctx context.Context, fn func() error) error {
+	lock, err := a.config.Lock(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = lock.Unlock() }()
+	return fn()
+}
+
+func (a *app) debug(format string, args ...any) {
+	if a != nil && a.options != nil && a.options.verbose {
+		fmt.Fprintf(a.runtime.Stderr, "[s46:debug] "+format+"\n", args...)
+	}
 }
 
 func validMode(mode string) bool {

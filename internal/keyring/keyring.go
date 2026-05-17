@@ -1,6 +1,7 @@
 package keyring
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,9 +12,9 @@ import (
 )
 
 type Store interface {
-	Get(service string, account string) (string, error)
-	Set(service string, account string, secret string) error
-	Delete(service string, account string) error
+	Get(ctx context.Context, service string, account string) (string, error)
+	Set(ctx context.Context, service string, account string, secret string) error
+	Delete(ctx context.Context, service string, account string) error
 }
 
 func New(env map[string]string) (Store, error) {
@@ -35,8 +36,8 @@ func New(env map[string]string) (Store, error) {
 
 type SecurityStore struct{}
 
-func (s SecurityStore) Get(service string, account string) (string, error) {
-	cmd := exec.Command("security", "find-generic-password", "-a", account, "-s", service, "-w")
+func (s SecurityStore) Get(ctx context.Context, service string, account string) (string, error) {
+	cmd := exec.CommandContext(ctx, "security", "find-generic-password", "-a", account, "-s", service, "-w")
 	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("credential not found in keychain")
@@ -44,24 +45,31 @@ func (s SecurityStore) Get(service string, account string) (string, error) {
 	return trimTrailingNewline(string(out)), nil
 }
 
-func (s SecurityStore) Set(service string, account string, secret string) error {
-	cmd := exec.Command("security", "add-generic-password", "-a", account, "-s", service, "-w", secret, "-U")
+func (s SecurityStore) Set(ctx context.Context, service string, account string, secret string) error {
+	cmd := exec.CommandContext(ctx, "security", "add-generic-password", "-a", account, "-s", service, "-U", "-w")
+	cmd.Stdin = strings.NewReader(secret)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("cannot store credential in keychain: %s", trimTrailingNewline(string(out)))
 	}
 	return nil
 }
 
-func (s SecurityStore) Delete(service string, account string) error {
-	cmd := exec.Command("security", "delete-generic-password", "-a", account, "-s", service)
-	_ = cmd.Run()
+func (s SecurityStore) Delete(ctx context.Context, service string, account string) error {
+	cmd := exec.CommandContext(ctx, "security", "delete-generic-password", "-a", account, "-s", service)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		message := trimTrailingNewline(string(out))
+		if strings.Contains(message, "could not be found") || strings.Contains(message, "The specified item could not be found") {
+			return nil
+		}
+		return fmt.Errorf("cannot delete credential from keychain: %s", message)
+	}
 	return nil
 }
 
 type SecretToolStore struct{}
 
-func (s SecretToolStore) Get(service string, account string) (string, error) {
-	cmd := exec.Command("secret-tool", "lookup", "service", service, "account", account)
+func (s SecretToolStore) Get(ctx context.Context, service string, account string) (string, error) {
+	cmd := exec.CommandContext(ctx, "secret-tool", "lookup", "service", service, "account", account)
 	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("credential not found in Linux secret service; install libsecret tools or set S46_KEYRING_BACKEND=file for tests")
@@ -69,8 +77,8 @@ func (s SecretToolStore) Get(service string, account string) (string, error) {
 	return trimTrailingNewline(string(out)), nil
 }
 
-func (s SecretToolStore) Set(service string, account string, secret string) error {
-	cmd := exec.Command("secret-tool", "store", "--label", service+" "+account, "service", service, "account", account)
+func (s SecretToolStore) Set(ctx context.Context, service string, account string, secret string) error {
+	cmd := exec.CommandContext(ctx, "secret-tool", "store", "--label", service+" "+account, "service", service, "account", account)
 	cmd.Stdin = strings.NewReader(secret)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("cannot store credential in Linux secret service: %s", trimTrailingNewline(string(out)))
@@ -78,8 +86,15 @@ func (s SecretToolStore) Set(service string, account string, secret string) erro
 	return nil
 }
 
-func (s SecretToolStore) Delete(service string, account string) error {
-	_ = exec.Command("secret-tool", "clear", "service", service, "account", account).Run()
+func (s SecretToolStore) Delete(ctx context.Context, service string, account string) error {
+	cmd := exec.CommandContext(ctx, "secret-tool", "clear", "service", service, "account", account)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		message := trimTrailingNewline(string(out))
+		if strings.Contains(message, "No such secret") || strings.Contains(message, "not found") {
+			return nil
+		}
+		return fmt.Errorf("cannot delete credential from Linux secret service: %s", message)
+	}
 	return nil
 }
 
@@ -87,7 +102,7 @@ type FileStore struct {
 	Path string
 }
 
-func (s FileStore) Get(service string, account string) (string, error) {
+func (s FileStore) Get(ctx context.Context, service string, account string) (string, error) {
 	entries, err := s.read()
 	if err != nil {
 		return "", err
@@ -99,7 +114,7 @@ func (s FileStore) Get(service string, account string) (string, error) {
 	return value, nil
 }
 
-func (s FileStore) Set(service string, account string, secret string) error {
+func (s FileStore) Set(ctx context.Context, service string, account string, secret string) error {
 	entries, err := s.read()
 	if err != nil {
 		return err
@@ -108,7 +123,7 @@ func (s FileStore) Set(service string, account string, secret string) error {
 	return s.write(entries)
 }
 
-func (s FileStore) Delete(service string, account string) error {
+func (s FileStore) Delete(ctx context.Context, service string, account string) error {
 	entries, err := s.read()
 	if err != nil {
 		return err

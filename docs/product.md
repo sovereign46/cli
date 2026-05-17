@@ -72,7 +72,11 @@ s46 connect <team> --harness=pi
 s46 connect <team> --harness=claude-code
 s46 connect <team> --harness=codex
 s46 connect <team> --harness=standard
+s46 disconnect <team>
+s46 use <team>
+s46 doctor
 s46 status
+s46 version
 ```
 
 Responsibilities:
@@ -83,6 +87,9 @@ Responsibilities:
 - configure the chosen harness
 - back up existing harness config before mutation
 - support `--dry-run` before writing
+- disconnect a harness/team cleanly when access or defaults change
+- switch between already connected teams without re-running setup
+- verify the local config with `s46 doctor`
 
 ### 3. Configure existing harnesses
 

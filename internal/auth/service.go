@@ -39,7 +39,7 @@ func (s Service) Login(ctx context.Context, userHint string, teamHint string) (L
 	if err != nil {
 		return LoginResult{}, err
 	}
-	if err := s.storeTokens(tokens); err != nil {
+	if err := s.storeTokens(ctx, tokens); err != nil {
 		return LoginResult{}, err
 	}
 
@@ -93,7 +93,9 @@ func (s Service) Logout(ctx context.Context) (string, error) {
 	}
 	user := state.CurrentUser
 	if user != "" {
-		_ = s.Keyring.Delete(tokenService, user)
+		if err := s.Keyring.Delete(ctx, tokenService, user); err != nil {
+			return "", err
+		}
 	}
 	state.Authenticated = false
 	state.CurrentUser = ""
@@ -120,7 +122,7 @@ func (s Service) Token(ctx context.Context, refresh bool) (string, error) {
 	if state.CurrentUser == "" {
 		return "", fmt.Errorf("no refresh token available; run `s46 login` first")
 	}
-	tokens, err := s.loadTokens(state.CurrentUser)
+	tokens, err := s.loadTokens(ctx, state.CurrentUser)
 	if err != nil {
 		return "", fmt.Errorf("no refresh token available; run `s46 login` first")
 	}
@@ -129,23 +131,23 @@ func (s Service) Token(ctx context.Context, refresh bool) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		if err := s.storeTokens(tokens); err != nil {
+		if err := s.storeTokens(ctx, tokens); err != nil {
 			return "", err
 		}
 	}
 	return tokens.AccessToken, nil
 }
 
-func (s Service) storeTokens(tokens api.TokenSet) error {
+func (s Service) storeTokens(ctx context.Context, tokens api.TokenSet) error {
 	raw, err := json.Marshal(tokens)
 	if err != nil {
 		return err
 	}
-	return s.Keyring.Set(tokenService, tokens.Account, string(raw))
+	return s.Keyring.Set(ctx, tokenService, tokens.Account, string(raw))
 }
 
-func (s Service) loadTokens(account string) (api.TokenSet, error) {
-	raw, err := s.Keyring.Get(tokenService, account)
+func (s Service) loadTokens(ctx context.Context, account string) (api.TokenSet, error) {
+	raw, err := s.Keyring.Get(ctx, tokenService, account)
 	if err != nil {
 		return api.TokenSet{}, err
 	}

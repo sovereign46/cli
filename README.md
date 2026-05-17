@@ -34,6 +34,12 @@ The production keyring backend uses the OS keychain where implemented. Tests and
 S46_KEYRING_BACKEND=file go run ./cmd/s46 login
 ```
 
+`s46 share` follows Pi's CLI-side flow and uses `gh gist create --public=false` by default. Tests and demos can force deterministic mock sharing:
+
+```sh
+S46_SHARE_BACKEND=mock S46_MOCK_GIST_ID=0123456789abcdef0123456789abcdef go run ./cmd/s46 share @dscape/auth-redirect-fix
+```
+
 ## Implemented command surface
 
 ```sh
@@ -42,7 +48,11 @@ s46 logout
 s46 whoami
 s46 token --refresh
 s46 connect <team> --harness=pi|claude-code|codex|standard [--dry-run]
+s46 disconnect <team> [--harness=pi|claude-code|codex|standard] [--dry-run]
+s46 use <team>
+s46 doctor
 s46 status
+s46 version
 s46 sessions
 s46 detach <session>
 s46 resume <session>
@@ -59,7 +69,6 @@ Global flags:
 --json
 --dry-run
 --verbose
---no-color
 --help
 ```
 

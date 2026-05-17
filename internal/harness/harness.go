@@ -19,7 +19,16 @@ type ConnectRequest struct {
 	Team   api.Team
 	Model  string
 	Mode   string
+	Scope  string
 	DryRun bool
+}
+
+type DisconnectRequest struct {
+	Env     map[string]string
+	Team    api.Team
+	Harness string
+	Scope   string
+	DryRun  bool
 }
 
 type FilePlan struct {
@@ -57,6 +66,7 @@ type Adapter interface {
 	Name() string
 	Detect(ctx context.Context, env map[string]string) (Detection, error)
 	PlanConnect(ctx context.Context, req ConnectRequest) (Plan, error)
+	PlanDisconnect(ctx context.Context, req DisconnectRequest) (Plan, error)
 	ApplyConnect(ctx context.Context, plan Plan) (AppliedPlan, error)
 }
 

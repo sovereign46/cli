@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -20,8 +21,13 @@ func (a Adapter) Name() string { return "pi" }
 
 func (a Adapter) Detect(ctx context.Context, env map[string]string) (harness.Detection, error) {
 	path := filepath.Join(config.HomeDir(env), ".pi", "agent", "models.json")
-	_, err := os.Stat(path)
-	return harness.Detection{Installed: err == nil, Path: config.DisplayPath(path, env)}, nil
+	if _, err := os.Stat(path); err == nil {
+		return harness.Detection{Installed: true, Path: config.DisplayPath(path, env)}, nil
+	}
+	if binary, err := exec.LookPath("pi"); err == nil {
+		return harness.Detection{Installed: true, Path: binary}, nil
+	}
+	return harness.Detection{Installed: false, Path: config.DisplayPath(path, env)}, nil
 }
 
 func (a Adapter) PlanConnect(ctx context.Context, req harness.ConnectRequest) (harness.Plan, error) {
@@ -77,6 +83,41 @@ func (a Adapter) PlanConnect(ctx context.Context, req harness.ConnectRequest) (h
 			JSONValue:   existing,
 			Mode:        0o600,
 		}},
+	}, nil
+}
+
+func (a Adapter) PlanDisconnect(ctx context.Context, req harness.DisconnectRequest) (harness.Plan, error) {
+	path := filepath.Join(config.HomeDir(req.Env), ".pi", "agent", "models.json")
+	oldContent, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		oldContent = nil
+	} else if err != nil {
+		return harness.Plan{}, err
+	}
+	existing := map[string]any{"providers": map[string]any{}}
+	if err := config.ReadJSON(path, existing, &existing); err != nil {
+		return harness.Plan{}, err
+	}
+	if providers, ok := existing["providers"].(map[string]any); ok {
+		delete(providers, "s46")
+		existing["providers"] = providers
+	}
+	content, err := json.MarshalIndent(existing, "", "  ")
+	if err != nil {
+		return harness.Plan{}, err
+	}
+	content = append(content, '\n')
+	verb := "writes"
+	if req.DryRun {
+		verb = "would write"
+	}
+	return harness.Plan{
+		Harness:    "pi",
+		Title:      "Disconnect Pi from Sovereign46",
+		Env:        req.Env,
+		Summary:    fmt.Sprintf("harness: pi (%s %s)", verb, config.DisplayPath(path, req.Env)),
+		Operations: []string{"remove providers.s46 from Pi models.json"},
+		Files:      []harness.FilePlan{{Path: path, DisplayPath: config.DisplayPath(path, req.Env), Kind: "json", OldContent: oldContent, Content: content, JSONValue: existing, Mode: 0o600}},
 	}, nil
 }
 

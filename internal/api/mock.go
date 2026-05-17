@@ -10,17 +10,50 @@ import (
 	"time"
 )
 
-type MockClient struct{}
+type MockFixtures struct {
+	Account         string
+	Team            string
+	Lane            string
+	Mode            string
+	Boxes           []string
+	DefaultBox      string
+	DefaultSession  string
+	DefaultTask     string
+	DefaultSpend    string
+	DeviceCode      string
+	UserCode        string
+	VerificationURI string
+}
+
+var DefaultMockFixtures = MockFixtures{
+	Account:         "dscape@acme.s46.dev",
+	Team:            "acme",
+	Lane:            "EU-OPO",
+	Mode:            "cloud",
+	Boxes:           []string{"box-01", "box-02"},
+	DefaultBox:      "box-04.acme.s46.dev",
+	DefaultSession:  "@dscape/auth-redirect-fix",
+	DefaultTask:     "Fix auth redirect handling",
+	DefaultSpend:    "€4.20",
+	DeviceCode:      "mock-device-code",
+	UserCode:        "WXYZ-1234",
+	VerificationURI: "https://s46.dev/device",
+}
+
+type MockClient struct {
+	Fixtures MockFixtures
+}
 
 func NewMockClient() *MockClient {
-	return &MockClient{}
+	return &MockClient{Fixtures: DefaultMockFixtures}
 }
 
 func (c *MockClient) StartDeviceLogin(ctx context.Context) (DeviceLogin, error) {
+	fixtures := c.fixtures()
 	return DeviceLogin{
-		DeviceCode:      "mock-device-code",
-		UserCode:        "WXYZ-1234",
-		VerificationURI: "https://s46.dev/device",
+		DeviceCode:      fixtures.DeviceCode,
+		UserCode:        fixtures.UserCode,
+		VerificationURI: fixtures.VerificationURI,
 		Interval:        2 * time.Second,
 		ExpiresAt:       time.Now().Add(10 * time.Minute).UTC(),
 	}, nil
@@ -29,7 +62,7 @@ func (c *MockClient) StartDeviceLogin(ctx context.Context) (DeviceLogin, error) 
 func (c *MockClient) PollDeviceLogin(ctx context.Context, deviceCode string, userHint string) (TokenSet, error) {
 	account := userHint
 	if account == "" {
-		account = "dscape@acme.s46.dev"
+		account = c.fixtures().Account
 	}
 	return c.tokenSet(account), nil
 }
@@ -42,10 +75,12 @@ func (c *MockClient) RefreshToken(ctx context.Context, refreshToken string, acco
 }
 
 func (c *MockClient) Me(ctx context.Context, accessToken string) (User, error) {
-	return User{Email: "dscape@acme.s46.dev", Team: "acme"}, nil
+	fixtures := c.fixtures()
+	return User{Email: fixtures.Account, Team: fixtures.Team}, nil
 }
 
 func (c *MockClient) Team(ctx context.Context, name string, opts TeamOptions) (Team, error) {
+	fixtures := c.fixtures()
 	team := sanitizeTeam(name)
 	if team == "" {
 		return Team{}, fmt.Errorf("team is required")
@@ -56,11 +91,11 @@ func (c *MockClient) Team(ctx context.Context, name string, opts TeamOptions) (T
 	}
 	lane := opts.Lane
 	if lane == "" {
-		lane = "EU-OPO"
+		lane = fixtures.Lane
 	}
 	mode := opts.Mode
 	if mode == "" {
-		mode = "cloud"
+		mode = fixtures.Mode
 	}
 	model := opts.DefaultModel
 	if model == "" {
@@ -71,7 +106,7 @@ func (c *MockClient) Team(ctx context.Context, name string, opts TeamOptions) (T
 		Endpoint:     endpoint,
 		Lane:         lane,
 		Mode:         mode,
-		Boxes:        []string{"box-01", "box-02"},
+		Boxes:        append([]string(nil), fixtures.Boxes...),
 		DefaultModel: model,
 		Models:       append([]string(nil), DefaultModels...),
 	}, nil
@@ -88,7 +123,7 @@ func (c *MockClient) Detach(ctx context.Context, req DetachRequest) (Session, er
 	}
 	box := req.Box
 	if box == "" {
-		box = "box-04.acme.s46.dev"
+		box = c.fixtures().DefaultBox
 	}
 	return Session{
 		ID:       req.SessionID,
@@ -111,10 +146,15 @@ func (c *MockClient) Resume(ctx context.Context, req ResumeRequest) (Session, er
 	return session, nil
 }
 
+func (c *MockClient) Attach(ctx context.Context, req AttachRequest) (AttachResult, error) {
+	return AttachResult{SessionID: req.SessionID, URL: "wss://box-04.acme.s46.dev/session/" + strings.TrimPrefix(req.SessionID, "@"), Protocol: "websocket"}, nil
+}
+
 func (c *MockClient) Land(ctx context.Context, req LandRequest) (LandResult, error) {
 	title := req.Title
+	fixtures := c.fixtures()
 	if title == "" {
-		title = "Fix auth redirect handling"
+		title = fixtures.DefaultTask
 	}
 	session := req.Session
 	if session.Harness == "" {
@@ -124,7 +164,7 @@ func (c *MockClient) Land(ctx context.Context, req LandRequest) (LandResult, err
 		session.Model = req.Team.DefaultModel
 	}
 	if session.Spent == "" {
-		session.Spent = "€4.20"
+		session.Spent = fixtures.DefaultSpend
 	}
 	branchSlug := strings.TrimPrefix(req.SessionID, "@")
 	branchSlug = strings.ReplaceAll(branchSlug, "/", "-")
@@ -132,7 +172,7 @@ func (c *MockClient) Land(ctx context.Context, req LandRequest) (LandResult, err
 		ID:      req.SessionID,
 		Title:   title,
 		Branch:  "s46/" + branchSlug,
-		RanOn:   []string{"localhost", nonEmpty(session.Location, "box-04.acme.s46.dev"), "localhost"},
+		RanOn:   []string{"localhost", nonEmpty(session.Location, fixtures.DefaultBox), "localhost"},
 		Harness: session.Harness,
 		Model:   session.Model,
 		Cost:    session.Spent,
@@ -146,28 +186,45 @@ func (c *MockClient) Land(ctx context.Context, req LandRequest) (LandResult, err
 
 func DefaultSession(team Team) Session {
 	if team.Name == "" {
-		team.Name = "acme"
+		team.Name = DefaultMockFixtures.Team
 	}
 	if team.Lane == "" {
-		team.Lane = "EU-OPO"
+		team.Lane = DefaultMockFixtures.Lane
 	}
 	if team.DefaultModel == "" {
 		team.DefaultModel = DefaultModel
 	}
 	return Session{
-		ID:       "@dscape/auth-redirect-fix",
+		ID:       DefaultMockFixtures.DefaultSession,
 		State:    "running",
 		Harness:  team.DefaultHarness(),
-		Location: "box-04.acme.s46.dev",
+		Location: DefaultMockFixtures.DefaultBox,
 		Lane:     team.Lane,
 		Model:    team.DefaultModel,
 		Age:      "14h",
-		Spent:    "€4.20",
+		Spent:    DefaultMockFixtures.DefaultSpend,
 	}
 }
 
 func (t Team) DefaultHarness() string {
 	return "claude-code"
+}
+
+func (c *MockClient) fixtures() MockFixtures {
+	if c == nil || c.Fixtures.Account == "" {
+		return DefaultMockFixtures
+	}
+	fixtures := c.Fixtures
+	if len(fixtures.Boxes) == 0 {
+		fixtures.Boxes = DefaultMockFixtures.Boxes
+	}
+	if fixtures.DefaultBox == "" {
+		fixtures.DefaultBox = DefaultMockFixtures.DefaultBox
+	}
+	if fixtures.DefaultSpend == "" {
+		fixtures.DefaultSpend = DefaultMockFixtures.DefaultSpend
+	}
+	return fixtures
 }
 
 func (c *MockClient) tokenSet(account string) TokenSet {

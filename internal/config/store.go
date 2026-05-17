@@ -16,6 +16,7 @@ type Config struct {
 }
 
 type TeamConfig struct {
+	SchemaVersion  int      `json:"schemaVersion"`
 	Endpoint       string   `json:"endpoint"`
 	Lane           string   `json:"lane"`
 	Mode           string   `json:"mode"`
@@ -23,6 +24,7 @@ type TeamConfig struct {
 	DefaultModel   string   `json:"defaultModel"`
 	Boxes          []string `json:"boxes,omitempty"`
 	Models         []string `json:"models,omitempty"`
+	APISnapshot    api.Team `json:"apiSnapshot"`
 }
 
 type State struct {
@@ -109,6 +111,7 @@ func TeamConfigFromAPI(team api.Team, harness string, model string) TeamConfig {
 		model = team.DefaultModel
 	}
 	return TeamConfig{
+		SchemaVersion:  1,
 		Endpoint:       team.Endpoint,
 		Lane:           team.Lane,
 		Mode:           team.Mode,
@@ -116,6 +119,7 @@ func TeamConfigFromAPI(team api.Team, harness string, model string) TeamConfig {
 		DefaultModel:   model,
 		Boxes:          team.Boxes,
 		Models:         team.Models,
+		APISnapshot:    team,
 	}
 }
 
