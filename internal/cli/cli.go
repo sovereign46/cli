@@ -655,7 +655,7 @@ type doctorCheck struct {
 
 func doctorChecks(ctx context.Context, app *app, teamName string, teamConfig config.TeamConfig) []doctorCheck {
 	checks := []doctorCheck{
-		{Name: "tenant", OK: teamConfig.Endpoint == fmt.Sprintf("https://%s.s46.dev", teamName), Message: teamConfig.Endpoint},
+		{Name: "tenant", OK: tenantEndpointOK(app.runtime.Env, teamName, teamConfig.Endpoint), Message: teamConfig.Endpoint},
 	}
 	adapter, err := app.harness.Get(teamConfig.DefaultHarness)
 	if err != nil {
@@ -670,6 +670,34 @@ func doctorChecks(ctx context.Context, app *app, teamName string, teamConfig con
 	checks = append(checks, doctorCheck{Name: "harness", OK: detection.Installed || teamConfig.DefaultHarness == "standard", Message: firstNonEmpty(detection.Path, teamConfig.DefaultHarness)})
 	checks = append(checks, doctorHarnessConfig(app, teamConfig)...)
 	return checks
+}
+
+func tenantEndpointOK(env map[string]string, teamName string, endpoint string) bool {
+	if endpoint == fmt.Sprintf("https://%s.s46.dev", teamName) {
+		return true
+	}
+	if origin, ok := api.LocalDevelopmentOrigin(env["S46_API_BASE_URL"]); ok && endpoint == origin {
+		return true
+	}
+	if truthy(env["S46_DEV_SHELL"]) {
+		baseURL := env["S46_DEV_BASE_URL"]
+		if baseURL == "" {
+			baseURL = "http://127.0.0.1:8080"
+		}
+		if origin, ok := api.LocalDevelopmentOrigin(baseURL); ok && endpoint == origin {
+			return true
+		}
+	}
+	return false
+}
+
+func truthy(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
 }
 
 func doctorHarnessConfig(app *app, teamConfig config.TeamConfig) []doctorCheck {

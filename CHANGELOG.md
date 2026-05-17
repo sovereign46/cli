@@ -8,7 +8,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
-- Fixed local development device-login output to rewrite production S46 verification URLs to the configured local API origin.
+- Fixed local development URL handling so device-login, tenant endpoints, box/session locations, attach URLs, and share viewer URLs resolve to the configured local origin inside the development shell while defaulting to production outside it.
 
 ## [0.0.1] - 2026-05-17
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 )
@@ -32,13 +33,21 @@ func TestHTTPClientWireShape(t *testing.T) {
 			}
 			_ = json.NewEncoder(w).Encode(User{Email: "dscape@acme.s46.dev", Team: "acme"})
 		case "/v1/teams/acme":
-			_ = json.NewEncoder(w).Encode(Team{Name: "acme", Endpoint: "https://acme.s46.dev", Lane: "EU-OPO", Mode: "cloud", DefaultModel: DefaultModel})
+			_ = json.NewEncoder(w).Encode(Team{Name: "acme", Endpoint: "https://acme.s46.dev", Lane: "EU-OPO", Mode: "cloud", Boxes: []string{"box-01.acme.s46.dev"}, DefaultModel: DefaultModel})
+		case "/v1/sessions":
+			_ = json.NewEncoder(w).Encode(map[string]any{"sessions": []Session{{ID: "@dscape/auth-redirect-fix", State: "running", Location: "box-04.acme.s46.dev"}}})
+		case "/v1/sessions/@dscape/auth-redirect-fix/attach":
+			_ = json.NewEncoder(w).Encode(AttachResult{SessionID: "@dscape/auth-redirect-fix", URL: "wss://box-04.acme.s46.dev/session/auth-redirect-fix", Protocol: "websocket"})
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
 	}))
 	defer server.Close()
 
+	serverBase, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
 	client := NewHTTPClient(server.URL)
 	if client.Client.Timeout != DefaultHTTPTimeout {
 		t.Fatalf("timeout = %s", client.Client.Timeout)
@@ -71,7 +80,34 @@ func TestHTTPClientWireShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if team.Endpoint != "https://acme.s46.dev" {
-		t.Fatalf("team = %#v", team)
+	if team.Endpoint != server.URL || len(team.Boxes) != 1 || team.Boxes[0] != serverBase.Host {
+		t.Fatalf("team = %#v, want endpoint %q and box %q", team, server.URL, serverBase.Host)
+	}
+	sessions, err := client.Sessions(context.Background(), team)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].Location != serverBase.Host {
+		t.Fatalf("sessions = %#v, want local host %q", sessions, serverBase.Host)
+	}
+	attach, err := client.Attach(context.Background(), AttachRequest{SessionID: "@dscape/auth-redirect-fix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attach.URL != "ws://"+serverBase.Host+"/session/auth-redirect-fix" {
+		t.Fatalf("attach URL = %q", attach.URL)
+	}
+}
+
+func TestHTTPClientProductionURLsStayProduction(t *testing.T) {
+	client := NewHTTPClient("https://api.s46.dev")
+	if got := client.rewriteS46URL("https://s46.dev/device"); got != "https://s46.dev/device" {
+		t.Fatalf("rewriteS46URL = %q", got)
+	}
+	if got := client.rewriteS46URL("/device"); got != "https://api.s46.dev/device" {
+		t.Fatalf("relative rewrite = %q", got)
+	}
+	if got := client.rewriteS46Location("box-04.acme.s46.dev"); got != "box-04.acme.s46.dev" {
+		t.Fatalf("location rewrite = %q", got)
 	}
 }

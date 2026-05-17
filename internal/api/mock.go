@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -15,6 +16,7 @@ type MockFixtures struct {
 	Team            string
 	Lane            string
 	Mode            string
+	Endpoint        string
 	Boxes           []string
 	DefaultBox      string
 	DefaultSession  string
@@ -46,6 +48,26 @@ type MockClient struct {
 
 func NewMockClient() *MockClient {
 	return &MockClient{Fixtures: DefaultMockFixtures}
+}
+
+func NewLocalMockClient(baseURL string) *MockClient {
+	origin, host := localMockOrigin(baseURL)
+	fixtures := DefaultMockFixtures
+	fixtures.Endpoint = origin
+	fixtures.VerificationURI = origin + "/device"
+	fixtures.DefaultBox = host
+	return &MockClient{Fixtures: fixtures}
+}
+
+func localMockOrigin(baseURL string) (string, string) {
+	if baseURL == "" {
+		baseURL = "http://127.0.0.1:8080"
+	}
+	parsed, err := url.Parse(strings.TrimRight(baseURL, "/"))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "http://127.0.0.1:8080", "127.0.0.1:8080"
+	}
+	return parsed.Scheme + "://" + parsed.Host, parsed.Host
 }
 
 func (c *MockClient) StartDeviceLogin(ctx context.Context) (DeviceLogin, error) {
@@ -87,6 +109,9 @@ func (c *MockClient) Team(ctx context.Context, name string, opts TeamOptions) (T
 	}
 	endpoint := opts.Endpoint
 	if endpoint == "" {
+		endpoint = fixtures.Endpoint
+	}
+	if endpoint == "" {
 		endpoint = fmt.Sprintf("https://%s.s46.dev", team)
 	}
 	lane := opts.Lane
@@ -113,7 +138,12 @@ func (c *MockClient) Team(ctx context.Context, name string, opts TeamOptions) (T
 }
 
 func (c *MockClient) Sessions(ctx context.Context, team Team) ([]Session, error) {
-	return []Session{DefaultSession(team)}, nil
+	session := DefaultSession(team)
+	fixtures := c.fixtures()
+	if fixtures.Endpoint != "" {
+		session.Location = fixtures.DefaultBox
+	}
+	return []Session{session}, nil
 }
 
 func (c *MockClient) Detach(ctx context.Context, req DetachRequest) (Session, error) {
@@ -147,7 +177,19 @@ func (c *MockClient) Resume(ctx context.Context, req ResumeRequest) (Session, er
 }
 
 func (c *MockClient) Attach(ctx context.Context, req AttachRequest) (AttachResult, error) {
-	return AttachResult{SessionID: req.SessionID, URL: "wss://box-04.acme.s46.dev/session/" + strings.TrimPrefix(req.SessionID, "@"), Protocol: "websocket"}, nil
+	fixtures := c.fixtures()
+	scheme := "wss"
+	host := fixtures.DefaultBox
+	if fixtures.Endpoint != "" {
+		parsed, err := url.Parse(fixtures.Endpoint)
+		if err == nil && parsed.Host != "" {
+			host = parsed.Host
+			if parsed.Scheme == "http" {
+				scheme = "ws"
+			}
+		}
+	}
+	return AttachResult{SessionID: req.SessionID, URL: fmt.Sprintf("%s://%s/session/%s", scheme, host, strings.TrimPrefix(req.SessionID, "@")), Protocol: "websocket"}, nil
 }
 
 func (c *MockClient) Land(ctx context.Context, req LandRequest) (LandResult, error) {

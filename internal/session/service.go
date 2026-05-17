@@ -252,7 +252,7 @@ func (s Service) contextState() (workspaceContext, error) {
 	}
 	teamConfig := cfg.Teams[teamName]
 	if teamConfig.Endpoint == "" {
-		teamConfig = config.TeamConfigFromAPI(api.Team{Name: teamName, Endpoint: fmt.Sprintf("https://%s.s46.dev", teamName), Lane: "EU-OPO", Mode: "cloud", Boxes: []string{"box-01", "box-02"}, DefaultModel: api.DefaultModel, Models: api.DefaultModels}, "claude-code", api.DefaultModel)
+		teamConfig = config.TeamConfigFromAPI(api.Team{Name: teamName, Endpoint: s.defaultEndpoint(teamName), Lane: "EU-OPO", Mode: "cloud", Boxes: []string{"box-01", "box-02"}, DefaultModel: api.DefaultModel, Models: api.DefaultModels}, "claude-code", api.DefaultModel)
 	}
 	return workspaceContext{
 		Config:     cfg,
@@ -261,6 +261,31 @@ func (s Service) contextState() (workspaceContext, error) {
 		TeamConfig: teamConfig,
 		Team:       teamConfig.API(teamName),
 	}, nil
+}
+
+func (s Service) defaultEndpoint(teamName string) string {
+	if origin, ok := api.LocalDevelopmentOrigin(s.Config.Env["S46_API_BASE_URL"]); ok {
+		return origin
+	}
+	if isTruthy(s.Config.Env["S46_DEV_SHELL"]) {
+		baseURL := s.Config.Env["S46_DEV_BASE_URL"]
+		if baseURL == "" {
+			baseURL = "http://127.0.0.1:8080"
+		}
+		if origin, ok := api.LocalDevelopmentOrigin(baseURL); ok {
+			return origin
+		}
+	}
+	return fmt.Sprintf("https://%s.s46.dev", teamName)
+}
+
+func isTruthy(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
 }
 
 func findOrDefault(state config.State, sessionID string, team api.Team, teamConfig config.TeamConfig) api.Session {

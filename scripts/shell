@@ -19,12 +19,14 @@ export HOME="$sandbox/home"
 export XDG_CONFIG_HOME="$sandbox/home/.config"
 export XDG_DATA_HOME="$sandbox/home/.local/share"
 export XDG_CACHE_HOME="$sandbox/home/.cache"
+export S46_DEV_SHELL=1
+export S46_DEV_BASE_URL="${S46_DEV_BASE_URL:-http://127.0.0.1:8080}"
 export S46_KEYRING_BACKEND=file
 export S46_SHARE_BACKEND=mock
 export S46_MOCK_GIST_ID=0123456789abcdef0123456789abcdef
 export PATH="$sandbox/bin:$PATH"
 
-api_base="${S46_API_BASE_URL:-mock backend}"
+api_base="${S46_API_BASE_URL:-local mock backend at $S46_DEV_BASE_URL}"
 
 cat <<EOF
 s46 development shell

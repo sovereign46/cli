@@ -63,6 +63,31 @@ func TestHelpMatchesGolden(t *testing.T) {
 	}
 }
 
+func TestDevShellMockShareUsesLocalViewerURL(t *testing.T) {
+	env := testEnv(t)
+	env["S46_DEV_SHELL"] = "1"
+	env["S46_DEV_BASE_URL"] = "http://127.0.0.1:8080"
+	out := requireOK(t, run(t, env, "share", "@dscape/auth-redirect-fix"))
+	if !strings.Contains(out, "Share URL: http://127.0.0.1:8080/session/#") {
+		t.Fatalf("unexpected share output: %s", out)
+	}
+}
+
+func TestTenantEndpointOKAllowsLocalAPIBase(t *testing.T) {
+	if !tenantEndpointOK(map[string]string{"S46_API_BASE_URL": "http://127.0.0.1:8080"}, "acme", "http://127.0.0.1:8080") {
+		t.Fatalf("expected local API base to pass tenant check")
+	}
+	if !tenantEndpointOK(map[string]string{"S46_DEV_SHELL": "1", "S46_DEV_BASE_URL": "http://127.0.0.1:8080"}, "acme", "http://127.0.0.1:8080") {
+		t.Fatalf("expected dev shell base to pass tenant check")
+	}
+	if !tenantEndpointOK(nil, "acme", "https://acme.s46.dev") {
+		t.Fatalf("expected production tenant to pass tenant check")
+	}
+	if tenantEndpointOK(map[string]string{"S46_API_BASE_URL": "http://127.0.0.1:8080"}, "acme", "https://evil.example") {
+		t.Fatalf("unexpected tenant check success")
+	}
+}
+
 func TestLoginUsesLocalVerificationURL(t *testing.T) {
 	env := testEnv(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -83,6 +108,10 @@ func TestLoginUsesLocalVerificationURL(t *testing.T) {
 	out := requireOK(t, run(t, env, "login"))
 	if !strings.Contains(out, "visit "+server.URL+"/device") {
 		t.Fatalf("unexpected login output: %s", out)
+	}
+	status := requireOK(t, run(t, env, "status"))
+	if !strings.Contains(status, "api:     "+server.URL) {
+		t.Fatalf("unexpected status output: %s", status)
 	}
 }
 
