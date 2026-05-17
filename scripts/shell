@@ -24,11 +24,14 @@ export S46_SHARE_BACKEND=mock
 export S46_MOCK_GIST_ID=0123456789abcdef0123456789abcdef
 export PATH="$sandbox/bin:$PATH"
 
+api_base="${S46_API_BASE_URL:-mock backend}"
+
 cat <<EOF
 s46 development shell
 
 Temporary HOME: $HOME
 Temporary binary: $sandbox/bin/s46
+API base: $api_base
 
 Try:
   s46 login

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -39,7 +40,58 @@ func (c *HTTPClient) StartDeviceLogin(ctx context.Context) (DeviceLogin, error) 
 		return DeviceLogin{}, err
 	}
 	expiresAt, _ := time.Parse(time.RFC3339, response.ExpiresAt)
-	return DeviceLogin{DeviceCode: response.DeviceCode, UserCode: response.UserCode, VerificationURI: response.VerificationURI, Interval: time.Duration(response.IntervalSeconds) * time.Second, ExpiresAt: expiresAt}, nil
+	return DeviceLogin{
+		DeviceCode:      response.DeviceCode,
+		UserCode:        response.UserCode,
+		VerificationURI: c.verificationURIForDisplay(response.VerificationURI),
+		Interval:        time.Duration(response.IntervalSeconds) * time.Second,
+		ExpiresAt:       expiresAt,
+	}, nil
+}
+
+func (c *HTTPClient) verificationURIForDisplay(raw string) string {
+	if raw == "" {
+		return raw
+	}
+	base, err := url.Parse(c.BaseURL)
+	if err != nil || base.Scheme == "" || base.Host == "" {
+		return raw
+	}
+	verification, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	if !verification.IsAbs() {
+		return verificationURIOnBaseOrigin(*base, *verification)
+	}
+	if !isLocalDevelopmentHost(base.Hostname()) || !isS46Host(verification.Hostname()) {
+		return raw
+	}
+	verification.Scheme = base.Scheme
+	verification.Host = base.Host
+	return verification.String()
+}
+
+func verificationURIOnBaseOrigin(base url.URL, verification url.URL) string {
+	base.Path = verification.Path
+	base.RawPath = verification.RawPath
+	base.RawQuery = verification.RawQuery
+	base.Fragment = verification.Fragment
+	return base.String()
+}
+
+func isLocalDevelopmentHost(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && (ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified())
+}
+
+func isS46Host(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	return host == "s46.dev" || strings.HasSuffix(host, ".s46.dev")
 }
 
 func (c *HTTPClient) PollDeviceLogin(ctx context.Context, deviceCode string, userHint string) (TokenSet, error) {

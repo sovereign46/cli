@@ -6,6 +6,10 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed local development device-login output to rewrite production S46 verification URLs to the configured local API origin.
+
 ## [0.0.1] - 2026-05-17
 
 ### Added

@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 type commandResult struct {
@@ -59,6 +60,29 @@ func TestHelpMatchesGolden(t *testing.T) {
 	}
 	if out != string(golden) {
 		t.Fatalf("help output changed\n--- got ---\n%s\n--- want ---\n%s", out, string(golden))
+	}
+}
+
+func TestLoginUsesLocalVerificationURL(t *testing.T) {
+	env := testEnv(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/auth/device/start":
+			_ = json.NewEncoder(w).Encode(map[string]any{"deviceCode": "dev", "userCode": "ABCD", "verificationUri": "https://s46.dev/device", "intervalSeconds": 1, "expiresAt": time.Now().Add(time.Minute).UTC().Format(time.RFC3339)})
+		case "/v1/auth/device/poll":
+			_ = json.NewEncoder(w).Encode(map[string]any{"account": "dscape@acme.s46.dev", "accessToken": "access", "refreshToken": "refresh", "expiresAt": time.Now().Add(time.Hour).UTC().Format(time.RFC3339)})
+		case "/v1/teams/acme":
+			_ = json.NewEncoder(w).Encode(map[string]any{"name": "acme", "endpoint": "https://acme.s46.dev", "lane": "EU-OPO", "mode": "cloud", "defaultModel": "s46/kimi-k2.6"})
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	env["S46_API_BASE_URL"] = server.URL
+
+	out := requireOK(t, run(t, env, "login"))
+	if !strings.Contains(out, "visit "+server.URL+"/device") {
+		t.Fatalf("unexpected login output: %s", out)
 	}
 }
 

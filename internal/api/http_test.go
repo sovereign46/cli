@@ -50,6 +50,9 @@ func TestHTTPClientWireShape(t *testing.T) {
 	if device.DeviceCode != "dev" {
 		t.Fatalf("device = %#v", device)
 	}
+	if device.VerificationURI != server.URL+"/device" {
+		t.Fatalf("verification URI = %q, want %q", device.VerificationURI, server.URL+"/device")
+	}
 	tokens, err := client.PollDeviceLogin(context.Background(), "dev", "dscape@acme.s46.dev")
 	if err != nil {
 		t.Fatal(err)
