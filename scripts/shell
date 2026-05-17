@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+sandbox="$(mktemp -d "${TMPDIR:-/tmp}/s46-dev-shell.XXXXXX")"
+
+cleanup() {
+  rm -rf "$sandbox"
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+mkdir -p "$sandbox/home" "$sandbox/home/.config" "$sandbox/home/.local/share" "$sandbox/home/.cache" "$sandbox/bin"
+
+cd "$repo_root"
+go build -o "$sandbox/bin/s46" ./cmd/s46
+
+export HOME="$sandbox/home"
+export XDG_CONFIG_HOME="$sandbox/home/.config"
+export XDG_DATA_HOME="$sandbox/home/.local/share"
+export XDG_CACHE_HOME="$sandbox/home/.cache"
+export S46_KEYRING_BACKEND=file
+export S46_SHARE_BACKEND=mock
+export S46_MOCK_GIST_ID=0123456789abcdef0123456789abcdef
+export PATH="$sandbox/bin:$PATH"
+
+cat <<EOF
+s46 development shell
+
+Temporary HOME: $HOME
+Temporary binary: $sandbox/bin/s46
+
+Try:
+  s46 login
+  s46 connect acme --harness=claude-code --dry-run
+  s46 connect acme --harness=claude-code
+  s46 status
+  s46 doctor
+  s46 share @dscape/auth-redirect-fix
+
+Exit with Ctrl-C, Ctrl-D, or: exit
+EOF
+
+shell="${SHELL:-/bin/zsh}"
+shell_name="$(basename "$shell")"
+
+case "$shell_name" in
+  zsh)
+    zdotdir="$sandbox/zdot"
+    mkdir -p "$zdotdir"
+    cat > "$zdotdir/.zshrc" <<'EOF'
+TRAPINT() { exit 130 }
+PROMPT='%F{blue}s46-sandbox%f:%~ %# '
+EOF
+    export ZDOTDIR="$zdotdir"
+    "$shell" -i
+    ;;
+  bash)
+    bashrc="$sandbox/bashrc"
+    cat > "$bashrc" <<'EOF'
+trap 'exit 130' INT
+PS1='s46-sandbox:\w \$ '
+EOF
+    "$shell" --rcfile "$bashrc" -i
+    ;;
+  *)
+    "$shell"
+    ;;
+esac

@@ -248,13 +248,3 @@ s46 sessions
 s46 resume @dscape/auth-redirect-fix
 # [s46] resumed @dscape/auth-redirect-fix on localhost
 ```
-
-## Resolved product decisions
-
-1. Tenant endpoints are canonicalized as `https://<team>.s46.dev`. Customer-owned domains can be considered later, but the CLI default and docs should use the team subdomain directly.
-2. Device-code auth is mandatory for now. Enterprise SSO/OIDC is explicitly out of scope for the current CLI surface.
-3. `s46 connect` merges into existing harness config, preserving unrelated settings, like adding or updating a Git remote.
-4. Pi integration uses Pi's `~/.pi/agent/models.json` custom provider support, not Claude/Codex-style profile files. The S46 provider points at the tenant endpoint and obtains auth through `!s46 token --refresh`.
-5. Session IDs use the website shape `@user/slug`. CLI-generated slugs should include a cryptographically random suffix to avoid collisions and easy guessing, while remaining readable.
-6. Sharing follows Pi's model: export the session to HTML, create a secret GitHub gist, and return an S46 viewer URL for that gist. In the mock CLI this is simulated.
-7. `s46 session land` should optimize for minimal developer work while keeping human review. It should prepare review-ready metadata and next commands rather than silently bypassing review.
