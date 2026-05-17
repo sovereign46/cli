@@ -21,7 +21,7 @@ func TestDevShellUsesLocalMockURLs(t *testing.T) {
 	if team.Endpoint != "http://127.0.0.1:8080" {
 		t.Fatalf("team endpoint = %q", team.Endpoint)
 	}
-	sessions, err := client.Sessions(context.Background(), team)
+	sessions, err := client.Sessions(context.Background(), team, "")
 	if err != nil {
 		t.Fatal(err)
 	}

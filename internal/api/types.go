@@ -21,7 +21,7 @@ type Client interface {
 	RefreshToken(ctx context.Context, refreshToken string, account string) (TokenSet, error)
 	Me(ctx context.Context, accessToken string) (User, error)
 	Team(ctx context.Context, name string, opts TeamOptions) (Team, error)
-	Sessions(ctx context.Context, team Team) ([]Session, error)
+	Sessions(ctx context.Context, team Team, accessToken string) ([]Session, error)
 	Detach(ctx context.Context, req DetachRequest) (Session, error)
 	Resume(ctx context.Context, req ResumeRequest) (Session, error)
 	Attach(ctx context.Context, req AttachRequest) (AttachResult, error)
@@ -53,6 +53,7 @@ type TeamOptions struct {
 	Lane         string
 	Mode         string
 	DefaultModel string
+	AccessToken  string
 }
 
 type Team struct {
@@ -78,19 +79,22 @@ type Session struct {
 }
 
 type DetachRequest struct {
-	SessionID string `json:"sessionId"`
-	Harness   string `json:"harness"`
-	Box       string `json:"box"`
-	Team      Team   `json:"team"`
+	SessionID   string `json:"sessionId"`
+	Harness     string `json:"harness"`
+	Box         string `json:"box"`
+	Team        Team   `json:"team"`
+	AccessToken string `json:"-"`
 }
 
 type ResumeRequest struct {
-	SessionID string  `json:"sessionId"`
-	Session   Session `json:"session"`
+	SessionID   string  `json:"sessionId"`
+	Session     Session `json:"session"`
+	AccessToken string  `json:"-"`
 }
 
 type AttachRequest struct {
-	SessionID string `json:"sessionId"`
+	SessionID   string `json:"sessionId"`
+	AccessToken string `json:"-"`
 }
 
 type AttachResult struct {
@@ -100,10 +104,11 @@ type AttachResult struct {
 }
 
 type LandRequest struct {
-	SessionID string  `json:"sessionId"`
-	Session   Session `json:"session"`
-	Team      Team    `json:"team"`
-	Title     string  `json:"title"`
+	SessionID   string  `json:"sessionId"`
+	Session     Session `json:"session"`
+	Team        Team    `json:"team"`
+	Title       string  `json:"title"`
+	AccessToken string  `json:"-"`
 }
 
 type LandResult struct {

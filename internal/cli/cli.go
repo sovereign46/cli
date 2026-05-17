@@ -147,7 +147,16 @@ func loginCommand(runtime Runtime, opts *options) *cobra.Command {
 			var result auth.LoginResult
 			if err := app.withLock(cmd.Context(), func() error {
 				var err error
-				result, err = service.Login(cmd.Context(), user, team)
+				if opts.json {
+					result, err = service.Login(cmd.Context(), user, team)
+					return err
+				}
+				result, err = service.LoginWithDeviceCallback(cmd.Context(), user, team, func(device api.DeviceLogin) error {
+					return app.renderer.Lines(
+						fmt.Sprintf("[s46] visit %s and enter code: %s", device.VerificationURI, device.UserCode),
+						"[s46] waiting for approval...",
+					)
+				})
 				return err
 			}); err != nil {
 				return err
@@ -155,10 +164,7 @@ func loginCommand(runtime Runtime, opts *options) *cobra.Command {
 			if opts.json {
 				return app.renderer.WriteJSON(result)
 			}
-			return app.renderer.Lines(
-				fmt.Sprintf("[s46] visit %s and enter code: %s", result.VerificationURI, result.UserCode),
-				fmt.Sprintf("[s46] authenticated as %s", result.User),
-			)
+			return app.renderer.Lines(fmt.Sprintf("[s46] authenticated as %s", result.User))
 		},
 	}
 	cmd.Flags().StringVar(&user, "user", "", "mock user email")
@@ -387,11 +393,13 @@ func runConnect(ctx context.Context, app *app, req connectRequest) error {
 		return err
 	}
 	existing := cfg.Teams[req.TeamName]
+	accessToken := app.accessToken(ctx)
 	team, err := app.api.Team(ctx, req.TeamName, api.TeamOptions{
 		Endpoint:     firstNonEmpty(req.Endpoint, existing.Endpoint),
 		Lane:         firstNonEmpty(req.Lane, existing.Lane),
 		Mode:         firstNonEmpty(req.Mode, existing.Mode),
 		DefaultModel: firstNonEmpty(req.Model, existing.DefaultModel, api.DefaultModel),
+		AccessToken:  accessToken,
 	})
 	if err != nil {
 		return err
@@ -836,7 +844,7 @@ func sessionsCommand(runtime Runtime, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			service := sessioncmd.Service{API: app.api, Config: app.config}
+			service := sessioncmd.Service{API: app.api, Config: app.config, Keyring: app.keyring}
 			sessions, err := service.List(cmd.Context())
 			if err != nil {
 				return err
@@ -865,7 +873,7 @@ func detachCommand(runtime Runtime, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			service := sessioncmd.Service{API: app.api, Config: app.config}
+			service := sessioncmd.Service{API: app.api, Config: app.config, Keyring: app.keyring}
 			var result api.Session
 			if err := app.withLock(cmd.Context(), func() error {
 				var err error
@@ -906,7 +914,7 @@ func resumeCommand(runtime Runtime, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			service := sessioncmd.Service{API: app.api, Config: app.config}
+			service := sessioncmd.Service{API: app.api, Config: app.config, Keyring: app.keyring}
 			var result api.Session
 			var previous string
 			if err := app.withLock(cmd.Context(), func() error {
@@ -941,7 +949,7 @@ func shareCommand(runtime Runtime, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			service := sessioncmd.Service{API: app.api, Config: app.config}
+			service := sessioncmd.Service{API: app.api, Config: app.config, Keyring: app.keyring}
 			var result sessioncmd.ShareResult
 			if err := app.withLock(cmd.Context(), func() error {
 				var err error
@@ -985,7 +993,7 @@ func sessionCommand(runtime Runtime, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			service := sessioncmd.Service{API: app.api, Config: app.config}
+			service := sessioncmd.Service{API: app.api, Config: app.config, Keyring: app.keyring}
 			sessionID := ""
 			if len(args) == 1 {
 				sessionID = args[0]
@@ -1101,7 +1109,7 @@ func runCommand(runtime Runtime, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			service := sessioncmd.Service{API: app.api, Config: app.config}
+			service := sessioncmd.Service{API: app.api, Config: app.config, Keyring: app.keyring}
 			var result sessioncmd.RunResult
 			if err := app.withLock(cmd.Context(), func() error {
 				var err error
@@ -1144,6 +1152,15 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func (a *app) accessToken(ctx context.Context) string {
+	service := auth.Service{API: a.api, Config: a.config, Keyring: a.keyring}
+	token, err := service.Token(ctx, false)
+	if err != nil {
+		return ""
+	}
+	return token
 }
 
 func (a *app) withLock(ctx context.Context, fn func() error) error {

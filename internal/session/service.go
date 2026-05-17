@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"html"
 	"os"
@@ -12,14 +13,19 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/sovereign46/s46-cli/internal/api"
 	"github.com/sovereign46/s46-cli/internal/config"
+	"github.com/sovereign46/s46-cli/internal/keyring"
 )
 
+const tokenService = "s46.tokens"
+
 type Service struct {
-	API    api.Client
-	Config *config.Store
+	API     api.Client
+	Config  *config.Store
+	Keyring keyring.Store
 }
 
 type ShareResult struct {
@@ -57,7 +63,7 @@ func (s Service) List(ctx context.Context) ([]api.Session, error) {
 		sort.Slice(sessions, func(i, j int) bool { return sessions[i].ID < sessions[j].ID })
 		return sessions, nil
 	}
-	sessions, err := s.API.Sessions(ctx, ctxState.Team)
+	sessions, err := s.API.Sessions(ctx, ctxState.Team, s.accessToken(ctx, ctxState.State))
 	if err != nil {
 		return nil, err
 	}
@@ -78,7 +84,7 @@ func (s Service) Detach(ctx context.Context, sessionID string, harness string, b
 	if harness == "" {
 		harness = existing.Harness
 	}
-	result, err := s.API.Detach(ctx, api.DetachRequest{SessionID: sessionID, Harness: harness, Box: box, Team: ctxState.Team})
+	result, err := s.API.Detach(ctx, api.DetachRequest{SessionID: sessionID, Harness: harness, Box: box, Team: ctxState.Team, AccessToken: s.accessToken(ctx, ctxState.State)})
 	if err != nil {
 		return api.Session{}, err
 	}
@@ -98,7 +104,7 @@ func (s Service) Resume(ctx context.Context, sessionID string, dryRun bool) (api
 	}
 	existing := findOrDefault(ctxState.State, sessionID, ctxState.Team, ctxState.TeamConfig)
 	previous := existing.Location
-	result, err := s.API.Resume(ctx, api.ResumeRequest{SessionID: sessionID, Session: existing})
+	result, err := s.API.Resume(ctx, api.ResumeRequest{SessionID: sessionID, Session: existing, AccessToken: s.accessToken(ctx, ctxState.State)})
 	if err != nil {
 		return api.Session{}, "", err
 	}
@@ -197,7 +203,7 @@ func (s Service) Land(ctx context.Context, sessionID string, title string) (api.
 		return api.LandResult{}, err
 	}
 	session := findOrDefault(ctxState.State, sessionID, ctxState.Team, ctxState.TeamConfig)
-	result, err := s.API.Land(ctx, api.LandRequest{SessionID: sessionID, Session: session, Team: ctxState.Team, Title: title})
+	result, err := s.API.Land(ctx, api.LandRequest{SessionID: sessionID, Session: session, Team: ctxState.Team, Title: title, AccessToken: s.accessToken(ctx, ctxState.State)})
 	if err != nil {
 		return api.LandResult{}, err
 	}
@@ -261,6 +267,30 @@ func (s Service) contextState() (workspaceContext, error) {
 		TeamConfig: teamConfig,
 		Team:       teamConfig.API(teamName),
 	}, nil
+}
+
+func (s Service) accessToken(ctx context.Context, state config.State) string {
+	if s.Keyring == nil || state.CurrentUser == "" {
+		return ""
+	}
+	raw, err := s.Keyring.Get(ctx, tokenService, state.CurrentUser)
+	if err != nil {
+		return ""
+	}
+	var tokens api.TokenSet
+	if err := json.Unmarshal([]byte(raw), &tokens); err != nil {
+		return ""
+	}
+	if tokens.RefreshToken != "" && time.Until(tokens.ExpiresAt) < 30*time.Second {
+		refreshed, err := s.API.RefreshToken(ctx, tokens.RefreshToken, state.CurrentUser)
+		if err == nil && refreshed.AccessToken != "" {
+			if encoded, err := json.Marshal(refreshed); err == nil {
+				_ = s.Keyring.Set(ctx, tokenService, refreshed.Account, string(encoded))
+			}
+			return refreshed.AccessToken
+		}
+	}
+	return tokens.AccessToken
 }
 
 func (s Service) defaultEndpoint(teamName string) string {

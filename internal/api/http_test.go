@@ -33,11 +33,23 @@ func TestHTTPClientWireShape(t *testing.T) {
 			}
 			_ = json.NewEncoder(w).Encode(User{Email: "dscape@acme.s46.dev", Team: "acme"})
 		case "/v1/teams/acme":
+			requireBearer(t, r)
 			_ = json.NewEncoder(w).Encode(Team{Name: "acme", Endpoint: "https://acme.s46.dev", Lane: "EU-OPO", Mode: "cloud", Boxes: []string{"box-01.acme.s46.dev"}, DefaultModel: DefaultModel})
 		case "/v1/sessions":
+			requireBearer(t, r)
 			_ = json.NewEncoder(w).Encode(map[string]any{"sessions": []Session{{ID: "@dscape/auth-redirect-fix", State: "running", Location: "box-04.acme.s46.dev"}}})
+		case "/v1/sessions/@dscape/auth-redirect-fix/detach":
+			requireBearer(t, r)
+			_ = json.NewEncoder(w).Encode(Session{ID: "@dscape/auth-redirect-fix", State: "running", Location: "box-04.acme.s46.dev"})
+		case "/v1/sessions/@dscape/auth-redirect-fix/resume":
+			requireBearer(t, r)
+			_ = json.NewEncoder(w).Encode(Session{ID: "@dscape/auth-redirect-fix", State: "resumed", Location: "box-04.acme.s46.dev"})
 		case "/v1/sessions/@dscape/auth-redirect-fix/attach":
+			requireBearer(t, r)
 			_ = json.NewEncoder(w).Encode(AttachResult{SessionID: "@dscape/auth-redirect-fix", URL: "wss://box-04.acme.s46.dev/session/auth-redirect-fix", Protocol: "websocket"})
+		case "/v1/sessions/@dscape/auth-redirect-fix/land":
+			requireBearer(t, r)
+			_ = json.NewEncoder(w).Encode(LandResult{ID: "@dscape/auth-redirect-fix", RanOn: []string{"box-04.acme.s46.dev"}})
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
@@ -76,26 +88,54 @@ func TestHTTPClientWireShape(t *testing.T) {
 	if user.Team != "acme" {
 		t.Fatalf("user = %#v", user)
 	}
-	team, err := client.Team(context.Background(), "acme", TeamOptions{})
+	team, err := client.Team(context.Background(), "acme", TeamOptions{AccessToken: "access"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if team.Endpoint != server.URL || len(team.Boxes) != 1 || team.Boxes[0] != serverBase.Host {
 		t.Fatalf("team = %#v, want endpoint %q and box %q", team, server.URL, serverBase.Host)
 	}
-	sessions, err := client.Sessions(context.Background(), team)
+	sessions, err := client.Sessions(context.Background(), team, "access")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(sessions) != 1 || sessions[0].Location != serverBase.Host {
 		t.Fatalf("sessions = %#v, want local host %q", sessions, serverBase.Host)
 	}
-	attach, err := client.Attach(context.Background(), AttachRequest{SessionID: "@dscape/auth-redirect-fix"})
+	detach, err := client.Detach(context.Background(), DetachRequest{SessionID: "@dscape/auth-redirect-fix", AccessToken: "access"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detach.Location != serverBase.Host {
+		t.Fatalf("detach location = %q", detach.Location)
+	}
+	resume, err := client.Resume(context.Background(), ResumeRequest{SessionID: "@dscape/auth-redirect-fix", AccessToken: "access"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resume.Location != serverBase.Host {
+		t.Fatalf("resume location = %q", resume.Location)
+	}
+	attach, err := client.Attach(context.Background(), AttachRequest{SessionID: "@dscape/auth-redirect-fix", AccessToken: "access"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if attach.URL != "ws://"+serverBase.Host+"/session/auth-redirect-fix" {
 		t.Fatalf("attach URL = %q", attach.URL)
+	}
+	land, err := client.Land(context.Background(), LandRequest{SessionID: "@dscape/auth-redirect-fix", AccessToken: "access"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(land.RanOn) != 1 || land.RanOn[0] != serverBase.Host {
+		t.Fatalf("land = %#v", land)
+	}
+}
+
+func requireBearer(t *testing.T, r *http.Request) {
+	t.Helper()
+	if r.Header.Get("Authorization") != "Bearer access" {
+		t.Fatalf("missing auth header: %s", r.Header.Get("Authorization"))
 	}
 }
 

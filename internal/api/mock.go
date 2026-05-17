@@ -137,7 +137,7 @@ func (c *MockClient) Team(ctx context.Context, name string, opts TeamOptions) (T
 	}, nil
 }
 
-func (c *MockClient) Sessions(ctx context.Context, team Team) ([]Session, error) {
+func (c *MockClient) Sessions(ctx context.Context, team Team, accessToken string) ([]Session, error) {
 	session := DefaultSession(team)
 	fixtures := c.fixtures()
 	if fixtures.Endpoint != "" {

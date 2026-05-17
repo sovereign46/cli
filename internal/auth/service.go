@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -30,12 +31,23 @@ type LoginResult struct {
 	Mock            bool      `json:"mock"`
 }
 
+type DeviceCallback func(api.DeviceLogin) error
+
 func (s Service) Login(ctx context.Context, userHint string, teamHint string) (LoginResult, error) {
+	return s.LoginWithDeviceCallback(ctx, userHint, teamHint, nil)
+}
+
+func (s Service) LoginWithDeviceCallback(ctx context.Context, userHint string, teamHint string, onDevice DeviceCallback) (LoginResult, error) {
 	device, err := s.API.StartDeviceLogin(ctx)
 	if err != nil {
 		return LoginResult{}, err
 	}
-	tokens, err := s.API.PollDeviceLogin(ctx, device.DeviceCode, userHint)
+	if onDevice != nil {
+		if err := onDevice(device); err != nil {
+			return LoginResult{}, err
+		}
+	}
+	tokens, err := s.pollDeviceLogin(ctx, device, userHint)
 	if err != nil {
 		return LoginResult{}, err
 	}
@@ -47,7 +59,7 @@ func (s Service) Login(ctx context.Context, userHint string, teamHint string) (L
 	if teamName == "" {
 		teamName = TeamFromEmail(tokens.Account)
 	}
-	team, err := s.API.Team(ctx, teamName, api.TeamOptions{})
+	team, err := s.API.Team(ctx, teamName, api.TeamOptions{AccessToken: tokens.AccessToken})
 	if err != nil {
 		return LoginResult{}, err
 	}
@@ -84,6 +96,35 @@ func (s Service) Login(ctx context.Context, userHint string, teamHint string) (L
 		ExpiresAt:       tokens.ExpiresAt,
 		Mock:            true,
 	}, nil
+}
+
+func (s Service) pollDeviceLogin(ctx context.Context, device api.DeviceLogin, userHint string) (api.TokenSet, error) {
+	interval := device.Interval
+	if interval <= 0 {
+		interval = 2 * time.Second
+	}
+	for {
+		if !device.ExpiresAt.IsZero() && time.Now().After(device.ExpiresAt) {
+			return api.TokenSet{}, fmt.Errorf("device login expired; run `s46 login` again")
+		}
+		tokens, err := s.API.PollDeviceLogin(ctx, device.DeviceCode, userHint)
+		if err == nil {
+			return tokens, nil
+		}
+		if !errors.Is(err, api.ErrAuthorizationPending) {
+			if errors.Is(err, api.ErrExpired) {
+				return api.TokenSet{}, fmt.Errorf("device login expired; run `s46 login` again")
+			}
+			return api.TokenSet{}, err
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return api.TokenSet{}, ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 func (s Service) Logout(ctx context.Context) (string, error) {

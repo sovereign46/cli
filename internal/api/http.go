@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -13,6 +15,27 @@ import (
 )
 
 const DefaultHTTPTimeout = 30 * time.Second
+
+var (
+	ErrAuthorizationPending = errors.New("authorization pending")
+	ErrExpired              = errors.New("expired")
+)
+
+type Error struct {
+	Code       string
+	Message    string
+	StatusCode int
+}
+
+func (e Error) Error() string {
+	if e.Message != "" {
+		return e.Message
+	}
+	if e.Code != "" {
+		return e.Code
+	}
+	return fmt.Sprintf("HTTP %d", e.StatusCode)
+}
 
 type HTTPClient struct {
 	BaseURL string
@@ -86,7 +109,7 @@ func (c *HTTPClient) Team(ctx context.Context, name string, opts TeamOptions) (T
 		endpoint += "?" + encoded
 	}
 	var team Team
-	err := c.do(ctx, http.MethodGet, endpoint, "", nil, &team)
+	err := c.do(ctx, http.MethodGet, endpoint, opts.AccessToken, nil, &team)
 	team.Endpoint = c.rewriteS46URL(team.Endpoint)
 	for i := range team.Boxes {
 		team.Boxes[i] = c.rewriteS46Location(team.Boxes[i])
@@ -94,11 +117,11 @@ func (c *HTTPClient) Team(ctx context.Context, name string, opts TeamOptions) (T
 	return team, err
 }
 
-func (c *HTTPClient) Sessions(ctx context.Context, team Team) ([]Session, error) {
+func (c *HTTPClient) Sessions(ctx context.Context, team Team, accessToken string) ([]Session, error) {
 	var response struct {
 		Sessions []Session `json:"sessions"`
 	}
-	err := c.do(ctx, http.MethodGet, "/v1/sessions", "", nil, &response)
+	err := c.do(ctx, http.MethodGet, "/v1/sessions", accessToken, nil, &response)
 	for i := range response.Sessions {
 		c.normalizeSession(&response.Sessions[i])
 	}
@@ -107,28 +130,28 @@ func (c *HTTPClient) Sessions(ctx context.Context, team Team) ([]Session, error)
 
 func (c *HTTPClient) Detach(ctx context.Context, req DetachRequest) (Session, error) {
 	var session Session
-	err := c.do(ctx, http.MethodPost, "/v1/sessions/"+url.PathEscape(req.SessionID)+"/detach", "", req, &session)
+	err := c.do(ctx, http.MethodPost, "/v1/sessions/"+url.PathEscape(req.SessionID)+"/detach", req.AccessToken, req, &session)
 	c.normalizeSession(&session)
 	return session, err
 }
 
 func (c *HTTPClient) Resume(ctx context.Context, req ResumeRequest) (Session, error) {
 	var session Session
-	err := c.do(ctx, http.MethodPost, "/v1/sessions/"+url.PathEscape(req.SessionID)+"/resume", "", req, &session)
+	err := c.do(ctx, http.MethodPost, "/v1/sessions/"+url.PathEscape(req.SessionID)+"/resume", req.AccessToken, req, &session)
 	c.normalizeSession(&session)
 	return session, err
 }
 
 func (c *HTTPClient) Attach(ctx context.Context, req AttachRequest) (AttachResult, error) {
 	var result AttachResult
-	err := c.do(ctx, http.MethodPost, "/v1/sessions/"+url.PathEscape(req.SessionID)+"/attach", "", req, &result)
+	err := c.do(ctx, http.MethodPost, "/v1/sessions/"+url.PathEscape(req.SessionID)+"/attach", req.AccessToken, req, &result)
 	result.URL = c.rewriteS46URL(result.URL)
 	return result, err
 }
 
 func (c *HTTPClient) Land(ctx context.Context, req LandRequest) (LandResult, error) {
 	var result LandResult
-	err := c.do(ctx, http.MethodPost, "/v1/sessions/"+url.PathEscape(req.SessionID)+"/land", "", req, &result)
+	err := c.do(ctx, http.MethodPost, "/v1/sessions/"+url.PathEscape(req.SessionID)+"/land", req.AccessToken, req, &result)
 	for i := range result.RanOn {
 		result.RanOn[i] = c.rewriteS46Location(result.RanOn[i])
 	}
@@ -292,10 +315,36 @@ func (c *HTTPClient) do(ctx context.Context, method string, endpoint string, bea
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("%s %s: %s", method, endpoint, response.Status)
+		return decodeErrorResponse(method, endpoint, response)
 	}
 	if target == nil {
 		return nil
 	}
 	return json.NewDecoder(response.Body).Decode(target)
+}
+
+func decodeErrorResponse(method string, endpoint string, response *http.Response) error {
+	raw, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	var body struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	_ = json.Unmarshal(raw, &body)
+	apiErr := Error{Code: body.Error.Code, Message: body.Error.Message, StatusCode: response.StatusCode}
+	switch apiErr.Code {
+	case "authorization_pending":
+		return fmt.Errorf("%w", ErrAuthorizationPending)
+	case "expired":
+		return fmt.Errorf("%w", ErrExpired)
+	}
+	if apiErr.Code != "" || apiErr.Message != "" {
+		return apiErr
+	}
+	message := strings.TrimSpace(string(raw))
+	if message != "" {
+		return fmt.Errorf("%s %s: %s: %s", method, endpoint, response.Status, message)
+	}
+	return fmt.Errorf("%s %s: %s", method, endpoint, response.Status)
 }
