@@ -40,11 +40,11 @@ func TestDefaultUsesProductionAPI(t *testing.T) {
 
 func TestMockModeUsesProductionURLs(t *testing.T) {
 	client := NewClientFromEnv(map[string]string{"S46_API_MODE": "mock"})
-	device, err := client.StartDeviceLogin(context.Background())
+	device, err := client.StartDeviceLogin(context.Background(), DeviceLoginRequest{Email: "dscape@acme.s46.dev", DeviceID: "dev-laptop", DeviceName: "Dev laptop"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if device.VerificationURI != "https://s46.dev/device" {
+	if device.VerificationURI != "https://s46.dev/v1/auth/magic/consume" {
 		t.Fatalf("verification URI = %q", device.VerificationURI)
 	}
 	team, err := client.Team(context.Background(), "acme", TeamOptions{})

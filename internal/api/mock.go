@@ -39,19 +39,33 @@ var DefaultMockFixtures = MockFixtures{
 	DefaultSpend:    "€4.20",
 	DeviceCode:      "mock-device-code",
 	UserCode:        "WXYZ-1234",
-	VerificationURI: "https://s46.dev/device",
+	VerificationURI: "https://s46.dev/v1/auth/magic/consume",
 }
 
 type MockClient struct {
-	Fixtures MockFixtures
+	Fixtures     MockFixtures
+	LastLogin    DeviceLoginRequest
+	RevokedIDs   map[string]bool
+	LastDeviceID string
 }
 
 func NewMockClient() *MockClient {
 	return &MockClient{Fixtures: DefaultMockFixtures}
 }
 
-func (c *MockClient) StartDeviceLogin(ctx context.Context) (DeviceLogin, error) {
+func (c *MockClient) StartDeviceLogin(ctx context.Context, req DeviceLoginRequest) (DeviceLogin, error) {
 	fixtures := c.fixtures()
+	if req.Email == "" {
+		req.Email = fixtures.Account
+	}
+	if req.DeviceID == "" {
+		req.DeviceID = "mock-device"
+	}
+	if req.DeviceName == "" {
+		req.DeviceName = req.DeviceID
+	}
+	c.LastLogin = req
+	c.LastDeviceID = req.DeviceID
 	return DeviceLogin{
 		DeviceCode:      fixtures.DeviceCode,
 		UserCode:        fixtures.UserCode,
@@ -61,8 +75,8 @@ func (c *MockClient) StartDeviceLogin(ctx context.Context) (DeviceLogin, error) 
 	}, nil
 }
 
-func (c *MockClient) PollDeviceLogin(ctx context.Context, deviceCode string, userHint string) (TokenSet, error) {
-	account := userHint
+func (c *MockClient) PollDeviceLogin(ctx context.Context, deviceCode string) (TokenSet, error) {
+	account := c.LastLogin.Email
 	if account == "" {
 		account = c.fixtures().Account
 	}
@@ -79,6 +93,30 @@ func (c *MockClient) RefreshToken(ctx context.Context, refreshToken string, acco
 func (c *MockClient) Me(ctx context.Context, accessToken string) (User, error) {
 	fixtures := c.fixtures()
 	return User{Email: fixtures.Account, Team: fixtures.Team}, nil
+}
+
+func (c *MockClient) Devices(ctx context.Context, accessToken string) ([]Device, error) {
+	deviceID := c.LastDeviceID
+	if deviceID == "" {
+		deviceID = "mock-device"
+	}
+	if c.RevokedIDs != nil && c.RevokedIDs[deviceID] {
+		return []Device{}, nil
+	}
+	name := c.LastLogin.DeviceName
+	if name == "" {
+		name = "Mock device"
+	}
+	now := time.Now().UTC()
+	return []Device{{ID: deviceID, Name: name, CreatedAt: now, LastSeenAt: now}}, nil
+}
+
+func (c *MockClient) DeleteDevice(ctx context.Context, deviceID string, accessToken string) error {
+	if c.RevokedIDs == nil {
+		c.RevokedIDs = map[string]bool{}
+	}
+	c.RevokedIDs[deviceID] = true
+	return nil
 }
 
 func (c *MockClient) Team(ctx context.Context, name string, opts TeamOptions) (Team, error) {
@@ -250,8 +288,13 @@ func (c *MockClient) fixtures() MockFixtures {
 }
 
 func (c *MockClient) tokenSet(account string) TokenSet {
+	deviceID := c.LastDeviceID
+	if deviceID == "" {
+		deviceID = "mock-device"
+	}
 	return TokenSet{
 		Account:      account,
+		DeviceID:     deviceID,
 		AccessToken:  "s46_mock_access_" + safeTokenPart(account) + "_" + randomHex(8),
 		RefreshToken: "s46_mock_refresh_" + safeTokenPart(account),
 		ExpiresAt:    time.Now().Add(time.Hour).UTC(),

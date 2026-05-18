@@ -7,10 +7,11 @@ Available Commands:
   completion  Generate the autocompletion script for the specified shell
   connect     connect a team and configure a harness
   detach      mock-detach a session to an S46 box
+  devices     list and revoke paired devices
   disconnect  remove S46 configuration for a team and harness
   doctor      verify local S46 and harness configuration
   help        Help about any command
-  login       authenticate with Sovereign46 using device-code auth
+  login       authenticate with Sovereign46 using magic-link device auth
   logout      clear local credentials
   mode        view or set operating mode
   resume      mock-resume a session locally

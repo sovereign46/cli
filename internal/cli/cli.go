@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -83,6 +84,7 @@ func NewRootCommand(runtime Runtime) *cobra.Command {
 	root.AddCommand(logoutCommand(runtime, opts))
 	root.AddCommand(whoamiCommand(runtime, opts))
 	root.AddCommand(tokenCommand(runtime, opts))
+	root.AddCommand(devicesCommand(runtime, opts))
 	root.AddCommand(versionCommand(runtime, opts))
 	root.AddCommand(updateCommand(runtime, opts))
 	root.AddCommand(connectCommand(runtime, opts))
@@ -132,11 +134,13 @@ func newApp(runtime Runtime, opts *options) (*app, error) {
 }
 
 func loginCommand(runtime Runtime, opts *options) *cobra.Command {
-	var user string
+	var email string
 	var team string
+	var deviceID string
+	var deviceName string
 	cmd := &cobra.Command{
 		Use:   "login",
-		Short: "authenticate with Sovereign46 using device-code auth",
+		Short: "authenticate with Sovereign46 using magic-link device auth",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := newApp(runtime, opts)
@@ -144,17 +148,20 @@ func loginCommand(runtime Runtime, opts *options) *cobra.Command {
 				return err
 			}
 			service := auth.Service{API: app.api, Config: app.config, Keyring: app.keyring}
+			req := auth.LoginRequest{Email: email, Team: team, DeviceID: deviceID, DeviceName: deviceName}
 			var result auth.LoginResult
 			if err := app.withLock(cmd.Context(), func() error {
 				var err error
 				if opts.json {
-					result, err = service.Login(cmd.Context(), user, team)
+					result, err = service.LoginWithDeviceCallback(cmd.Context(), req, nil)
 					return err
 				}
-				result, err = service.LoginWithDeviceCallback(cmd.Context(), user, team, func(device api.DeviceLogin) error {
+				result, err = service.LoginWithDeviceCallback(cmd.Context(), req, func(device api.DeviceLogin) error {
 					return app.renderer.Lines(
-						fmt.Sprintf("[s46] visit %s and enter code: %s", device.VerificationURI, device.UserCode),
-						"[s46] waiting for approval...",
+						fmt.Sprintf("[s46] pairing code: %s", device.UserCode),
+						fmt.Sprintf("[s46] magic-link endpoint: %s", device.VerificationURI),
+						"[s46] open the magic-link URL logged by the API server to approve this device",
+						"[s46] waiting for magic-link approval...",
 					)
 				})
 				return err
@@ -167,8 +174,11 @@ func loginCommand(runtime Runtime, opts *options) *cobra.Command {
 			return app.renderer.Lines(fmt.Sprintf("[s46] authenticated as %s", result.User))
 		},
 	}
-	cmd.Flags().StringVar(&user, "user", "", "mock user email")
+	cmd.Flags().StringVar(&email, "user", "", "email address")
+	cmd.Flags().StringVar(&email, "email", "", "email address")
 	cmd.Flags().StringVar(&team, "team", "", "team slug")
+	cmd.Flags().StringVar(&deviceID, "device-id", "", "stable device id to pair")
+	cmd.Flags().StringVar(&deviceName, "device-name", "", "human-readable device name")
 	return cmd
 }
 
@@ -247,6 +257,81 @@ func tokenCommand(runtime Runtime, opts *options) *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&refresh, "refresh", false, "refresh before printing")
 	return cmd
+}
+
+func devicesCommand(runtime Runtime, opts *options) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "devices",
+		Short: "list and revoke paired devices",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := newApp(runtime, opts)
+			if err != nil {
+				return err
+			}
+			service := auth.Service{API: app.api, Config: app.config, Keyring: app.keyring}
+			devices, err := service.Devices(cmd.Context())
+			if err != nil {
+				return err
+			}
+			if opts.json {
+				return app.renderer.WriteJSON(map[string]any{"devices": devices})
+			}
+			return app.renderer.Lines(renderDevices(devices)...)
+		},
+	}
+	cmd.AddCommand(deleteDeviceCommand(runtime, opts))
+	return cmd
+}
+
+func deleteDeviceCommand(runtime Runtime, opts *options) *cobra.Command {
+	return &cobra.Command{
+		Use:     "delete <device-id>",
+		Aliases: []string{"revoke", "rm"},
+		Short:   "delete and revoke a paired device",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := newApp(runtime, opts)
+			if err != nil {
+				return err
+			}
+			service := auth.Service{API: app.api, Config: app.config, Keyring: app.keyring}
+			var revokedCurrent bool
+			if err := app.withLock(cmd.Context(), func() error {
+				var err error
+				revokedCurrent, err = service.DeleteDevice(cmd.Context(), args[0])
+				return err
+			}); err != nil {
+				return err
+			}
+			if opts.json {
+				return app.renderer.WriteJSON(map[string]any{"deleted": true, "deviceId": args[0], "loggedOut": revokedCurrent})
+			}
+			lines := []string{fmt.Sprintf("[s46] revoked device %s", args[0])}
+			if revokedCurrent {
+				lines = append(lines, "[s46] revoked current device; logged out")
+			}
+			return app.renderer.Lines(lines...)
+		},
+	}
+}
+
+func renderDevices(devices []api.Device) []string {
+	if len(devices) == 0 {
+		return []string{"[s46] no paired devices"}
+	}
+	lines := []string{"ID  NAME  LAST SEEN"}
+	for _, device := range devices {
+		lines = append(lines, fmt.Sprintf("%s  %s  %s", device.ID, device.Name, formatDeviceTime(device.LastSeenAt)))
+	}
+	return lines
+}
+
+func formatDeviceTime(value time.Time) string {
+	if value.IsZero() {
+		return "never"
+	}
+	return value.Format(time.RFC3339)
 }
 
 func versionCommand(runtime Runtime, opts *options) *cobra.Command {
@@ -676,7 +761,7 @@ func doctorChecks(ctx context.Context, app *app, teamName string, teamConfig con
 		return checks
 	}
 	checks = append(checks, doctorCheck{Name: "harness", OK: detection.Installed || teamConfig.DefaultHarness == "standard", Message: firstNonEmpty(detection.Path, teamConfig.DefaultHarness)})
-	checks = append(checks, doctorHarnessConfig(app, teamConfig)...)
+	checks = append(checks, doctorHarnessConfig(app, teamName, teamConfig)...)
 	return checks
 }
 
@@ -708,14 +793,14 @@ func truthy(value string) bool {
 	}
 }
 
-func doctorHarnessConfig(app *app, teamConfig config.TeamConfig) []doctorCheck {
+func doctorHarnessConfig(app *app, teamName string, teamConfig config.TeamConfig) []doctorCheck {
 	switch teamConfig.DefaultHarness {
 	case "claude-code":
-		return doctorClaude(app.runtime.Env, teamConfig)
+		return doctorClaude(app.runtime.Env, teamName, teamConfig)
 	case "codex":
-		return doctorCodex(app.runtime.Env, teamConfig)
+		return doctorCodex(app.runtime.Env, teamName, teamConfig)
 	case "pi":
-		return doctorPi(app.runtime.Env, teamConfig)
+		return doctorPi(app.runtime.Env, teamName, teamConfig)
 	case "standard":
 		return []doctorCheck{{Name: "standard", OK: true, Message: "no third-party harness config required"}}
 	default:
@@ -723,9 +808,12 @@ func doctorHarnessConfig(app *app, teamConfig config.TeamConfig) []doctorCheck {
 	}
 }
 
-func doctorClaude(env map[string]string, teamConfig config.TeamConfig) []doctorCheck {
+func doctorClaude(env map[string]string, teamName string, teamConfig config.TeamConfig) []doctorCheck {
 	path := filepath.Join(config.HomeDir(env), ".claude", "settings.json")
 	raw, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return []doctorCheck{{Name: "claude-config", OK: false, Message: fmt.Sprintf("not configured; run `s46 connect %s --harness=claude-code`", teamName)}}
+	}
 	if err != nil {
 		return []doctorCheck{{Name: "claude-config", OK: false, Message: err.Error()}}
 	}
@@ -741,9 +829,12 @@ func doctorClaude(env map[string]string, teamConfig config.TeamConfig) []doctorC
 	}
 }
 
-func doctorCodex(env map[string]string, teamConfig config.TeamConfig) []doctorCheck {
+func doctorCodex(env map[string]string, teamName string, teamConfig config.TeamConfig) []doctorCheck {
 	path := filepath.Join(config.HomeDir(env), ".codex", "config.toml")
 	raw, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return []doctorCheck{{Name: "codex-config", OK: false, Message: fmt.Sprintf("not configured; run `s46 connect %s --harness=codex`", teamName)}}
+	}
 	if err != nil {
 		return []doctorCheck{{Name: "codex-config", OK: false, Message: err.Error()}}
 	}
@@ -756,9 +847,12 @@ func doctorCodex(env map[string]string, teamConfig config.TeamConfig) []doctorCh
 	}
 }
 
-func doctorPi(env map[string]string, teamConfig config.TeamConfig) []doctorCheck {
+func doctorPi(env map[string]string, teamName string, teamConfig config.TeamConfig) []doctorCheck {
 	path := filepath.Join(config.HomeDir(env), ".pi", "agent", "models.json")
 	raw, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return []doctorCheck{{Name: "pi-config", OK: false, Message: fmt.Sprintf("not configured; run `s46 connect %s --harness=pi`", teamName)}}
+	}
 	if err != nil {
 		return []doctorCheck{{Name: "pi-config", OK: false, Message: err.Error()}}
 	}

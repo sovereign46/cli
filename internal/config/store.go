@@ -28,11 +28,13 @@ type TeamConfig struct {
 }
 
 type State struct {
-	CurrentUser   string                 `json:"currentUser,omitempty"`
-	Authenticated bool                   `json:"authenticated"`
-	LastLoginAt   string                 `json:"lastLoginAt,omitempty"`
-	Sessions      map[string]api.Session `json:"sessions"`
-	Shares        map[string]Share       `json:"shares"`
+	CurrentUser       string                 `json:"currentUser,omitempty"`
+	CurrentDeviceID   string                 `json:"currentDeviceId,omitempty"`
+	CurrentDeviceName string                 `json:"currentDeviceName,omitempty"`
+	Authenticated     bool                   `json:"authenticated"`
+	LastLoginAt       string                 `json:"lastLoginAt,omitempty"`
+	Sessions          map[string]api.Session `json:"sessions"`
+	Shares            map[string]Share       `json:"shares"`
 }
 
 type Share struct {

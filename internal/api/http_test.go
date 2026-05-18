@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -17,21 +18,38 @@ func TestHTTPClientWireShape(t *testing.T) {
 			if r.Method != http.MethodPost {
 				t.Fatalf("method = %s", r.Method)
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"deviceCode": "dev", "userCode": "ABCD", "verificationUri": "https://s46.dev/device", "intervalSeconds": 1, "expiresAt": time.Now().UTC().Format(time.RFC3339)})
+			var body DeviceLoginRequest
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body.Email != "dscape@acme.s46.dev" || body.DeviceID != "dev-laptop" || body.DeviceName != "Dev laptop" {
+				t.Fatalf("unexpected body: %#v", body)
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]any{"deviceCode": "dev", "userCode": "ABCD", "verificationUri": "https://s46.dev/v1/auth/magic/consume", "intervalSeconds": 1, "expiresAt": time.Now().UTC().Format(time.RFC3339)})
 		case "/v1/auth/device/poll":
 			var body map[string]string
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Fatal(err)
 			}
-			if body["deviceCode"] != "dev" || body["userHint"] != "dscape@acme.s46.dev" {
+			if body["deviceCode"] != "dev" || body["userHint"] != "" || len(body) != 1 {
 				t.Fatalf("unexpected body: %#v", body)
 			}
-			_ = json.NewEncoder(w).Encode(TokenSet{Account: "dscape@acme.s46.dev", AccessToken: "access", RefreshToken: "refresh", ExpiresAt: time.Now().Add(time.Hour).UTC()})
+			_ = json.NewEncoder(w).Encode(TokenSet{Account: "dscape@acme.s46.dev", DeviceID: "dev-laptop", AccessToken: "access", RefreshToken: "refresh", ExpiresAt: time.Now().Add(time.Hour).UTC()})
 		case "/v1/me":
 			if r.Header.Get("Authorization") != "Bearer access" {
 				t.Fatalf("missing auth header: %s", r.Header.Get("Authorization"))
 			}
 			_ = json.NewEncoder(w).Encode(User{Email: "dscape@acme.s46.dev", Team: "acme"})
+		case "/v1/devices":
+			requireBearer(t, r)
+			_ = json.NewEncoder(w).Encode(map[string]any{"devices": []Device{{ID: "dev-laptop", Name: "Dev laptop", LastSeenAt: time.Now().UTC()}}})
+		case "/v1/devices/dev-laptop":
+			requireBearer(t, r)
+			if r.Method != http.MethodDelete {
+				t.Fatalf("method = %s", r.Method)
+			}
+			w.WriteHeader(http.StatusNoContent)
 		case "/v1/teams/acme":
 			requireBearer(t, r)
 			_ = json.NewEncoder(w).Encode(Team{Name: "acme", Endpoint: "https://acme.s46.dev", Lane: "EU-OPO", Mode: "cloud", Boxes: []string{"box-01.acme.s46.dev"}, DefaultModel: DefaultModel})
@@ -64,21 +82,21 @@ func TestHTTPClientWireShape(t *testing.T) {
 	if client.Client.Timeout != DefaultHTTPTimeout {
 		t.Fatalf("timeout = %s", client.Client.Timeout)
 	}
-	device, err := client.StartDeviceLogin(context.Background())
+	device, err := client.StartDeviceLogin(context.Background(), DeviceLoginRequest{Email: "dscape@acme.s46.dev", DeviceID: "dev-laptop", DeviceName: "Dev laptop"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if device.DeviceCode != "dev" {
 		t.Fatalf("device = %#v", device)
 	}
-	if device.VerificationURI != server.URL+"/device" {
-		t.Fatalf("verification URI = %q, want %q", device.VerificationURI, server.URL+"/device")
+	if device.VerificationURI != server.URL+"/v1/auth/magic/consume" {
+		t.Fatalf("verification URI = %q, want %q", device.VerificationURI, server.URL+"/v1/auth/magic/consume")
 	}
-	tokens, err := client.PollDeviceLogin(context.Background(), "dev", "dscape@acme.s46.dev")
+	tokens, err := client.PollDeviceLogin(context.Background(), "dev")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tokens.AccessToken != "access" {
+	if tokens.AccessToken != "access" || tokens.DeviceID != "dev-laptop" {
 		t.Fatalf("tokens = %#v", tokens)
 	}
 	user, err := client.Me(context.Background(), "access")
@@ -87,6 +105,16 @@ func TestHTTPClientWireShape(t *testing.T) {
 	}
 	if user.Team != "acme" {
 		t.Fatalf("user = %#v", user)
+	}
+	devices, err := client.Devices(context.Background(), "access")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(devices) != 1 || devices[0].ID != "dev-laptop" {
+		t.Fatalf("devices = %#v", devices)
+	}
+	if err := client.DeleteDevice(context.Background(), "dev-laptop", "access"); err != nil {
+		t.Fatal(err)
 	}
 	team, err := client.Team(context.Background(), "acme", TeamOptions{AccessToken: "access"})
 	if err != nil {
@@ -136,6 +164,19 @@ func requireBearer(t *testing.T, r *http.Request) {
 	t.Helper()
 	if r.Header.Get("Authorization") != "Bearer access" {
 		t.Fatalf("missing auth header: %s", r.Header.Get("Authorization"))
+	}
+}
+
+func TestHTTPClientMapsNotInvited(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "not_invited", "message": "email is not invited"}})
+	}))
+	defer server.Close()
+
+	_, err := NewHTTPClient(server.URL).StartDeviceLogin(context.Background(), DeviceLoginRequest{Email: "dev@example.com", DeviceID: "dev-laptop", DeviceName: "Dev laptop"})
+	if !errors.Is(err, ErrNotInvited) {
+		t.Fatalf("err = %v", err)
 	}
 }
 

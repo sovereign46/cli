@@ -19,6 +19,9 @@ const DefaultHTTPTimeout = 30 * time.Second
 var (
 	ErrAuthorizationPending = errors.New("authorization pending")
 	ErrExpired              = errors.New("expired")
+	ErrNotInvited           = errors.New("not invited")
+	ErrAuthenticateFirst    = errors.New("authenticate first")
+	ErrUnauthorized         = errors.New("unauthorized")
 )
 
 type Error struct {
@@ -51,7 +54,7 @@ func NewHTTPClient(baseURL string) *HTTPClient {
 	}
 }
 
-func (c *HTTPClient) StartDeviceLogin(ctx context.Context) (DeviceLogin, error) {
+func (c *HTTPClient) StartDeviceLogin(ctx context.Context, req DeviceLoginRequest) (DeviceLogin, error) {
 	var response struct {
 		DeviceCode      string `json:"deviceCode"`
 		UserCode        string `json:"userCode"`
@@ -59,7 +62,7 @@ func (c *HTTPClient) StartDeviceLogin(ctx context.Context) (DeviceLogin, error) 
 		IntervalSeconds int    `json:"intervalSeconds"`
 		ExpiresAt       string `json:"expiresAt"`
 	}
-	if err := c.do(ctx, http.MethodPost, "/v1/auth/device/start", "", nil, &response); err != nil {
+	if err := c.do(ctx, http.MethodPost, "/v1/auth/device/start", "", req, &response); err != nil {
 		return DeviceLogin{}, err
 	}
 	expiresAt, _ := time.Parse(time.RFC3339, response.ExpiresAt)
@@ -72,9 +75,9 @@ func (c *HTTPClient) StartDeviceLogin(ctx context.Context) (DeviceLogin, error) 
 	}, nil
 }
 
-func (c *HTTPClient) PollDeviceLogin(ctx context.Context, deviceCode string, userHint string) (TokenSet, error) {
+func (c *HTTPClient) PollDeviceLogin(ctx context.Context, deviceCode string) (TokenSet, error) {
 	var tokens TokenSet
-	err := c.do(ctx, http.MethodPost, "/v1/auth/device/poll", "", map[string]string{"deviceCode": deviceCode, "userHint": userHint}, &tokens)
+	err := c.do(ctx, http.MethodPost, "/v1/auth/device/poll", "", map[string]string{"deviceCode": deviceCode}, &tokens)
 	return tokens, err
 }
 
@@ -88,6 +91,18 @@ func (c *HTTPClient) Me(ctx context.Context, accessToken string) (User, error) {
 	var user User
 	err := c.do(ctx, http.MethodGet, "/v1/me", accessToken, nil, &user)
 	return user, err
+}
+
+func (c *HTTPClient) Devices(ctx context.Context, accessToken string) ([]Device, error) {
+	var response struct {
+		Devices []Device `json:"devices"`
+	}
+	err := c.do(ctx, http.MethodGet, "/v1/devices", accessToken, nil, &response)
+	return response.Devices, err
+}
+
+func (c *HTTPClient) DeleteDevice(ctx context.Context, deviceID string, accessToken string) error {
+	return c.do(ctx, http.MethodDelete, "/v1/devices/"+url.PathEscape(deviceID), accessToken, nil, nil)
 }
 
 func (c *HTTPClient) Team(ctx context.Context, name string, opts TeamOptions) (Team, error) {
@@ -338,6 +353,12 @@ func decodeErrorResponse(method string, endpoint string, response *http.Response
 		return fmt.Errorf("%w", ErrAuthorizationPending)
 	case "expired":
 		return fmt.Errorf("%w", ErrExpired)
+	case "not_invited":
+		return fmt.Errorf("%w", ErrNotInvited)
+	case "authenticate_first":
+		return fmt.Errorf("%w", ErrAuthenticateFirst)
+	case "unauthorized":
+		return fmt.Errorf("%w", ErrUnauthorized)
 	}
 	if apiErr.Code != "" || apiErr.Message != "" {
 		return apiErr

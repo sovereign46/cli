@@ -94,9 +94,24 @@ func TestLoginUsesLocalVerificationURL(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/auth/device/start":
-			_ = json.NewEncoder(w).Encode(map[string]any{"deviceCode": "dev", "userCode": "ABCD", "verificationUri": "https://s46.dev/device", "intervalSeconds": 1, "expiresAt": time.Now().Add(time.Minute).UTC().Format(time.RFC3339)})
+			var body map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body["email"] != "dscape@acme.s46.dev" || body["deviceId"] == "" || body["deviceName"] == "" {
+				t.Fatalf("unexpected start body: %#v", body)
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]any{"deviceCode": "dev", "userCode": "ABCD", "verificationUri": "https://s46.dev/v1/auth/magic/consume", "intervalSeconds": 1, "expiresAt": time.Now().Add(time.Minute).UTC().Format(time.RFC3339)})
 		case "/v1/auth/device/poll":
-			_ = json.NewEncoder(w).Encode(map[string]any{"account": "dscape@acme.s46.dev", "accessToken": "access", "refreshToken": "refresh", "expiresAt": time.Now().Add(time.Hour).UTC().Format(time.RFC3339)})
+			var body map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body["deviceCode"] != "dev" || body["userHint"] != "" || len(body) != 1 {
+				t.Fatalf("unexpected poll body: %#v", body)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"account": "dscape@acme.s46.dev", "deviceId": "dev-laptop", "accessToken": "access", "refreshToken": "refresh", "expiresAt": time.Now().Add(time.Hour).UTC().Format(time.RFC3339)})
 		case "/v1/teams/acme":
 			_ = json.NewEncoder(w).Encode(map[string]any{"name": "acme", "endpoint": "https://acme.s46.dev", "lane": "EU-OPO", "mode": "cloud", "defaultModel": "s46/kimi-k2.6"})
 		default:
@@ -106,8 +121,8 @@ func TestLoginUsesLocalVerificationURL(t *testing.T) {
 	defer server.Close()
 	env["S46_API_BASE_URL"] = server.URL
 
-	out := requireOK(t, run(t, env, "login"))
-	if !strings.Contains(out, "visit "+server.URL+"/device") {
+	out := requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev", "--device-id", "dev-laptop", "--device-name", "Dev laptop"))
+	if !strings.Contains(out, "magic-link endpoint: "+server.URL+"/v1/auth/magic/consume") {
 		t.Fatalf("unexpected login output: %s", out)
 	}
 	status := requireOK(t, run(t, env, "status"))
@@ -133,7 +148,7 @@ func TestUpdateCommandUsesHomebrewInstruction(t *testing.T) {
 
 func TestLoginTokenWhoamiLogout(t *testing.T) {
 	env := testEnv(t)
-	out := requireOK(t, run(t, env, "login"))
+	out := requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
 	if !strings.Contains(out, "authenticated as dscape@acme.s46.dev") {
 		t.Fatalf("unexpected login output: %s", out)
 	}
@@ -156,7 +171,7 @@ func TestLoginTokenWhoamiLogout(t *testing.T) {
 
 func TestConnectClaudeDryRunAndWrite(t *testing.T) {
 	env := testEnv(t)
-	requireOK(t, run(t, env, "login"))
+	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
 	out := requireOK(t, run(t, env, "connect", "acme", "--harness=claude-code", "--dry-run"))
 	assertGolden(t, "connect-claude-dry-run.golden", out)
 	settingsPath := filepath.Join(env["HOME"], ".claude", "settings.json")
@@ -179,7 +194,7 @@ func TestConnectCodexAndPi(t *testing.T) {
 	env := testEnv(t)
 	assertGolden(t, "connect-codex-dry-run.golden", requireOK(t, run(t, env, "connect", "acme", "--harness=codex", "--dry-run")))
 	assertGolden(t, "connect-pi-dry-run.golden", requireOK(t, run(t, env, "connect", "acme", "--harness=pi", "--dry-run")))
-	requireOK(t, run(t, env, "login"))
+	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
 	requireOK(t, run(t, env, "connect", "acme", "--harness=codex"))
 	codexConfig, err := os.ReadFile(filepath.Join(env["HOME"], ".codex", "config.toml"))
 	if err != nil {
@@ -207,7 +222,7 @@ func TestConnectCodexAndPi(t *testing.T) {
 
 func TestStatusModeSessionsAndShare(t *testing.T) {
 	env := testEnv(t)
-	requireOK(t, run(t, env, "login"))
+	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
 	requireOK(t, run(t, env, "connect", "acme", "--harness=standard"))
 	requireOK(t, run(t, env, "mode", "--set", "local"))
 	assertGolden(t, "status.golden", requireOK(t, run(t, env, "status")))
@@ -243,8 +258,8 @@ func TestStatusModeSessionsAndShare(t *testing.T) {
 
 func TestSessionLifecycleAndRunSlug(t *testing.T) {
 	env := testEnv(t)
-	requireOK(t, run(t, env, "login"))
-	if out := requireOK(t, run(t, env, "detach", "@dscape/auth-redirect-fix")); !strings.Contains(out, "detached claude-code session") {
+	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	if out := requireOK(t, run(t, env, "detach", "@dscape/auth-redirect-fix")); !strings.Contains(out, "detached standard session") {
 		t.Fatalf("unexpected detach: %s", out)
 	}
 	if out := requireOK(t, run(t, env, "resume", "@dscape/auth-redirect-fix")); !strings.Contains(out, "resumed @dscape/auth-redirect-fix on localhost") {
@@ -267,7 +282,7 @@ func TestSessionLifecycleAndRunSlug(t *testing.T) {
 
 func TestBackupsBeforeOverwriteAndIdempotency(t *testing.T) {
 	env := testEnv(t)
-	requireOK(t, run(t, env, "login"))
+	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
 	requireOK(t, run(t, env, "connect", "acme", "--harness=claude-code"))
 	settingsPath := filepath.Join(env["HOME"], ".claude", "settings.json")
 	first, err := os.ReadFile(settingsPath)
@@ -298,12 +313,21 @@ func TestBackupsBeforeOverwriteAndIdempotency(t *testing.T) {
 	}
 }
 
+func TestDoctorAfterLoginDoesNotRequireHarnessConnect(t *testing.T) {
+	env := testEnv(t)
+	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	out := requireOK(t, run(t, env, "doctor"))
+	if !strings.Contains(out, "[ok] standard") || strings.Contains(out, "claude-config") {
+		t.Fatalf("unexpected doctor output: %s", out)
+	}
+}
+
 func TestDisconnectUseDoctorAndModeRequireActiveTeam(t *testing.T) {
 	env := testEnv(t)
 	if result := run(t, env, "mode", "--set", "local"); result.err == nil || !strings.Contains(result.err.Error(), "no active team") {
 		t.Fatalf("expected no active team error, got %#v", result)
 	}
-	requireOK(t, run(t, env, "login"))
+	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
 	requireOK(t, run(t, env, "connect", "acme", "--harness=claude-code"))
 	if out := requireOK(t, run(t, env, "doctor")); !strings.Contains(out, "[ok] tenant") || !strings.Contains(out, "[ok] harness") {
 		t.Fatalf("unexpected doctor output: %s", out)

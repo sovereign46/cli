@@ -116,8 +116,11 @@ Suggested initial endpoints:
 ```txt
 POST /v1/auth/device/start
 POST /v1/auth/device/poll
+GET  /v1/auth/magic/consume
 POST /v1/auth/token/refresh
 GET  /v1/me
+GET  /v1/devices
+DELETE /v1/devices/{deviceId}
 GET  /v1/teams/{team}
 GET  /v1/sessions
 POST /v1/sessions/{id}/detach

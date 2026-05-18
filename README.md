@@ -31,7 +31,7 @@ go test ./...
 The production keyring backend uses the OS keychain where implemented. Tests and local mock runs can use the file keyring backend:
 
 ```sh
-S46_KEYRING_BACKEND=file go run ./cmd/s46 login
+S46_KEYRING_BACKEND=file go run ./cmd/s46 login --user dscape@acme.s46.dev --device-id dev-laptop
 ```
 
 `s46 share` follows Pi's CLI-side flow and uses `gh gist create --public=false` by default. Tests and demos can force deterministic mock sharing:
@@ -43,10 +43,12 @@ S46_SHARE_BACKEND=mock S46_MOCK_GIST_ID=0123456789abcdef0123456789abcdef go run 
 ## Implemented command surface
 
 ```sh
-s46 login
+s46 login --user <email> --device-id <device-id> [--device-name <name>]
 s46 logout
 s46 whoami
 s46 token --refresh
+s46 devices
+s46 devices delete <device-id>
 s46 connect <team> --harness=pi|claude-code|codex|standard [--dry-run]
 s46 disconnect <team> [--harness=pi|claude-code|codex|standard] [--dry-run]
 s46 use <team>

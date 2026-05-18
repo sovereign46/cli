@@ -226,8 +226,11 @@ It may define client interfaces and API contracts for these systems.
 ## Example end-to-end flow
 
 ```sh
-s46 login
-# [s46] visit https://s46.dev/device and enter code: WXYZ-1234
+s46 login --user dscape@acme.s46.dev --device-id dev-laptop --device-name "Dev laptop"
+# [s46] pairing code: WXYZ-1234
+# [s46] magic-link endpoint: https://s46.dev/v1/auth/magic/consume
+# [s46] open the magic-link URL logged by the API server to approve this device
+# [s46] waiting for magic-link approval...
 # [s46] authenticated as dscape@acme.s46.dev
 
 s46 connect acme --harness=claude-code

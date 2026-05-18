@@ -38,7 +38,7 @@ Temporary binary: $sandbox/bin/s46
 API base: $api_base
 
 Try:
-  s46 login
+  s46 login --user dscape@acme.s46.dev --device-id dev-laptop --device-name "Dev laptop"
   s46 connect acme --harness=claude-code --dry-run
   s46 connect acme --harness=claude-code
   s46 status

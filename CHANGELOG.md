@@ -6,9 +6,13 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Added `s46 devices` and `s46 devices delete|revoke|rm <device-id>` for listing and revoking paired devices.
+
 ### Changed
 
-- Changed `s46 login` to print the device verification URL before polling and wait for approval/expiry instead of relying on dev-mode auto-approval.
+- Changed `s46 login` to start invitation-gated magic-link device auth with email, stable device id, and device name, then poll until approval/expiry.
 - Changed `s46 login` to report the existing authenticated user without starting a new device flow when valid credentials are already present.
 - Changed the default API client to use the production API unless a local shell/API base URL or explicit mock mode is configured.
 - Changed `make shell` to default `S46_API_BASE_URL` to `http://127.0.0.1:8080` so shell commands hit a local HTTP API instead of the mock backend.
@@ -16,6 +20,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Fixed `s46 doctor` after login so it does not fail on missing third-party harness config before `s46 connect` has been run.
 - Fixed local development URL handling so device-login, tenant endpoints, box/session locations, attach URLs, and share viewer URLs resolve to the configured local origin inside the development shell while defaulting to production outside it.
 
 ## [0.0.1] - 2026-05-17

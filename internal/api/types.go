@@ -16,16 +16,24 @@ var DefaultModels = []string{
 }
 
 type Client interface {
-	StartDeviceLogin(ctx context.Context) (DeviceLogin, error)
-	PollDeviceLogin(ctx context.Context, deviceCode string, userHint string) (TokenSet, error)
+	StartDeviceLogin(ctx context.Context, req DeviceLoginRequest) (DeviceLogin, error)
+	PollDeviceLogin(ctx context.Context, deviceCode string) (TokenSet, error)
 	RefreshToken(ctx context.Context, refreshToken string, account string) (TokenSet, error)
 	Me(ctx context.Context, accessToken string) (User, error)
+	Devices(ctx context.Context, accessToken string) ([]Device, error)
+	DeleteDevice(ctx context.Context, deviceID string, accessToken string) error
 	Team(ctx context.Context, name string, opts TeamOptions) (Team, error)
 	Sessions(ctx context.Context, team Team, accessToken string) ([]Session, error)
 	Detach(ctx context.Context, req DetachRequest) (Session, error)
 	Resume(ctx context.Context, req ResumeRequest) (Session, error)
 	Attach(ctx context.Context, req AttachRequest) (AttachResult, error)
 	Land(ctx context.Context, req LandRequest) (LandResult, error)
+}
+
+type DeviceLoginRequest struct {
+	Email      string `json:"email"`
+	DeviceID   string `json:"deviceId"`
+	DeviceName string `json:"deviceName"`
 }
 
 type DeviceLogin struct {
@@ -38,9 +46,17 @@ type DeviceLogin struct {
 
 type TokenSet struct {
 	Account      string    `json:"account"`
+	DeviceID     string    `json:"deviceId"`
 	AccessToken  string    `json:"accessToken"`
 	RefreshToken string    `json:"refreshToken"`
 	ExpiresAt    time.Time `json:"expiresAt"`
+}
+
+type Device struct {
+	ID         string    `json:"id"`
+	Name       string    `json:"name"`
+	CreatedAt  time.Time `json:"createdAt"`
+	LastSeenAt time.Time `json:"lastSeenAt"`
 }
 
 type User struct {
