@@ -1640,8 +1640,21 @@ func runAirplaneSetup(ctx context.Context, app *app, allowPrompts bool) (airplan
 			report = service.Check(ctx)
 		}
 	}
-	if checkOK(report, "model-downloaded") && missingCheck(report, "model-probe") {
-		report = waitForAirplaneCheck(ctx, service, "model-probe", 10*time.Second)
+	if missingCheck(report, "local-gateway") {
+		if _, ok := service.GatewayStartDescription(); !ok && service.GatewayDownloadAvailable() {
+			if yes, err := promptYesNo(app, fmt.Sprintf("%s Local S46 gateway is not installed.\n%s Download %s? [Y/n] ", airplane.Prefix, airplane.Prefix, service.GatewayInstallDescription()), true); err != nil {
+				return report, err
+			} else if yes {
+				if err := app.renderer.Lines("[s46] downloading local S46 gateway..."); err != nil {
+					return report, err
+				}
+				if err := service.InstallGateway(ctx); err != nil {
+					return report, fmt.Errorf("failed to download local S46 gateway: %w", err)
+				}
+				changed = true
+				report = service.Check(ctx)
+			}
+		}
 	}
 	if missingCheck(report, "local-gateway") {
 		if description, ok := service.GatewayStartDescription(); ok {
@@ -1659,9 +1672,8 @@ func runAirplaneSetup(ctx context.Context, app *app, allowPrompts bool) (airplan
 			}
 		} else if err := app.renderer.Lines(
 			"[s46] Local S46 gateway is not installed or running.",
-			"[s46] In development, start it with:",
-			"[s46]   cd ../s46-api",
-			"[s46]   S46_ENV=airplane S46_ADDR=127.0.0.1:8080 go run ./cmd/s46-api",
+			"[s46] In development, set S46_API_REPO=/path/to/s46-api or use make shell with ../s46-api present.",
+			"[s46] In production, connect to the network and rerun setup to download the gateway release.",
 			"[s46] Or set S46_API_BINARY=/path/to/s46-api.",
 		); err != nil {
 			return report, err
@@ -1803,7 +1815,7 @@ func airplaneModeOn(ctx context.Context, app *app) error {
 		return fmt.Errorf("could not start local S46 gateway: %w", err)
 	}
 	if !truthy(app.runtime.Env["S46_AIRPLANE_SKIP_SETUP_CHECKS"]) && !waitForGatewayReady(ctx, service, 30*time.Second) {
-		return fmt.Errorf("local S46 gateway did not become ready; check ~/.cache/s46/s46-api-airplane.log or run `S46_ENV=airplane S46_ADDR=127.0.0.1:8080 s46-api`")
+		return fmt.Errorf("local S46 gateway did not become ready; check ~/.cache/s46/s46-api-airplane.log or rerun `s46 airplane setup`")
 	}
 	if teamConfig.APISnapshot.Endpoint == "" || isLocalEndpoint(teamConfig.APISnapshot.Endpoint) {
 		teamConfig.APISnapshot = hostedTeamSnapshot(teamName, teamConfig)

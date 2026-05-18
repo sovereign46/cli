@@ -1,7 +1,9 @@
 package airplane
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -19,23 +21,28 @@ import (
 )
 
 const (
-	ModeCloud       = "cloud"
-	ModeAirplane    = "airplane"
-	Prefix          = "[s46✈]"
-	LocalGatewayURL = "http://127.0.0.1:8080"
-	LocalOllamaURL  = "http://127.0.0.1:11434"
-	LocalModelID    = "s46/local-coder"
-	BackendModel    = "devstral-small-2:24b-instruct-2512-q4_K_M"
-	MinMemoryBytes  = int64(32 * 1000 * 1000 * 1000)
-	RecMemoryBytes  = int64(64 * 1000 * 1000 * 1000)
-	MinDiskBytes    = int64(30 * 1000 * 1000 * 1000)
+	ModeCloud          = "cloud"
+	ModeAirplane       = "airplane"
+	Prefix             = "[s46✈]"
+	LocalGatewayURL    = "http://127.0.0.1:8080"
+	LocalOllamaURL     = "http://127.0.0.1:11434"
+	LocalModelID       = "s46/local-coder"
+	BackendModel       = "devstral-small-2:24b-instruct-2512-q4_K_M"
+	GatewayBinaryName  = "s46-api"
+	DefaultGatewayRepo = "sovereign46/s46-api"
+	MinMemoryBytes     = int64(32 * 1000 * 1000 * 1000)
+	RecMemoryBytes     = int64(64 * 1000 * 1000 * 1000)
+	MinDiskBytes       = int64(30 * 1000 * 1000 * 1000)
 )
 
 const (
-	checkTimeout          = 2 * time.Second
-	modelProbeTimeout     = 2 * time.Minute
-	modelProbeNoticeAfter = 2 * time.Second
-	modelProbeBodyLimit   = 4 * 1024
+	checkTimeout            = 2 * time.Second
+	modelProbeTimeout       = 5 * time.Minute
+	modelProbeNoticeAfter   = 2 * time.Second
+	modelProbeProgressEvery = time.Second
+	modelProbeBodyLimit     = 4 * 1024
+	gatewayDownloadTimeout  = 30 * time.Second
+	githubLatestURLFormat   = "https://api.github.com/repos/%s/releases/latest"
 )
 
 type Check struct {
@@ -125,7 +132,7 @@ func (s Service) Check(ctx context.Context) Report {
 	gatewayReady := s.runBoolCheck(ctx, s.checkTimeout(), s.gatewayReady)
 	gatewayPath, gatewayBinary := s.gatewayBinary()
 	report.GatewayBinary = gatewayPath
-	report.add(Check{Name: "local-gateway", OK: gatewayReady || gatewayBinary, Required: true, Message: gatewayMessage(gatewayReady, gatewayPath)})
+	report.add(Check{Name: "local-gateway", OK: gatewayReady || gatewayBinary, Required: true, Message: s.gatewayMessage(gatewayReady, gatewayPath)})
 	report.Ready = report.allRequiredOK()
 	return report
 }
@@ -147,7 +154,11 @@ func (s Service) PullModel(ctx context.Context) error {
 		s.setEnv("S46_TEST_MODEL_PROBE", "1")
 		return nil
 	}
+	if err := s.ensureOllamaDirs(); err != nil {
+		return err
+	}
 	cmd := exec.CommandContext(ctx, "ollama", "pull", s.backendModel())
+	cmd.Env = s.ollamaEnv()
 	cmd.Stdout = s.Stdout
 	cmd.Stderr = s.Stderr
 	return cmd.Run()
@@ -168,8 +179,11 @@ func (s Service) StartOllama() error {
 	if !ok {
 		return fmt.Errorf("ollama is not installed")
 	}
+	if err := s.ensureOllamaDirs(); err != nil {
+		return err
+	}
 	cmd := exec.Command(path, "serve")
-	cmd.Env = s.processEnv("OLLAMA_FLASH_ATTENTION=1", "OLLAMA_KV_CACHE_TYPE=q8_0")
+	cmd.Env = s.ollamaEnv("OLLAMA_FLASH_ATTENTION=1", "OLLAMA_KV_CACHE_TYPE=q8_0")
 	return s.startDetached(cmd, "ollama.log")
 }
 
@@ -186,12 +200,46 @@ func (s Service) StartGateway() error {
 	}
 	command, ok := s.gatewayCommand()
 	if !ok {
-		return fmt.Errorf("local S46 gateway is not running and no start command was found; set S46_API_BINARY or run `S46_ENV=airplane S46_ADDR=127.0.0.1:8080 s46-api`")
+		return fmt.Errorf("local S46 gateway is not running and no start command was found; run setup to install it or set S46_API_BINARY/S46_API_REPO")
 	}
 	cmd := exec.Command(command.Path, command.Args...)
 	cmd.Dir = command.Dir
 	cmd.Env = s.processEnv("S46_ENV=airplane", "S46_ADDR=127.0.0.1:8080", "S46_LOCAL_OLLAMA_URL="+s.ollamaURL(), "S46_LOCAL_MODEL="+s.backendModel())
 	return s.startDetached(cmd, "s46-api-airplane.log")
+}
+
+func (s Service) InstallGateway(ctx context.Context) error {
+	if truthy(s.env("S46_TEST_INSTALL_GATEWAY_OK")) {
+		path := s.managedGatewayBinaryPath()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			return err
+		}
+		return nil
+	}
+	if !s.GatewayDownloadAvailable() {
+		return fmt.Errorf("gateway download is not available for %s/%s", runtime.GOOS, runtime.GOARCH)
+	}
+	downloadURL, err := s.gatewayDownloadURL(ctx)
+	if err != nil {
+		return err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
+	if err != nil {
+		return err
+	}
+	s.setGitHubHeaders(request)
+	response, err := s.httpClient(gatewayDownloadTimeout).Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return fmt.Errorf("download gateway release failed: %s", response.Status)
+	}
+	return s.installGatewayArchive(response.Body)
 }
 
 func (s Service) HomebrewAvailable() bool {
@@ -200,6 +248,23 @@ func (s Service) HomebrewAvailable() bool {
 	}
 	_, err := exec.LookPath("brew")
 	return err == nil
+}
+
+func (s Service) GatewayDownloadAvailable() bool {
+	if value := strings.TrimSpace(s.env("S46_TEST_GATEWAY_DOWNLOAD_AVAILABLE")); value != "" {
+		return truthy(value)
+	}
+	if truthy(s.env("S46_OFFLINE")) {
+		return false
+	}
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		return false
+	}
+	return runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64"
+}
+
+func (s Service) GatewayInstallDescription() string {
+	return fmt.Sprintf("GitHub release %s into %s", s.gatewayGitHubRepo(), s.gatewayInstallDir())
 }
 
 func (s Service) GatewayStartDescription() (string, bool) {
@@ -270,7 +335,7 @@ func (s Service) gatewayBinary() (string, bool) {
 
 func (s Service) gatewayCommand() (gatewayCommand, bool) {
 	if path := strings.TrimSpace(s.env("S46_API_BINARY")); path != "" {
-		if _, err := os.Stat(path); err == nil {
+		if executableFile(path) {
 			return gatewayCommand{Path: path, Description: path}, true
 		}
 		return gatewayCommand{}, false
@@ -281,34 +346,182 @@ func (s Service) gatewayCommand() (gatewayCommand, bool) {
 		}
 		return gatewayCommand{Path: path, Description: path}, true
 	}
-	if path, err := exec.LookPath("s46-api"); err == nil {
+	if command, ok := s.gatewaySourceCommand(); ok {
+		return command, true
+	}
+	if path := s.managedGatewayBinaryPath(); executableFile(path) {
 		return gatewayCommand{Path: path, Description: path}, true
 	}
-	return s.gatewaySourceCommand()
+	if path, err := exec.LookPath(GatewayBinaryName); err == nil {
+		return gatewayCommand{Path: path, Description: path}, true
+	}
+	return gatewayCommand{}, false
 }
 
 func (s Service) gatewaySourceCommand() (gatewayCommand, bool) {
-	candidates := []string{}
-	if repo := strings.TrimSpace(s.env("S46_API_REPO")); repo != "" {
-		candidates = append(candidates, repo)
-	}
-	if wd, err := os.Getwd(); err == nil {
-		candidates = append(candidates, filepath.Join(filepath.Dir(wd), "s46-api"))
-	}
-	if home := homeDir(s.Env); home != "" {
-		candidates = append(candidates, filepath.Join(home, "dev", "s46-api"))
-	}
+	candidate := strings.TrimSpace(s.env("S46_API_REPO"))
 	goPath, goErr := exec.LookPath("go")
-	for _, candidate := range candidates {
-		if candidate == "" || goErr != nil {
-			continue
-		}
-		mainPath := filepath.Join(candidate, "cmd", "s46-api")
-		if info, err := os.Stat(mainPath); err == nil && info.IsDir() {
-			return gatewayCommand{Path: goPath, Args: []string{"run", "./cmd/s46-api"}, Dir: candidate, Description: "go run ./cmd/s46-api in " + candidate}, true
-		}
+	if candidate == "" || goErr != nil {
+		return gatewayCommand{}, false
+	}
+	mainPath := filepath.Join(candidate, "cmd", GatewayBinaryName)
+	if info, err := os.Stat(mainPath); err == nil && info.IsDir() {
+		return gatewayCommand{Path: goPath, Args: []string{"run", "./cmd/" + GatewayBinaryName}, Dir: candidate, Description: "source repo " + candidate}, true
 	}
 	return gatewayCommand{}, false
+}
+
+type gatewayRelease struct {
+	TagName string         `json:"tag_name"`
+	Name    string         `json:"name"`
+	Assets  []gatewayAsset `json:"assets"`
+}
+
+type gatewayAsset struct {
+	Name               string `json:"name"`
+	BrowserDownloadURL string `json:"browser_download_url"`
+}
+
+func (s Service) gatewayDownloadURL(ctx context.Context) (string, error) {
+	if url := strings.TrimSpace(s.env("S46_API_GATEWAY_DOWNLOAD_URL")); url != "" {
+		return url, nil
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, s.gatewayLatestReleaseURL(), nil)
+	if err != nil {
+		return "", err
+	}
+	s.setGitHubHeaders(request)
+	response, err := s.httpClient(gatewayDownloadTimeout).Do(request)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusNotFound {
+		return "", fmt.Errorf("no gateway release found for %s", s.gatewayGitHubRepo())
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return "", fmt.Errorf("gateway release check failed: %s", response.Status)
+	}
+	var release gatewayRelease
+	if err := json.NewDecoder(response.Body).Decode(&release); err != nil {
+		return "", err
+	}
+	version := normalizeReleaseVersion(nonEmpty(release.TagName, release.Name))
+	asset := selectGatewayAsset(release.Assets, version)
+	if asset.BrowserDownloadURL == "" {
+		return "", fmt.Errorf("gateway release %s has no %s/%s archive", nonEmpty(release.TagName, release.Name, "latest"), runtime.GOOS, runtime.GOARCH)
+	}
+	return asset.BrowserDownloadURL, nil
+}
+
+func (s Service) gatewayLatestReleaseURL() string {
+	if url := strings.TrimSpace(s.env("S46_API_GATEWAY_LATEST_URL")); url != "" {
+		return url
+	}
+	return fmt.Sprintf(githubLatestURLFormat, s.gatewayGitHubRepo())
+}
+
+func (s Service) gatewayGitHubRepo() string {
+	return nonEmpty(s.env("S46_API_GATEWAY_REPO"), DefaultGatewayRepo)
+}
+
+func selectGatewayAsset(assets []gatewayAsset, version string) gatewayAsset {
+	exact := fmt.Sprintf("%s_%s_%s_%s.tar.gz", GatewayBinaryName, version, runtime.GOOS, runtime.GOARCH)
+	for _, asset := range assets {
+		if asset.Name == exact {
+			return asset
+		}
+	}
+	osArch := fmt.Sprintf("_%s_%s", runtime.GOOS, runtime.GOARCH)
+	versionPart := "_" + version + "_"
+	for _, asset := range assets {
+		if strings.HasPrefix(asset.Name, GatewayBinaryName+"_") && strings.Contains(asset.Name, versionPart) && strings.Contains(asset.Name, osArch) && strings.HasSuffix(asset.Name, ".tar.gz") {
+			return asset
+		}
+	}
+	return gatewayAsset{}
+}
+
+func normalizeReleaseVersion(version string) string {
+	trimmed := strings.TrimSpace(version)
+	trimmed = strings.TrimPrefix(trimmed, "v")
+	if plus := strings.IndexByte(trimmed, '+'); plus >= 0 {
+		trimmed = trimmed[:plus]
+	}
+	return trimmed
+}
+
+func (s Service) installGatewayArchive(body io.Reader) error {
+	gzipReader, err := gzip.NewReader(body)
+	if err != nil {
+		return err
+	}
+	defer gzipReader.Close()
+	target := s.managedGatewayBinaryPath()
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+	tmp := target + ".tmp"
+	tarReader := tar.NewReader(gzipReader)
+	for {
+		header, err := tarReader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if header.Typeflag != tar.TypeReg && header.Typeflag != tar.TypeRegA {
+			continue
+		}
+		if filepath.Base(header.Name) != GatewayBinaryName {
+			continue
+		}
+		file, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755)
+		if err != nil {
+			return err
+		}
+		_, copyErr := io.Copy(file, tarReader)
+		closeErr := file.Close()
+		if copyErr != nil {
+			_ = os.Remove(tmp)
+			return copyErr
+		}
+		if closeErr != nil {
+			_ = os.Remove(tmp)
+			return closeErr
+		}
+		if err := os.Chmod(tmp, 0o755); err != nil {
+			_ = os.Remove(tmp)
+			return err
+		}
+		return os.Rename(tmp, target)
+	}
+	return fmt.Errorf("gateway archive did not contain %s", GatewayBinaryName)
+}
+
+func (s Service) setGitHubHeaders(request *http.Request) {
+	request.Header.Set("Accept", "application/vnd.github+json")
+	request.Header.Set("User-Agent", "s46-airplane")
+	if token := strings.TrimSpace(s.env("GITHUB_TOKEN")); token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
+}
+
+func (s Service) managedGatewayBinaryPath() string {
+	return filepath.Join(s.gatewayInstallDir(), "bin", GatewayBinaryName)
+}
+
+func (s Service) gatewayInstallDir() string {
+	if dir := strings.TrimSpace(s.env("S46_GATEWAY_DIR")); dir != "" {
+		return dir
+	}
+	return filepath.Join(dataDir(s.Env), "s46", "gateway", GatewayBinaryName)
+}
+
+func executableFile(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir() && info.Mode()&0o111 != 0
 }
 
 func (s Service) ollamaRunning(ctx context.Context) bool {
@@ -360,17 +573,43 @@ func (s Service) modelDownloaded(ctx context.Context) bool {
 }
 
 func (s Service) modelProbeWithNotice(ctx context.Context) (bool, string) {
-	var timer *time.Timer
-	if s.Progress != nil {
-		timer = time.AfterFunc(modelProbeNoticeAfter, func() {
-			_, _ = fmt.Fprintf(s.Progress, "%s loading %s; the first response can take up to %s...\n", Prefix, LocalModelID, formatDuration(s.modelProbeTimeout()))
-		})
+	if s.Progress == nil {
+		return s.modelProbe(ctx)
 	}
+	done := make(chan struct{})
+	finished := make(chan struct{})
+	go s.writeModelProbeProgress(done, finished)
 	ok, message := s.modelProbe(ctx)
-	if timer != nil {
-		timer.Stop()
-	}
+	close(done)
+	<-finished
 	return ok, message
+}
+
+func (s Service) writeModelProbeProgress(done <-chan struct{}, finished chan<- struct{}) {
+	defer close(finished)
+	started := time.Now()
+	timer := time.NewTimer(modelProbeNoticeAfter)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-done:
+		return
+	}
+	ticker := time.NewTicker(modelProbeProgressEvery)
+	defer ticker.Stop()
+	for {
+		elapsed := time.Since(started).Truncate(time.Second)
+		if elapsed <= 0 {
+			elapsed = time.Second
+		}
+		_, _ = fmt.Fprintf(s.Progress, "\r%s loading %s; might take a while... %s elapsed", Prefix, LocalModelID, formatDuration(elapsed))
+		select {
+		case <-ticker.C:
+		case <-done:
+			_, _ = fmt.Fprintln(s.Progress)
+			return
+		}
+	}
 }
 
 func (s Service) modelProbe(ctx context.Context) (bool, string) {
@@ -389,7 +628,7 @@ func (s Service) modelProbe(ctx context.Context) (bool, string) {
 		return false, "probe request failed: " + err.Error()
 	}
 	request.Header.Set("Content-Type", "application/json")
-	response, err := s.httpClient().Do(request)
+	response, err := s.httpClient(s.modelProbeTimeout()).Do(request)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return false, fmt.Sprintf("probe timed out after %s while loading %s", formatDuration(s.modelProbeTimeout()), s.backendModel())
@@ -548,11 +787,70 @@ func formatDuration(duration time.Duration) string {
 }
 
 func (s Service) processEnv(extra ...string) []string {
-	env := os.Environ()
+	values := map[string]string{}
+	for _, entry := range os.Environ() {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			values[key] = value
+		}
+	}
 	for key, value := range s.Env {
+		values[key] = value
+	}
+	for _, entry := range extra {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			values[key] = value
+		}
+	}
+	env := make([]string, 0, len(values))
+	for key, value := range values {
 		env = append(env, key+"="+value)
 	}
-	return append(env, extra...)
+	return env
+}
+
+func (s Service) ollamaEnv(extra ...string) []string {
+	ollamaExtra := []string{}
+	if home := s.ollamaHomeDir(); home != "" {
+		ollamaExtra = append(ollamaExtra, "HOME="+home)
+	}
+	if models := s.ollamaModelsDir(); models != "" {
+		ollamaExtra = append(ollamaExtra, "OLLAMA_MODELS="+models)
+	}
+	ollamaExtra = append(ollamaExtra, extra...)
+	return s.processEnv(ollamaExtra...)
+}
+
+func (s Service) ensureOllamaDirs() error {
+	if home := s.ollamaHomeDir(); home != "" {
+		if err := os.MkdirAll(filepath.Join(home, ".ollama"), 0o700); err != nil {
+			return fmt.Errorf("create Ollama home directory: %w", err)
+		}
+	}
+	if models := s.ollamaModelsDir(); models != "" {
+		if err := os.MkdirAll(models, 0o700); err != nil {
+			return fmt.Errorf("create Ollama models directory: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s Service) ollamaHomeDir() string {
+	if home := strings.TrimSpace(s.env("S46_HOST_HOME")); home != "" {
+		return home
+	}
+	return homeDir(s.Env)
+}
+
+func (s Service) ollamaModelsDir() string {
+	if models := strings.TrimSpace(s.env("OLLAMA_MODELS")); models != "" {
+		return models
+	}
+	if home := s.ollamaHomeDir(); home != "" {
+		return filepath.Join(home, ".ollama", "models")
+	}
+	return ""
 }
 
 func (s Service) setEnv(key string, value string) {
@@ -569,6 +867,16 @@ func cacheDir(env map[string]string) string {
 		return filepath.Join(home, ".cache", "s46")
 	}
 	return filepath.Join(os.TempDir(), "s46")
+}
+
+func dataDir(env map[string]string) string {
+	if value := strings.TrimSpace(envValue(env, "XDG_DATA_HOME")); value != "" {
+		return value
+	}
+	if home := homeDir(env); home != "" {
+		return filepath.Join(home, ".local", "share")
+	}
+	return os.TempDir()
 }
 
 func homeDir(env map[string]string) string {
@@ -588,11 +896,15 @@ func envValue(env map[string]string, key string) string {
 	return env[key]
 }
 
-func (s Service) httpClient() *http.Client {
+func (s Service) httpClient(timeout ...time.Duration) *http.Client {
 	if s.Client != nil {
 		return s.Client
 	}
-	return &http.Client{Timeout: checkTimeout}
+	clientTimeout := checkTimeout
+	if len(timeout) > 0 && timeout[0] > 0 {
+		clientTimeout = timeout[0]
+	}
+	return &http.Client{Timeout: clientTimeout}
 }
 
 func (s Service) ollamaURL() string {
@@ -614,14 +926,14 @@ func (s Service) env(key string) string {
 	return s.Env[key]
 }
 
-func gatewayMessage(ready bool, path string) string {
+func (s Service) gatewayMessage(ready bool, path string) string {
 	if ready {
-		return "local gateway is responding"
+		return "responding at " + s.gatewayURL()
 	}
 	if path != "" {
-		return path
+		return "startable: " + path
 	}
-	return "local gateway is not running and s46-api was not found"
+	return "not installed or running"
 }
 
 func boolMessage(ok bool, success string, failure string) string {

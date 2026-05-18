@@ -2,7 +2,9 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+host_home="${HOME:-}"
 sandbox="$(mktemp -d "${TMPDIR:-/tmp}/s46-dev-shell.XXXXXX")"
+api_repo_default="$(cd "$repo_root/.." && pwd)/s46-api"
 
 cleanup() {
   rm -rf "$sandbox"
@@ -10,12 +12,14 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
-mkdir -p "$sandbox/home" "$sandbox/home/.config" "$sandbox/home/.local/share" "$sandbox/home/.cache" "$sandbox/bin"
+mkdir -p "$sandbox/home" "$sandbox/home/.ollama" "$sandbox/home/.config" "$sandbox/home/.local/share" "$sandbox/home/.cache" "$sandbox/bin"
 
 cd "$repo_root"
 go build -o "$sandbox/bin/s46" ./cmd/s46
 
 export HOME="$sandbox/home"
+export S46_HOST_HOME="$host_home"
+export OLLAMA_MODELS="${OLLAMA_MODELS:-$host_home/.ollama/models}"
 export XDG_CONFIG_HOME="$sandbox/home/.config"
 export XDG_DATA_HOME="$sandbox/home/.local/share"
 export XDG_CACHE_HOME="$sandbox/home/.cache"
@@ -26,6 +30,14 @@ export S46_DEV_BASE_URL="${S46_DEV_BASE_URL:-$S46_API_BASE_URL}"
 export S46_KEYRING_BACKEND=file
 export S46_SHARE_BACKEND=mock
 export S46_MOCK_GIST_ID=0123456789abcdef0123456789abcdef
+if [ -z "${S46_API_REPO:-}" ] && [ -d "$api_repo_default/cmd/s46-api" ]; then
+  ln -s "$api_repo_default" "$sandbox/s46-api"
+  export S46_API_REPO="$sandbox/s46-api"
+elif [ -n "${S46_API_REPO:-}" ]; then
+  api_repo_link="$sandbox/s46-api"
+  ln -s "$S46_API_REPO" "$api_repo_link"
+  export S46_API_REPO="$api_repo_link"
+fi
 export PATH="$sandbox/bin:$PATH"
 
 api_base="$S46_API_BASE_URL"
@@ -36,6 +48,8 @@ s46 development shell
 Temporary HOME: $HOME
 Temporary binary: $sandbox/bin/s46
 API base: $api_base
+Ollama models: $OLLAMA_MODELS
+S46 API repo: ${S46_API_REPO:-not configured}
 
 Try:
   s46 login --user dscape@acme.s46.dev --device-id dev-laptop --device-name "Dev laptop"

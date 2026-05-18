@@ -358,6 +358,33 @@ func TestAirplaneSetupContinuesAfterInstallingOllama(t *testing.T) {
 	}
 }
 
+func TestAirplaneSetupDownloadsMissingGateway(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	env := testEnv(t)
+	delete(env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")
+	env["S46_TEST_MEMORY_BYTES"] = "68000000000"
+	env["S46_TEST_FREE_DISK_BYTES"] = "61000000000"
+	env["S46_TEST_OLLAMA_PATH"] = "/opt/homebrew/bin/ollama"
+	env["S46_TEST_OLLAMA_RUNNING"] = "1"
+	env["S46_TEST_MODEL_DOWNLOADED"] = "1"
+	env["S46_TEST_MODEL_PROBE"] = "1"
+	env["S46_TEST_GATEWAY_READY"] = "0"
+	env["S46_TEST_GATEWAY_DOWNLOAD_AVAILABLE"] = "1"
+	env["S46_TEST_INSTALL_GATEWAY_OK"] = "1"
+
+	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\n"), "airplane", "setup"))
+	for _, want := range []string{
+		"[s46✈] Local S46 gateway is not installed.",
+		"Download GitHub release sovereign46/s46-api",
+		"[s46✈] downloading local S46 gateway...",
+		"[s46✈] airplane setup: ready",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("setup output missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestAirplaneSetupReportsInsufficientHardware(t *testing.T) {
 	env := testEnv(t)
 	delete(env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")
