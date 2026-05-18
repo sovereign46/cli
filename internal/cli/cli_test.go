@@ -467,6 +467,24 @@ func TestAirplaneCloudCommandsFailFast(t *testing.T) {
 	}
 }
 
+func TestAirplaneLogsShowsKnownLogFiles(t *testing.T) {
+	env := testEnv(t)
+	logDir := filepath.Join(env["XDG_CACHE_HOME"], "s46")
+	if err := os.MkdirAll(logDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(logDir, "ollama.log"), []byte("one\ntwo\nthree\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out := requireOK(t, run(t, env, "airplane", "logs", "ollama", "--lines=2"))
+	for _, want := range []string{"[s46] ollama log:", "two", "three"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("logs output missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestAirplaneSetupDownloadsMissingGateway(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	env := testEnv(t)
@@ -556,7 +574,7 @@ func TestConnectCodexAndPi(t *testing.T) {
 	readJSON(t, filepath.Join(env["HOME"], ".pi", "agent", "models.json"), &models)
 	providers := models["providers"].(map[string]any)
 	s46 := providers["s46"].(map[string]any)
-	if s46["baseUrl"] != "https://acme.s46.dev/v1" || s46["apiKey"] != "!s46 token --refresh" || s46["authHeader"] != true {
+	if s46["baseUrl"] != "https://acme.s46.dev/v1" || s46["api"] != "openai-completions" || s46["apiKey"] != "!s46 token --refresh" || s46["authHeader"] != true {
 		t.Fatalf("unexpected pi provider: %#v", s46)
 	}
 	if got := len(s46["models"].([]any)); got != 5 {

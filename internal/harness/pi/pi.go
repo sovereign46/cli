@@ -48,7 +48,7 @@ func (a Adapter) PlanConnect(ctx context.Context, req harness.ConnectRequest) (h
 	}
 	providers["s46"] = map[string]any{
 		"baseUrl":    req.Team.Endpoint + "/v1",
-		"api":        "openai-responses",
+		"api":        "openai-completions",
 		"apiKey":     "!s46 token --refresh",
 		"authHeader": true,
 		"models":     piModels(req.Team.Models),

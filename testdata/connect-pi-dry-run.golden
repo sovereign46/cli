@@ -13,7 +13,7 @@
 +{
 +  "providers": {
 +    "s46": {
-+      "api": "openai-responses",
++      "api": "openai-completions",
 +      "apiKey": "!s46 token --refresh",
 +      "authHeader": true,
 +      "baseUrl": "https://acme.s46.dev/v1",

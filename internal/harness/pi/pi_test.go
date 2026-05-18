@@ -35,7 +35,7 @@ func TestPlanConnectPreservesProvidersAndAddsS46(t *testing.T) {
 		t.Fatalf("existing provider not preserved: %#v", providers)
 	}
 	s46 := providers["s46"].(map[string]any)
-	if s46["baseUrl"] != "https://acme.s46.dev/v1" || s46["apiKey"] != "!s46 token --refresh" || s46["authHeader"] != true {
+	if s46["baseUrl"] != "https://acme.s46.dev/v1" || s46["api"] != "openai-completions" || s46["apiKey"] != "!s46 token --refresh" || s46["authHeader"] != true {
 		t.Fatalf("unexpected s46 provider: %#v", s46)
 	}
 }

@@ -66,6 +66,11 @@ type Report struct {
 	GatewayBinary string  `json:"gatewayBinary,omitempty"`
 }
 
+type LogFile struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+}
+
 type Service struct {
 	Env               map[string]string
 	Stdin             io.Reader
@@ -278,6 +283,14 @@ func (s Service) GatewayStartDescription() (string, bool) {
 
 func (s Service) GatewayReady(ctx context.Context) bool {
 	return s.gatewayReady(ctx)
+}
+
+func (s Service) LogFiles() []LogFile {
+	cache := cacheDir(s.Env)
+	return []LogFile{
+		{Name: "ollama", Path: filepath.Join(cache, "ollama.log")},
+		{Name: "gateway", Path: filepath.Join(cache, "s46-api-airplane.log")},
+	}
 }
 
 func (s Service) OllamaRunning(ctx context.Context) bool {

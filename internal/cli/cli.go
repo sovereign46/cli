@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1612,8 +1614,115 @@ func renderModeStatus(app *app) error {
 	return app.renderer.Lines(lines...)
 }
 
+func airplaneLogsCommand(runtime Runtime, opts *options) *cobra.Command {
+	var follow bool
+	var lines int
+	cmd := &cobra.Command{
+		Use:   "logs [ollama|gateway|all]",
+		Short: "show local airplane-mode logs",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := newApp(runtime, opts)
+			if err != nil {
+				return err
+			}
+			selected := "all"
+			if len(args) == 1 {
+				selected = args[0]
+			}
+			files, err := selectedAirplaneLogFiles(airplane.Service{Env: app.runtime.Env}.LogFiles(), selected)
+			if err != nil {
+				return err
+			}
+			if opts.json {
+				return app.renderer.WriteJSON(map[string]any{"logs": files})
+			}
+			if follow {
+				return followAirplaneLogs(cmd.Context(), app, files, lines)
+			}
+			return renderAirplaneLogs(app, files, lines)
+		},
+	}
+	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "follow logs")
+	cmd.Flags().IntVarP(&lines, "lines", "n", 80, "number of lines to show per log")
+	return cmd
+}
+
+func selectedAirplaneLogFiles(files []airplane.LogFile, selected string) ([]airplane.LogFile, error) {
+	selected = strings.ToLower(strings.TrimSpace(selected))
+	if selected == "" || selected == "all" {
+		return files, nil
+	}
+	for _, file := range files {
+		if file.Name == selected {
+			return []airplane.LogFile{file}, nil
+		}
+	}
+	return nil, fmt.Errorf("unknown log %q; expected ollama, gateway, or all", selected)
+}
+
+func renderAirplaneLogs(app *app, files []airplane.LogFile, lines int) error {
+	outputLines := []string{}
+	for _, file := range files {
+		outputLines = append(outputLines, fmt.Sprintf("[s46] %s log: %s", file.Name, file.Path))
+		if _, err := os.Stat(file.Path); err != nil {
+			if os.IsNotExist(err) {
+				outputLines = append(outputLines, "[s46] log not found; this process may have been started outside this shell")
+				continue
+			}
+			return err
+		}
+		outputLines = append(outputLines, tailTextFile(file.Path, lines)...)
+	}
+	return app.renderer.Lines(outputLines...)
+}
+
+func followAirplaneLogs(ctx context.Context, app *app, files []airplane.LogFile, lines int) error {
+	paths := []string{}
+	missing := []string{}
+	for _, file := range files {
+		if _, err := os.Stat(file.Path); err == nil {
+			paths = append(paths, file.Path)
+		} else if os.IsNotExist(err) {
+			missing = append(missing, fmt.Sprintf("[s46] %s log not found: %s", file.Name, file.Path))
+		} else {
+			return err
+		}
+	}
+	if len(missing) > 0 {
+		if err := app.renderer.Lines(missing...); err != nil {
+			return err
+		}
+	}
+	if len(paths) == 0 {
+		return nil
+	}
+	args := append([]string{"-n", strconv.Itoa(lines), "-f"}, paths...)
+	command := exec.CommandContext(ctx, "tail", args...)
+	command.Stdout = app.runtime.Stdout
+	command.Stderr = app.runtime.Stderr
+	return command.Run()
+}
+
+func tailTextFile(path string, lines int) []string {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return []string{"[s46] could not read log: " + err.Error()}
+	}
+	text := strings.TrimRight(string(raw), "\n")
+	if text == "" {
+		return []string{}
+	}
+	parts := strings.Split(text, "\n")
+	if lines > 0 && len(parts) > lines {
+		parts = parts[len(parts)-lines:]
+	}
+	return parts
+}
+
 func airplaneCommand(runtime Runtime, opts *options) *cobra.Command {
 	cmd := &cobra.Command{Use: "airplane", Short: "manage local airplane mode"}
+	cmd.AddCommand(airplaneLogsCommand(runtime, opts))
 	cmd.AddCommand(&cobra.Command{
 		Use:   "setup",
 		Short: "check and prepare local airplane-mode dependencies",
