@@ -12,6 +12,78 @@ import (
 	"github.com/sovereign46/s46-cli/internal/keyring"
 )
 
+func TestRunStoresSessionAndListReturnsLocalState(t *testing.T) {
+	service, store := newTestService(t, api.Team{Name: "s46", Endpoint: "http://127.0.0.1:8080", Lane: "EU-OPO", Mode: "local", DefaultModel: api.DefaultModel}, nil)
+
+	run, err := service.Run(context.Background(), "Fix /v1 sessions", "", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(run.ID, "@nunojob/fix-v1-sessions-") || run.Location != "localhost" || run.State != "mocked" {
+		t.Fatalf("run = %#v", run)
+	}
+
+	state, err := store.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := state.Sessions[run.ID]; !ok {
+		t.Fatalf("state missing run session: %#v", state.Sessions)
+	}
+	listed, err := service.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 || listed[0].ID != run.ID || listed[0].Harness != "s46" {
+		t.Fatalf("listed = %#v", listed)
+	}
+}
+
+func TestDetachAndResumePersistSessionState(t *testing.T) {
+	service, store := newTestService(t, api.Team{Name: "s46", Endpoint: "https://s46.s46.dev", Lane: "EU-OPO", Mode: "cloud", DefaultModel: api.DefaultModel}, nil)
+
+	detached, err := service.Detach(context.Background(), "@nunojob/task", "", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detached.State != "running" || detached.Harness != "standard" {
+		t.Fatalf("detached = %#v", detached)
+	}
+	resumed, previous, err := service.Resume(context.Background(), detached.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if previous == "" || resumed.State != "resumed" || resumed.Location != "localhost" {
+		t.Fatalf("resumed = %#v previous=%q", resumed, previous)
+	}
+	state, err := store.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Sessions[detached.ID].State != "resumed" {
+		t.Fatalf("state session = %#v", state.Sessions[detached.ID])
+	}
+}
+
+func TestMockSharePersistsViewerURL(t *testing.T) {
+	service, store := newTestService(t, api.Team{Name: "s46", Endpoint: "http://127.0.0.1:8080", Lane: "EU-OPO", Mode: "cloud", DefaultModel: api.DefaultModel}, map[string]string{"S46_SHARE_BACKEND": "mock", "S46_MOCK_GIST_ID": "fixed-gist"})
+
+	share, err := service.Share(context.Background(), "@nunojob/task", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if share.ViewerURL != "http://127.0.0.1:8080/session/#fixed-gist" || !share.Mock {
+		t.Fatalf("share = %#v", share)
+	}
+	state, err := store.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Shares["@nunojob/task"].ViewerURL != share.ViewerURL {
+		t.Fatalf("state share = %#v", state.Shares["@nunojob/task"])
+	}
+}
+
 func TestListForbiddenExplainsMatchingTeamAndLocalAPI(t *testing.T) {
 	home := t.TempDir()
 	env := map[string]string{
@@ -50,6 +122,27 @@ func TestListForbiddenExplainsMatchingTeamAndLocalAPI(t *testing.T) {
 			t.Fatalf("error missing %q: %v", want, err)
 		}
 	}
+}
+
+func newTestService(t *testing.T, team api.Team, extraEnv map[string]string) (Service, *config.Store) {
+	t.Helper()
+	home := t.TempDir()
+	env := map[string]string{
+		"HOME":            home,
+		"XDG_CONFIG_HOME": home + "/.config",
+		"XDG_DATA_HOME":   home + "/.data",
+	}
+	for key, value := range extraEnv {
+		env[key] = value
+	}
+	store := config.NewStore(env, "")
+	if err := store.SaveConfig(config.Config{ActiveTeam: team.Name, Teams: map[string]config.TeamConfig{team.Name: config.TeamConfigFromAPI(team, "standard", team.DefaultModel)}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveState(config.State{Authenticated: true, CurrentUser: "nunojob@icloud.com"}); err != nil {
+		t.Fatal(err)
+	}
+	return Service{API: api.NewMockClient(), Config: store}, store
 }
 
 type forbiddenSessionsAPI struct{ *api.MockClient }

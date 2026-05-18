@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+printf '[s46] pre-commit: lint\n'
+make lint
+
+printf '[s46] pre-commit: test\n'
+make test

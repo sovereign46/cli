@@ -18,6 +18,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Changed `s46 connect <team>` to enter interactive mode for missing or ambiguous harness selection instead of failing with only a detection error.
 - Hid Cobra's generated `completion` command from default help while keeping it available for shell completion generation.
 - Added a startup update check that reports available releases on stderr and tells users to update with Homebrew.
+- Added versioned pre-commit hook support plus Makefile targets for lint, test, coverage, and hook installation.
 - Changed `s46 login` to report the existing authenticated user without starting a new device flow when valid credentials are already present.
 - Changed the default API client to use the production API unless a local shell/API base URL or explicit mock mode is configured.
 - Changed `make shell` to default `S46_API_BASE_URL` to `http://127.0.0.1:8080` so shell commands hit a local HTTP API instead of the mock backend.

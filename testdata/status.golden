@@ -6,4 +6,4 @@
 [s46] harness: standard
 [s46] model:   s46/kimi-k2.6
 [s46] api:     https://acme.s46.dev
-[s46] sessions: 0 mocked
+[s46] sessions: 0
