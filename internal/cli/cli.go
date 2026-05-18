@@ -37,7 +37,10 @@ type Runtime struct {
 	Env    map[string]string
 }
 
-const startupUpdateCheckTimeout = 2 * time.Second
+const (
+	startupUpdateCheckTimeout = 2 * time.Second
+	localAirplaneTeamName     = "local"
+)
 
 type options struct {
 	configPath string
@@ -47,13 +50,14 @@ type options struct {
 }
 
 type app struct {
-	runtime  Runtime
-	options  *options
-	config   *config.Store
-	keyring  keyring.Store
-	api      api.Client
-	harness  *harness.Registry
-	renderer output.Renderer
+	runtime      Runtime
+	options      *options
+	config       *config.Store
+	keyring      keyring.Store
+	api          api.Client
+	harness      *harness.Registry
+	renderer     output.Renderer
+	promptReader *bufio.Reader
 }
 
 func ProcessEnv() map[string]string {
@@ -110,7 +114,32 @@ func NewRootCommand(runtime Runtime) *cobra.Command {
 	root.AddCommand(modeCommand(runtime, opts))
 	root.AddCommand(airplaneCommand(runtime, opts))
 	root.AddCommand(runCommand(runtime, opts))
+	defaultHelp := root.HelpFunc()
+	root.SetHelpFunc(func(cmd *cobra.Command, args []string) {
+		if airplaneHelpActive(runtime.Env, opts.configPath) {
+			out := cmd.OutOrStdout()
+			_, _ = fmt.Fprintln(out, airplaneHelpNotice())
+			_, _ = fmt.Fprintln(out)
+		}
+		defaultHelp(cmd, args)
+	})
 	return root
+}
+
+func airplaneHelpActive(env map[string]string, configPath string) bool {
+	if env == nil {
+		env = ProcessEnv()
+	}
+	cfg, err := config.NewStore(env, configPath).LoadConfig()
+	return err == nil && activeMode(cfg) == airplane.ModeAirplane
+}
+
+func airplaneHelpNotice() string {
+	return strings.Join([]string{
+		"[s46✈] Airplane mode is on. Local coding commands use the local gateway/model.",
+		"[s46✈] Cloud-only commands are unavailable: login, devices, update, detach, resume, share, session land.",
+		"[s46✈] Turn airplane mode off with: s46 airplane mode off",
+	}, "\n")
 }
 
 func checkForStartupUpdate(ctx context.Context, runtime Runtime, opts *options, cmd *cobra.Command) error {
@@ -320,7 +349,7 @@ func promptLoginRequest(app *app, req auth.LoginRequest) (auth.LoginRequest, err
 	}
 	defaultID := firstNonEmpty(app.runtime.Env["S46_DEVICE_ID"], state.CurrentDeviceID, app.runtime.Env["HOSTNAME"], hostname(), "default-device")
 	defaultName := firstNonEmpty(app.runtime.Env["S46_DEVICE_NAME"], state.CurrentDeviceName, app.runtime.Env["HOSTNAME"], hostname(), defaultID)
-	reader := bufio.NewReader(app.runtime.Stdin)
+	reader := app.stdinReader()
 	if _, err := fmt.Fprintln(out, "[s46] interactive login: waiting for input (use --user/--device-id for non-interactive runs)"); err != nil {
 		return auth.LoginRequest{}, err
 	}
@@ -647,9 +676,6 @@ func connectCommand(runtime Runtime, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := app.requireCloudFeature("connect"); err != nil {
-				return err
-			}
 			return app.withLock(cmd.Context(), func() error {
 				req := connectRequest{
 					Harness:  harnessName,
@@ -668,9 +694,6 @@ func connectCommand(runtime Runtime, opts *options) *cobra.Command {
 					if err != nil {
 						return err
 					}
-				}
-				if req.TeamName == "" {
-					return fmt.Errorf("team is required; pass `s46 connect <team>` or run bare `s46 connect` interactively")
 				}
 				return runConnect(cmd.Context(), app, req)
 			})
@@ -706,7 +729,7 @@ func promptConnectRequest(app *app, req connectRequest) (connectRequest, error) 
 	if err != nil {
 		return connectRequest{}, err
 	}
-	reader := bufio.NewReader(app.runtime.Stdin)
+	reader := app.stdinReader()
 	if _, err := fmt.Fprintln(out, "[s46] interactive connect: waiting for input (use <team>/--harness for non-interactive runs)"); err != nil {
 		return connectRequest{}, err
 	}
@@ -751,7 +774,7 @@ func promptMissingHarness(app *app, req connectRequest) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	reader := bufio.NewReader(app.runtime.Stdin)
+	reader := app.stdinReader()
 	if _, err := fmt.Fprintln(out, "[s46] interactive connect: waiting for input (use <team>/--harness for non-interactive runs)"); err != nil {
 		return "", err
 	}
@@ -809,15 +832,14 @@ func runConnect(ctx context.Context, app *app, req connectRequest) error {
 	if err != nil {
 		return err
 	}
+	if req.TeamName == "" && (activeMode(cfg) == airplane.ModeAirplane || req.Mode == airplane.ModeAirplane) {
+		req.TeamName = firstNonEmpty(cfg.ActiveTeam, localAirplaneTeamName)
+	}
+	if req.TeamName == "" {
+		return fmt.Errorf("team is required; pass `s46 connect <team>` or run bare `s46 connect` interactively")
+	}
 	existing := cfg.Teams[req.TeamName]
-	accessToken := app.accessToken(ctx)
-	team, err := app.api.Team(ctx, req.TeamName, api.TeamOptions{
-		Endpoint:     firstNonEmpty(req.Endpoint, existing.Endpoint),
-		Lane:         firstNonEmpty(req.Lane, existing.Lane),
-		Mode:         firstNonEmpty(req.Mode, existing.Mode),
-		DefaultModel: firstNonEmpty(req.Model, existing.DefaultModel, api.DefaultModel),
-		AccessToken:  accessToken,
-	})
+	team, err := connectTeam(ctx, app, cfg, existing, req)
 	if err != nil {
 		return err
 	}
@@ -844,13 +866,37 @@ func runConnect(ctx context.Context, app *app, req connectRequest) error {
 	if err != nil {
 		return err
 	}
+	if cfg.Teams == nil {
+		cfg.Teams = map[string]config.TeamConfig{}
+	}
 	cfg.ActiveTeam = team.Name
-	cfg.Teams[team.Name] = config.TeamConfigFromAPI(team, harnessName, selectedModel)
+	if team.Mode == airplane.ModeAirplane {
+		cfg.Mode = airplane.ModeAirplane
+	}
+	teamConfig := config.TeamConfigFromAPI(team, harnessName, selectedModel)
+	if team.Mode == airplane.ModeAirplane && existing.APISnapshot.Endpoint != "" && !isLocalEndpoint(existing.APISnapshot.Endpoint) {
+		teamConfig.APISnapshot = existing.APISnapshot
+	}
+	cfg.Teams[team.Name] = teamConfig
 	if err := app.config.SaveConfig(cfg); err != nil {
 		return err
 	}
 	result["files"] = applied.Files
 	return renderConnectApplied(app, team, plan, applied, result)
+}
+
+func connectTeam(ctx context.Context, app *app, cfg config.Config, existing config.TeamConfig, req connectRequest) (api.Team, error) {
+	if activeMode(cfg) == airplane.ModeAirplane || req.Mode == airplane.ModeAirplane || isLocalEndpoint(req.Endpoint) {
+		return localAirplaneTeam(req.TeamName, existing, req), nil
+	}
+	accessToken := app.accessToken(ctx)
+	return app.api.Team(ctx, req.TeamName, api.TeamOptions{
+		Endpoint:     firstNonEmpty(req.Endpoint, existing.Endpoint),
+		Lane:         firstNonEmpty(req.Lane, existing.Lane),
+		Mode:         firstNonEmpty(req.Mode, existing.Mode),
+		DefaultModel: firstNonEmpty(req.Model, existing.DefaultModel, api.DefaultModel),
+		AccessToken:  accessToken,
+	})
 }
 
 func renderConnectDryRun(app *app, team api.Team, plan harness.Plan, result map[string]any) error {
@@ -1747,12 +1793,21 @@ func waitForGatewayReady(ctx context.Context, service airplane.Service, timeout 
 }
 
 func offerAirplaneModeOnAfterSetup(ctx context.Context, app *app, report airplane.Report) error {
-	if !report.Ready || app.runtime.Stdin == nil || app.options.dryRun {
+	if app.options.dryRun {
 		return nil
 	}
-	cfg, teamName, teamConfig, err := activeTeamConfig(app)
-	if err != nil || activeMode(cfg) == airplane.ModeAirplane {
+	if !report.Ready {
+		return app.renderer.Lines("[s46] Airplane mode was not offered because setup is incomplete.")
+	}
+	cfg, teamName, teamConfig, err := airplaneModeTargetConfig(app)
+	if err != nil {
+		return err
+	}
+	if activeMode(cfg) == airplane.ModeAirplane {
 		return nil
+	}
+	if app.runtime.Stdin == nil {
+		return app.renderer.Lines("[s46] Airplane mode is ready. Run `s46 airplane mode on` to enable it.")
 	}
 	yes, err := promptYesNo(app, "[s46] Turn on airplane mode now? [Y/n] ", true)
 	if err != nil {
@@ -1799,7 +1854,7 @@ func renderAirplaneReport(report airplane.Report) []string {
 }
 
 func airplaneModeOn(ctx context.Context, app *app) error {
-	cfg, teamName, teamConfig, err := activeTeamConfig(app)
+	cfg, teamName, teamConfig, err := airplaneModeTargetConfig(app)
 	if err != nil {
 		return err
 	}
@@ -1879,7 +1934,14 @@ func enableAirplaneMode(ctx context.Context, app *app, service airplane.Service,
 	teamConfig.Endpoint = airplane.LocalGatewayURL
 	teamConfig.Mode = airplane.ModeAirplane
 	teamConfig.DefaultModel = airplane.LocalModelID
-	teamConfig.Models = ensureString(teamConfig.Models, airplane.LocalModelID)
+	teamConfig.Models = []string{airplane.LocalModelID}
+	if teamConfig.DefaultHarness == "" {
+		teamConfig.DefaultHarness = "standard"
+	}
+	if cfg.Teams == nil {
+		cfg.Teams = map[string]config.TeamConfig{}
+	}
+	cfg.ActiveTeam = teamName
 	cfg.Mode = airplane.ModeAirplane
 	cfg.Teams[teamName] = teamConfig
 	if !app.options.dryRun {
@@ -1949,6 +2011,35 @@ func activeTeamConfig(app *app) (config.Config, string, config.TeamConfig, error
 	return cfg, teamName, teamConfig, nil
 }
 
+func airplaneModeTargetConfig(app *app) (config.Config, string, config.TeamConfig, error) {
+	cfg, err := app.config.LoadConfig()
+	if err != nil {
+		return config.Config{}, "", config.TeamConfig{}, err
+	}
+	if cfg.Teams == nil {
+		cfg.Teams = map[string]config.TeamConfig{}
+	}
+	teamName := firstNonEmpty(cfg.ActiveTeam, localAirplaneTeamName)
+	teamConfig := cfg.Teams[teamName]
+	if teamConfig.Endpoint == "" {
+		teamConfig = config.TeamConfigFromAPI(localAirplaneTeam(teamName, config.TeamConfig{}, connectRequest{}), "standard", airplane.LocalModelID)
+	}
+	return cfg, teamName, teamConfig, nil
+}
+
+func localAirplaneTeam(teamName string, existing config.TeamConfig, req connectRequest) api.Team {
+	teamName = firstNonEmpty(teamName, localAirplaneTeamName)
+	return api.Team{
+		Name:         teamName,
+		Endpoint:     firstNonEmpty(req.Endpoint, airplane.LocalGatewayURL),
+		Lane:         firstNonEmpty(req.Lane, existing.Lane, "local"),
+		Mode:         airplane.ModeAirplane,
+		Boxes:        []string{"localhost"},
+		DefaultModel: firstNonEmpty(req.Model, airplane.LocalModelID),
+		Models:       []string{airplane.LocalModelID},
+	}
+}
+
 func hostedTeamSnapshot(teamName string, teamConfig config.TeamConfig) api.Team {
 	snapshot := teamConfig.APISnapshot
 	if snapshot.Name == "" {
@@ -2012,8 +2103,7 @@ func promptYesNo(app *app, prompt string, fallback bool) (bool, error) {
 	if _, err := fmt.Fprint(out, prompt); err != nil {
 		return false, err
 	}
-	reader := bufio.NewReader(app.runtime.Stdin)
-	line, err := reader.ReadString('\n')
+	line, err := app.stdinReader().ReadString('\n')
 	if err != nil && !errors.Is(err, io.EOF) {
 		return false, err
 	}
@@ -2130,6 +2220,13 @@ func (a *app) requireCloudFeature(feature string) error {
 		return nil
 	}
 	return fmt.Errorf("%s requires cloud connectivity; go online and switch to cloud mode to use it. Airplane mode supports local coding only", feature)
+}
+
+func (a *app) stdinReader() *bufio.Reader {
+	if a.promptReader == nil {
+		a.promptReader = bufio.NewReader(a.runtime.Stdin)
+	}
+	return a.promptReader
 }
 
 func (a *app) withLock(ctx context.Context, fn func() error) error {

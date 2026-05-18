@@ -344,7 +344,7 @@ func TestAirplaneSetupContinuesAfterInstallingOllama(t *testing.T) {
 	env["S46_TEST_GATEWAY_BINARY"] = "/tmp/s46-api"
 	env["S46_TEST_GATEWAY_READY"] = "0"
 
-	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\nY\nY\n"), "airplane", "setup"))
+	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\nY\nY\nn\n"), "airplane", "setup"))
 	for _, want := range []string{
 		"[s46] Install with Homebrew? [Y/n]",
 		"[s46] Ollama is installed but not running.",
@@ -355,6 +355,26 @@ func TestAirplaneSetupContinuesAfterInstallingOllama(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("setup output missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestAirplaneSetupCanTurnOnAirplaneModeWithoutLogin(t *testing.T) {
+	env := testEnv(t)
+
+	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\n"), "airplane", "setup"))
+	for _, want := range []string{
+		"[s46] airplane setup: ready",
+		"[s46] Turn on airplane mode now? [Y/n]",
+		"[s46✈] mode: airplane",
+		"[s46✈] team: local",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("setup output missing %q:\n%s", want, out)
+		}
+	}
+	status := requireOK(t, run(t, env, "status"))
+	if !strings.Contains(status, "[s46✈] team:    local") || !strings.Contains(status, "[s46✈] model:   s46/local-coder") {
+		t.Fatalf("unexpected airplane status without login:\n%s", status)
 	}
 }
 
@@ -397,6 +417,24 @@ func TestAirplaneTokenHelperUsesLocalToken(t *testing.T) {
 	}
 }
 
+func TestAirplaneHelpShowsUnavailableCloudCommandsAndModeOff(t *testing.T) {
+	env := testEnv(t)
+	requireOK(t, run(t, env, "mode", "airplane"))
+
+	for _, args := range [][]string{{"--help"}, {"connect", "--help"}} {
+		out := requireOK(t, run(t, env, args...))
+		for _, want := range []string{
+			"[s46✈] Airplane mode is on. Local coding commands use the local gateway/model.",
+			"[s46✈] Cloud-only commands are unavailable: login, devices, update, detach, resume, share, session land.",
+			"[s46✈] Turn airplane mode off with: s46 airplane mode off",
+		} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("help %v missing %q:\n%s", args, want, out)
+			}
+		}
+	}
+}
+
 func TestAirplaneCloudCommandsFailFast(t *testing.T) {
 	env := testEnv(t)
 	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
@@ -408,7 +446,6 @@ func TestAirplaneCloudCommandsFailFast(t *testing.T) {
 		"devices":           {"devices"},
 		"device revocation": {"devices", "delete", "dev-laptop"},
 		"update":            {"update"},
-		"connect":           {"connect", "acme", "--harness=standard"},
 		"detach":            {"detach", "@dscape/task"},
 		"resume":            {"resume", "@dscape/task"},
 		"share":             {"share", "@dscape/task"},
@@ -423,6 +460,10 @@ func TestAirplaneCloudCommandsFailFast(t *testing.T) {
 		if result.err.Error() != want {
 			t.Fatalf("unexpected error for %v:\nwant: %s\n got: %s", args, want, result.err.Error())
 		}
+	}
+	connect := requireOK(t, run(t, env, "connect", "acme", "--harness=standard"))
+	if !strings.Contains(connect, "boxes: localhost") {
+		t.Fatalf("expected airplane connect to stay local:\n%s", connect)
 	}
 }
 
@@ -440,7 +481,7 @@ func TestAirplaneSetupDownloadsMissingGateway(t *testing.T) {
 	env["S46_TEST_GATEWAY_DOWNLOAD_AVAILABLE"] = "1"
 	env["S46_TEST_INSTALL_GATEWAY_OK"] = "1"
 
-	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\n"), "airplane", "setup"))
+	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\nn\n"), "airplane", "setup"))
 	for _, want := range []string{
 		"[s46] Local S46 gateway is not installed.",
 		"Download GitHub release sovereign46/s46-api",
@@ -465,7 +506,7 @@ func TestAirplaneSetupReportsInsufficientHardware(t *testing.T) {
 	env["S46_TEST_GATEWAY_READY"] = "0"
 
 	out := requireOK(t, run(t, env, "airplane", "setup"))
-	for _, want := range []string{"[s46] This machine has 16 GB memory.", "[s46] s46/local-coder recommends 32–64 GB.", "[s46] 18 GB free disk detected.", "[s46] s46/local-coder setup needs about 30 GB free."} {
+	for _, want := range []string{"[s46] This machine has 16 GB memory.", "[s46] s46/local-coder recommends 32–64 GB.", "[s46] 18 GB free disk detected.", "[s46] s46/local-coder setup needs about 30 GB free.", "[s46] Airplane mode was not offered because setup is incomplete."} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("setup output missing %q:\n%s", want, out)
 		}
@@ -639,9 +680,11 @@ func TestUseWithoutTeamShowsExpectedInput(t *testing.T) {
 
 func TestDisconnectUseDoctorAndModeRequireActiveTeam(t *testing.T) {
 	env := testEnv(t)
-	if result := run(t, env, "mode", "airplane"); result.err == nil || !strings.Contains(result.err.Error(), "no active team") {
-		t.Fatalf("expected no active team error, got %#v", result)
+	airplaneOut := requireOK(t, run(t, env, "mode", "airplane"))
+	if !strings.Contains(airplaneOut, "[s46✈] team: local") {
+		t.Fatalf("expected airplane mode without active team to create local team:\n%s", airplaneOut)
 	}
+	requireOK(t, run(t, env, "airplane", "mode", "off"))
 	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
 	requireOK(t, run(t, env, "connect", "acme", "--harness=claude-code"))
 	if out := requireOK(t, run(t, env, "doctor")); !strings.Contains(out, "[ok] tenant") || !strings.Contains(out, "[ok] harness") {
