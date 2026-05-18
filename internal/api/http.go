@@ -137,7 +137,7 @@ func (c *HTTPClient) Sessions(ctx context.Context, team Team, accessToken string
 	var response struct {
 		Sessions []Session `json:"sessions"`
 	}
-	err := c.do(ctx, http.MethodGet, "/v1/sessions", accessToken, nil, &response)
+	err := c.do(ctx, http.MethodGet, sessionListEndpoint(team.Name), accessToken, nil, &response)
 	for i := range response.Sessions {
 		c.normalizeSession(&response.Sessions[i])
 	}
@@ -146,21 +146,21 @@ func (c *HTTPClient) Sessions(ctx context.Context, team Team, accessToken string
 
 func (c *HTTPClient) Detach(ctx context.Context, req DetachRequest) (Session, error) {
 	var session Session
-	err := c.do(ctx, http.MethodPost, "/v1/sessions/"+url.PathEscape(req.SessionID)+"/detach", req.AccessToken, req, &session)
+	err := c.do(ctx, http.MethodPost, sessionActionEndpoint(req.SessionID, "detach", req.Team.Name), req.AccessToken, req, &session)
 	c.normalizeSession(&session)
 	return session, err
 }
 
 func (c *HTTPClient) Resume(ctx context.Context, req ResumeRequest) (Session, error) {
 	var session Session
-	err := c.do(ctx, http.MethodPost, "/v1/sessions/"+url.PathEscape(req.SessionID)+"/resume", req.AccessToken, req, &session)
+	err := c.do(ctx, http.MethodPost, sessionActionEndpoint(req.SessionID, "resume", req.Team.Name), req.AccessToken, req, &session)
 	c.normalizeSession(&session)
 	return session, err
 }
 
 func (c *HTTPClient) Attach(ctx context.Context, req AttachRequest) (AttachResult, error) {
 	var result AttachResult
-	err := c.do(ctx, http.MethodPost, "/v1/sessions/"+url.PathEscape(req.SessionID)+"/attach", req.AccessToken, req, &result)
+	err := c.do(ctx, http.MethodPost, sessionActionEndpoint(req.SessionID, "attach", req.Team.Name), req.AccessToken, req, &result)
 	result.URL = c.rewriteS46URL(result.URL)
 	return result, err
 }
@@ -172,6 +172,24 @@ func (c *HTTPClient) Land(ctx context.Context, req LandRequest) (LandResult, err
 		result.RanOn[i] = c.rewriteS46Location(result.RanOn[i])
 	}
 	return result, err
+}
+
+func sessionListEndpoint(teamName string) string {
+	return addTeamQuery("/v1/sessions", teamName)
+}
+
+func sessionActionEndpoint(sessionID string, action string, teamName string) string {
+	endpoint := "/v1/sessions/" + url.PathEscape(sessionID) + "/" + action
+	return addTeamQuery(endpoint, teamName)
+}
+
+func addTeamQuery(endpoint string, teamName string) string {
+	if teamName == "" {
+		return endpoint
+	}
+	query := url.Values{}
+	query.Set("team", teamName)
+	return endpoint + "?" + query.Encode()
 }
 
 func (c *HTTPClient) normalizeSession(session *Session) {

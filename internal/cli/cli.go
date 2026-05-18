@@ -67,9 +67,12 @@ func ProcessEnv() map[string]string {
 func NewRootCommand(runtime Runtime) *cobra.Command {
 	opts := &options{}
 	root := &cobra.Command{
-		Use:           "s46",
-		Short:         "Sovereign46 CLI control plane",
-		Long:          "s46 is the Sovereign46 CLI control plane for coding-agent harnesses.",
+		Use:   "s46",
+		Short: "Sovereign46 CLI control plane",
+		Long:  "s46 is the Sovereign46 CLI control plane for coding-agent harnesses.",
+		CompletionOptions: cobra.CompletionOptions{
+			HiddenDefaultCmd: true,
+		},
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
@@ -271,7 +274,7 @@ func promptLine(reader *bufio.Reader, out io.Writer, prompt string) (string, err
 		return "", err
 	}
 	if err != nil && errors.Is(err, io.EOF) && line == "" {
-		return "", fmt.Errorf("interactive login input ended; pass --user <email> --device-id <id>")
+		return "", fmt.Errorf("interactive input ended before required values were provided")
 	}
 	return strings.TrimSpace(line), nil
 }
@@ -523,24 +526,37 @@ func connectCommand(runtime Runtime, opts *options) *cobra.Command {
 	var mode string
 	var scope string
 	cmd := &cobra.Command{
-		Use:   "connect <team>",
+		Use:   "connect [team]",
 		Short: "connect a team and configure a harness",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := newApp(runtime, opts)
 			if err != nil {
 				return err
 			}
 			return app.withLock(cmd.Context(), func() error {
-				return runConnect(cmd.Context(), app, connectRequest{
-					TeamName: args[0],
+				req := connectRequest{
 					Harness:  harnessName,
 					Lane:     lane,
 					Model:    model,
 					Endpoint: endpoint,
 					Mode:     mode,
 					Scope:    scope,
-				})
+				}
+				if len(args) == 1 {
+					req.TeamName = args[0]
+				}
+				if !opts.json && !connectFlagChanged(cmd) {
+					var err error
+					req, err = promptConnectRequest(app, req)
+					if err != nil {
+						return err
+					}
+				}
+				if req.TeamName == "" {
+					return fmt.Errorf("team is required; pass `s46 connect <team>` or run bare `s46 connect` interactively")
+				}
+				return runConnect(cmd.Context(), app, req)
 			})
 		},
 	}
@@ -551,6 +567,96 @@ func connectCommand(runtime Runtime, opts *options) *cobra.Command {
 	cmd.Flags().StringVar(&mode, "mode", "", "operating mode")
 	cmd.Flags().StringVar(&scope, "scope", "user", "settings scope for supported harnesses: user or project")
 	return cmd
+}
+
+func connectFlagChanged(cmd *cobra.Command) bool {
+	for _, name := range []string{"harness", "lane", "model", "endpoint", "mode", "scope"} {
+		if cmd.Flags().Changed(name) {
+			return true
+		}
+	}
+	return false
+}
+
+func promptConnectRequest(app *app, req connectRequest) (connectRequest, error) {
+	if app.runtime.Stdin == nil {
+		return connectRequest{}, fmt.Errorf("interactive connect requires stdin; pass `s46 connect <team>` and --harness <name>")
+	}
+	out := app.runtime.Stdout
+	if out == nil {
+		out = io.Discard
+	}
+	cfg, err := app.config.LoadConfig()
+	if err != nil {
+		return connectRequest{}, err
+	}
+	reader := bufio.NewReader(app.runtime.Stdin)
+	if _, err := fmt.Fprintln(out, "[s46] interactive connect: waiting for input (use <team>/--harness for non-interactive runs)"); err != nil {
+		return connectRequest{}, err
+	}
+	defaultTeam := cfg.ActiveTeam
+	if defaultTeam == "" && len(cfg.Teams) == 1 {
+		for name := range cfg.Teams {
+			defaultTeam = name
+		}
+	}
+	if req.TeamName == "" {
+		if defaultTeam == "" {
+			req.TeamName, err = promptRequired(reader, out, "Team")
+		} else {
+			req.TeamName, err = promptWithDefault(reader, out, "Team", defaultTeam)
+		}
+		if err != nil {
+			return connectRequest{}, err
+		}
+	}
+	existing := cfg.Teams[req.TeamName]
+	defaultHarness := firstNonEmpty(existing.DefaultHarness, "standard")
+	req.Harness, err = promptHarness(app, reader, out, defaultHarness)
+	if err != nil {
+		return connectRequest{}, err
+	}
+	req.Scope, err = promptWithDefault(reader, out, "Scope", firstNonEmpty(req.Scope, "user"))
+	if err != nil {
+		return connectRequest{}, err
+	}
+	return req, nil
+}
+
+func promptMissingHarness(app *app, req connectRequest) (string, error) {
+	if app.runtime.Stdin == nil {
+		return "", fmt.Errorf("interactive connect requires stdin; pass --harness <name>\n[s46] options: %s", app.harness.NamesString())
+	}
+	out := app.runtime.Stdout
+	if out == nil {
+		out = io.Discard
+	}
+	cfg, err := app.config.LoadConfig()
+	if err != nil {
+		return "", err
+	}
+	reader := bufio.NewReader(app.runtime.Stdin)
+	if _, err := fmt.Fprintln(out, "[s46] interactive connect: waiting for input (use <team>/--harness for non-interactive runs)"); err != nil {
+		return "", err
+	}
+	existing := cfg.Teams[req.TeamName]
+	defaultHarness := firstNonEmpty(req.Harness, existing.DefaultHarness, "standard")
+	return promptHarness(app, reader, out, defaultHarness)
+}
+
+func promptHarness(app *app, reader *bufio.Reader, out io.Writer, fallback string) (string, error) {
+	for {
+		value, err := promptWithDefault(reader, out, fmt.Sprintf("Harness (%s)", app.harness.NamesString()), fallback)
+		if err != nil {
+			return "", err
+		}
+		if _, err := app.harness.Get(value); err == nil {
+			return value, nil
+		}
+		if _, err := fmt.Fprintf(out, "Unknown harness %q; options: %s\n", value, app.harness.NamesString()); err != nil {
+			return "", err
+		}
+	}
 }
 
 type connectRequest struct {
@@ -569,7 +675,15 @@ func runConnect(ctx context.Context, app *app, req connectRequest) error {
 	}
 	harnessName, err := resolveHarnessName(ctx, app, req.Harness)
 	if err != nil {
-		return err
+		var selection *harnessSelectionError
+		if !app.options.json && errors.As(err, &selection) {
+			harnessName, err = promptMissingHarness(app, req)
+			if err != nil {
+				return err
+			}
+		} else {
+			return err
+		}
 	}
 	adapter, err := app.harness.Get(harnessName)
 	if err != nil {
@@ -678,9 +792,20 @@ func resolveHarnessName(ctx context.Context, app *app, explicit string) (string,
 		return detected[0], nil
 	}
 	if len(detected) == 0 {
-		return "", fmt.Errorf("no harness detected; pass --harness=pi, --harness=claude-code, --harness=codex, or --harness=standard")
+		return "", &harnessSelectionError{}
 	}
-	return "", fmt.Errorf("multiple harnesses detected (%s); pass --harness explicitly", strings.Join(detected, ", "))
+	return "", &harnessSelectionError{detected: detected}
+}
+
+type harnessSelectionError struct {
+	detected []string
+}
+
+func (e *harnessSelectionError) Error() string {
+	if len(e.detected) == 0 {
+		return "no harness detected; pass --harness explicitly\n[s46] options: pi, claude-code, codex, standard"
+	}
+	return fmt.Sprintf("multiple harnesses detected (%s); pass --harness explicitly\n[s46] options: pi, claude-code, codex, standard", strings.Join(e.detected, ", "))
 }
 
 func disconnectCommand(runtime Runtime, opts *options) *cobra.Command {
@@ -768,7 +893,15 @@ func useCommand(runtime Runtime, opts *options) *cobra.Command {
 	return &cobra.Command{
 		Use:   "use <team>",
 		Short: "switch the active connected team",
-		Args:  cobra.ExactArgs(1),
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 1 {
+				return nil
+			}
+			if len(args) == 0 {
+				return fmt.Errorf("missing team\n[s46] expected: s46 use <team>")
+			}
+			return fmt.Errorf("too many arguments\n[s46] expected: s46 use <team>")
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := newApp(runtime, opts)
 			if err != nil {

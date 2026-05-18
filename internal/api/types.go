@@ -105,11 +105,13 @@ type DetachRequest struct {
 type ResumeRequest struct {
 	SessionID   string  `json:"sessionId"`
 	Session     Session `json:"session"`
+	Team        Team    `json:"team"`
 	AccessToken string  `json:"-"`
 }
 
 type AttachRequest struct {
 	SessionID   string `json:"sessionId"`
+	Team        Team   `json:"team"`
 	AccessToken string `json:"-"`
 }
 

@@ -4,7 +4,6 @@ Usage:
   s46 [command]
 
 Available Commands:
-  completion  Generate the autocompletion script for the specified shell
   connect     connect a team and configure a harness
   detach      mock-detach a session to an S46 box
   devices     list and revoke paired devices

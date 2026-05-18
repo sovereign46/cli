@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"os"
@@ -63,8 +64,12 @@ func (s Service) List(ctx context.Context) ([]api.Session, error) {
 		sort.Slice(sessions, func(i, j int) bool { return sessions[i].ID < sessions[j].ID })
 		return sessions, nil
 	}
-	sessions, err := s.API.Sessions(ctx, ctxState.Team, s.accessToken(ctx, ctxState.State))
+	accessToken := s.accessToken(ctx, ctxState.State)
+	sessions, err := s.API.Sessions(ctx, ctxState.Team, accessToken)
 	if err != nil {
+		if errors.Is(err, api.ErrForbidden) {
+			return nil, s.sessionsForbiddenError(ctx, ctxState, accessToken)
+		}
 		return nil, err
 	}
 	for i := range sessions {
@@ -73,6 +78,44 @@ func (s Service) List(ctx context.Context) ([]api.Session, error) {
 		}
 	}
 	return sessions, nil
+}
+
+func (s Service) sessionsForbiddenError(ctx context.Context, ctxState workspaceContext, accessToken string) error {
+	parts := []string{fmt.Sprintf("could not list sessions for active team %s: API denied access", ctxState.TeamName)}
+	if accessToken == "" {
+		parts = append(parts, "no local bearer token was found; run `s46 login --user <email>`")
+		return errors.New(strings.Join(parts, ". "))
+	}
+	user, err := s.API.Me(ctx, accessToken)
+	if err != nil {
+		parts = append(parts, fmt.Sprintf("could not verify the token with /v1/me: %v", err))
+		parts = append(parts, "run `s46 logout` and then `s46 login --user <email>`")
+		return errors.New(strings.Join(parts, ". "))
+	}
+	if user.Email != "" {
+		parts = append(parts, fmt.Sprintf("authenticated as %s", user.Email))
+	}
+	if user.Team != "" && user.Team != ctxState.TeamName {
+		parts = append(parts, fmt.Sprintf("the API says this login belongs to team %s, but the active team is %s", user.Team, ctxState.TeamName))
+		parts = append(parts, fmt.Sprintf("run `s46 use %s` or ask an admin to add %s to team %s", user.Team, firstNonEmpty(user.Email, "this account"), ctxState.TeamName))
+		return errors.New(strings.Join(parts, ". "))
+	}
+	if user.Team != "" {
+		parts = append(parts, fmt.Sprintf("the API says this login belongs to team %s, so the token and active team match", user.Team))
+	}
+	if localDevelopmentAPI(s.Config.Env) {
+		parts = append(parts, "if this is make shell/local API, restart s46-api so it picks up the session team-routing fix")
+	} else {
+		parts = append(parts, "ask an admin to check your team session permissions")
+	}
+	return errors.New(strings.Join(parts, ". "))
+}
+
+func localDevelopmentAPI(env map[string]string) bool {
+	if _, ok := api.LocalDevelopmentOrigin(env["S46_API_BASE_URL"]); ok {
+		return true
+	}
+	return isTruthy(env["S46_DEV_SHELL"])
 }
 
 func (s Service) Detach(ctx context.Context, sessionID string, harness string, box string, dryRun bool) (api.Session, error) {
@@ -104,7 +147,7 @@ func (s Service) Resume(ctx context.Context, sessionID string, dryRun bool) (api
 	}
 	existing := findOrDefault(ctxState.State, sessionID, ctxState.Team, ctxState.TeamConfig)
 	previous := existing.Location
-	result, err := s.API.Resume(ctx, api.ResumeRequest{SessionID: sessionID, Session: existing, AccessToken: s.accessToken(ctx, ctxState.State)})
+	result, err := s.API.Resume(ctx, api.ResumeRequest{SessionID: sessionID, Session: existing, Team: ctxState.Team, AccessToken: s.accessToken(ctx, ctxState.State)})
 	if err != nil {
 		return api.Session{}, "", err
 	}

@@ -55,6 +55,9 @@ func TestHTTPClientWireShape(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(Team{Name: "acme", Endpoint: "https://acme.s46.dev", Lane: "EU-OPO", Mode: "cloud", Boxes: []string{"box-01.acme.s46.dev"}, DefaultModel: DefaultModel})
 		case "/v1/sessions":
 			requireBearer(t, r)
+			if r.URL.Query().Get("team") != "acme" {
+				t.Fatalf("team query = %q", r.URL.Query().Get("team"))
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"sessions": []Session{{ID: "@dscape/auth-redirect-fix", State: "running", Location: "box-04.acme.s46.dev"}}})
 		case "/v1/sessions/@dscape/auth-redirect-fix/detach":
 			requireBearer(t, r)

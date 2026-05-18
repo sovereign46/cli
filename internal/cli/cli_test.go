@@ -206,6 +206,56 @@ func TestLoginTokenWhoamiLogout(t *testing.T) {
 	}
 }
 
+func TestInteractiveConnectPromptsForRequiredInputs(t *testing.T) {
+	env := testEnv(t)
+	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	out := requireOK(t, runWithStdin(t, env, strings.NewReader("\n\n\n"), "connect"))
+	for _, want := range []string{
+		"[s46] interactive connect: waiting for input (use <team>/--harness for non-interactive runs)",
+		"Team [acme]: ",
+		"Harness (pi, claude-code, codex, standard) [standard]: ",
+		"Scope [user]: ",
+		"harness: s46",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("interactive connect output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestConnectWithTeamPromptsForMissingAmbiguousHarness(t *testing.T) {
+	env := testEnv(t)
+	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	piConfig := filepath.Join(env["HOME"], ".pi", "agent", "models.json")
+	if err := os.MkdirAll(filepath.Dir(piConfig), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(piConfig, []byte(`{"providers":{}}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	claudeConfig := filepath.Join(env["HOME"], ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(claudeConfig), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(claudeConfig, []byte(`{}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out := requireOK(t, runWithStdin(t, env, strings.NewReader("pi\n\n"), "connect", "acme"))
+	for _, want := range []string{
+		"[s46] interactive connect: waiting for input (use <team>/--harness for non-interactive runs)",
+		"Harness (pi, claude-code, codex, standard) [standard]: ",
+		"Scope [user]: ",
+		"harness: pi",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("interactive connect output missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestConnectClaudeDryRunAndWrite(t *testing.T) {
 	env := testEnv(t)
 	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
@@ -356,6 +406,18 @@ func TestDoctorAfterLoginDoesNotRequireHarnessConnect(t *testing.T) {
 	out := requireOK(t, run(t, env, "doctor"))
 	if !strings.Contains(out, "[ok] standard") || strings.Contains(out, "claude-config") {
 		t.Fatalf("unexpected doctor output: %s", out)
+	}
+}
+
+func TestUseWithoutTeamShowsExpectedInput(t *testing.T) {
+	env := testEnv(t)
+	result := run(t, env, "use")
+	if result.err == nil {
+		t.Fatal("expected use without team to fail")
+	}
+	message := result.err.Error()
+	if !strings.Contains(message, "missing team") || !strings.Contains(message, "[s46] expected: s46 use <team>") {
+		t.Fatalf("unexpected error: %v", result.err)
 	}
 }
 
