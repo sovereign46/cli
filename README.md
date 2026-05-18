@@ -61,7 +61,10 @@ s46 detach <session>
 s46 resume <session>
 s46 share <session>                 # Pi-style HTML share via secret gist, mocked
 s46 session land [session]
-s46 mode --set cloud|on-prem|local|air-gapped
+s46 mode [cloud|airplane]
+s46 airplane setup
+s46 airplane mode on
+s46 airplane mode off
 s46 run "task"
 ```
 
@@ -87,7 +90,7 @@ Default paths:
 
 Secrets are stored through `internal/keyring.Store`. The file keyring backend is for tests and mock runs only.
 
-Tenant endpoints use `https://<team>.s46.dev`.
+Tenant endpoints use `https://<team>.s46.dev` in cloud mode. Airplane mode rewrites the active team to the local gateway at `http://127.0.0.1:8080` and uses `s46/local-coder`.
 
 Harness config written by `s46 connect`:
 

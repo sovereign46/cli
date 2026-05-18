@@ -2,7 +2,7 @@
 [s46] config:  ~/.config/s46/config.json
 [s46] team:    acme
 [s46] lane:    EU-OPO
-[s46] mode:    local
+[s46] mode:    cloud
 [s46] harness: standard
 [s46] model:   s46/kimi-k2.6
 [s46] api:     https://acme.s46.dev

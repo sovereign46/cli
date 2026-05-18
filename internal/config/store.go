@@ -12,6 +12,7 @@ type Store struct {
 
 type Config struct {
 	ActiveTeam string                `json:"activeTeam,omitempty"`
+	Mode       string                `json:"mode,omitempty"`
 	Teams      map[string]TeamConfig `json:"teams"`
 }
 

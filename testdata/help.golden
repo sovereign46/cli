@@ -4,6 +4,7 @@ Usage:
   s46 [command]
 
 Available Commands:
+  airplane    manage local airplane mode
   connect     connect a team and configure a harness
   detach      mock-detach a session to an S46 box
   devices     list and revoke paired devices

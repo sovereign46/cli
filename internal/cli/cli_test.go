@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -23,15 +24,16 @@ func testEnv(t *testing.T) map[string]string {
 	t.Helper()
 	home := t.TempDir()
 	return map[string]string{
-		"HOME":                          home,
-		"XDG_CONFIG_HOME":               filepath.Join(home, ".config"),
-		"XDG_DATA_HOME":                 filepath.Join(home, ".data"),
-		"XDG_CACHE_HOME":                filepath.Join(home, ".cache"),
-		"S46_KEYRING_BACKEND":           "file",
-		"S46_API_MODE":                  "mock",
-		"S46_SHARE_BACKEND":             "mock",
-		"S46_MOCK_GIST_ID":              "0123456789abcdef0123456789abcdef",
-		"S46_SKIP_STARTUP_UPDATE_CHECK": "1",
+		"HOME":                           home,
+		"XDG_CONFIG_HOME":                filepath.Join(home, ".config"),
+		"XDG_DATA_HOME":                  filepath.Join(home, ".data"),
+		"XDG_CACHE_HOME":                 filepath.Join(home, ".cache"),
+		"S46_KEYRING_BACKEND":            "file",
+		"S46_API_MODE":                   "mock",
+		"S46_SHARE_BACKEND":              "mock",
+		"S46_MOCK_GIST_ID":               "0123456789abcdef0123456789abcdef",
+		"S46_SKIP_STARTUP_UPDATE_CHECK":  "1",
+		"S46_AIRPLANE_SKIP_SETUP_CHECKS": "1",
 	}
 }
 
@@ -181,6 +183,28 @@ func TestStartupUpdateCheckPrintsHomebrewInstruction(t *testing.T) {
 	}
 }
 
+func TestOfflineSuggestionMentionsAirplaneModeWhenLocalModelReady(t *testing.T) {
+	env := testEnv(t)
+	message := offlineSuggestion(context.Background(), env)
+	if !strings.Contains(message, "local model is ready") || !strings.Contains(message, "s46 airplane mode on") {
+		t.Fatalf("unexpected suggestion: %s", message)
+	}
+}
+
+func TestOfflineSuggestionMentionsSetupWhenLocalModelMissing(t *testing.T) {
+	env := testEnv(t)
+	delete(env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")
+	env["S46_TEST_MEMORY_BYTES"] = "64000000000"
+	env["S46_TEST_FREE_DISK_BYTES"] = "30000000000"
+	env["S46_TEST_OLLAMA_PATH"] = "missing"
+	env["S46_TEST_OLLAMA_RUNNING"] = "0"
+	env["S46_TEST_GATEWAY_BINARY"] = "missing"
+	message := offlineSuggestion(context.Background(), env)
+	if !strings.Contains(message, "no local model is installed") || !strings.Contains(message, "s46 airplane setup") {
+		t.Fatalf("unexpected suggestion: %s", message)
+	}
+}
+
 func TestInteractiveLoginPromptsForRequiredInputs(t *testing.T) {
 	env := testEnv(t)
 	env["HOSTNAME"] = "dev-laptop"
@@ -278,6 +302,51 @@ func TestConnectWithTeamPromptsForMissingAmbiguousHarness(t *testing.T) {
 	}
 }
 
+func TestAirplaneModeOnAndCloudModeRestoreEndpoint(t *testing.T) {
+	env := testEnv(t)
+	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "connect", "acme", "--harness=standard"))
+
+	on := requireOK(t, run(t, env, "mode", "airplane"))
+	for _, want := range []string{"[s46✈] airplane setup: ready", "[s46✈] mode: airplane", "[s46✈] endpoint: http://127.0.0.1:8080", "[s46✈] model: s46/local-coder"} {
+		if !strings.Contains(on, want) {
+			t.Fatalf("airplane output missing %q:\n%s", want, on)
+		}
+	}
+	status := requireOK(t, run(t, env, "status"))
+	if !strings.Contains(status, "[s46✈] mode:    airplane") || !strings.Contains(status, "[s46✈] model:   s46/local-coder") {
+		t.Fatalf("unexpected airplane status:\n%s", status)
+	}
+	modeJSON := requireOK(t, run(t, env, "mode", "--json"))
+	if strings.Contains(modeJSON, "s46✈") {
+		t.Fatalf("json mode output included decorative prefix: %s", modeJSON)
+	}
+
+	off := requireOK(t, run(t, env, "airplane", "mode", "off"))
+	if !strings.Contains(off, "[s46] mode: cloud") || !strings.Contains(off, "[s46] endpoint: https://acme.s46.dev") || strings.Contains(off, "[s46✈]") {
+		t.Fatalf("unexpected cloud output:\n%s", off)
+	}
+}
+
+func TestAirplaneSetupReportsInsufficientHardware(t *testing.T) {
+	env := testEnv(t)
+	delete(env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")
+	env["S46_TEST_MEMORY_BYTES"] = "16000000000"
+	env["S46_TEST_FREE_DISK_BYTES"] = "18000000000"
+	env["S46_TEST_OLLAMA_PATH"] = "missing"
+	env["S46_TEST_BREW_PATH"] = "missing"
+	env["S46_TEST_OLLAMA_RUNNING"] = "0"
+	env["S46_TEST_GATEWAY_BINARY"] = "missing"
+	env["S46_TEST_GATEWAY_READY"] = "0"
+
+	out := requireOK(t, run(t, env, "airplane", "setup"))
+	for _, want := range []string{"[s46✈] This machine has 16 GB memory.", "[s46✈] s46/local-coder recommends 32–64 GB.", "[s46✈] 18 GB free disk detected.", "[s46✈] s46/local-coder setup needs about 30 GB free."} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("setup output missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestConnectClaudeDryRunAndWrite(t *testing.T) {
 	env := testEnv(t)
 	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
@@ -333,7 +402,7 @@ func TestStatusModeSessionsAndShare(t *testing.T) {
 	env := testEnv(t)
 	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
 	requireOK(t, run(t, env, "connect", "acme", "--harness=standard"))
-	requireOK(t, run(t, env, "mode", "--set", "local"))
+	requireOK(t, run(t, env, "mode", "cloud"))
 	assertGolden(t, "status.golden", requireOK(t, run(t, env, "status")))
 	statusRaw := requireOK(t, run(t, env, "status", "--json"))
 	var status struct {
@@ -347,7 +416,7 @@ func TestStatusModeSessionsAndShare(t *testing.T) {
 	if err := json.Unmarshal([]byte(statusRaw), &status); err != nil {
 		t.Fatal(err)
 	}
-	if status.ActiveTeam != "acme" || status.Team.Endpoint != "https://acme.s46.dev" || status.Team.Mode != "local" || status.Team.DefaultHarness != "standard" {
+	if status.ActiveTeam != "acme" || status.Team.Endpoint != "https://acme.s46.dev" || status.Team.Mode != "cloud" || status.Team.DefaultHarness != "standard" {
 		t.Fatalf("unexpected status: %s", statusRaw)
 	}
 	sessions := requireOK(t, run(t, env, "sessions"))
@@ -445,7 +514,7 @@ func TestUseWithoutTeamShowsExpectedInput(t *testing.T) {
 
 func TestDisconnectUseDoctorAndModeRequireActiveTeam(t *testing.T) {
 	env := testEnv(t)
-	if result := run(t, env, "mode", "--set", "local"); result.err == nil || !strings.Contains(result.err.Error(), "no active team") {
+	if result := run(t, env, "mode", "airplane"); result.err == nil || !strings.Contains(result.err.Error(), "no active team") {
 		t.Fatalf("expected no active team error, got %#v", result)
 	}
 	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))

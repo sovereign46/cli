@@ -270,7 +270,7 @@ func (s Service) Run(ctx context.Context, task string, model string, sessionID s
 		sessionID = IDForTask(ctxState.State.CurrentUser, task)
 	}
 	location := "local"
-	if ctxState.Team.Mode == "local" {
+	if ctxState.Team.Mode == "local" || ctxState.Team.Mode == "airplane" {
 		location = "localhost"
 	}
 	result := RunResult{ID: sessionID, Task: task, State: "mocked", Location: location, Harness: "s46", Model: model, Lane: ctxState.Team.Lane, DryRun: dryRun}

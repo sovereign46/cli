@@ -15,8 +15,9 @@ type Interface interface {
 }
 
 type Renderer struct {
-	JSON bool
-	Out  io.Writer
+	JSON   bool
+	Out    io.Writer
+	Prefix string
 }
 
 func (r Renderer) WriteJSON(value any) error {
@@ -26,8 +27,25 @@ func (r Renderer) WriteJSON(value any) error {
 }
 
 func (r Renderer) Lines(lines ...string) error {
+	if r.Prefix != "" && r.Prefix != "[s46]" {
+		lines = rewritePrefix(lines, r.Prefix)
+	}
 	_, err := fmt.Fprintln(r.Out, strings.Join(lines, "\n"))
 	return err
+}
+
+func rewritePrefix(lines []string, prefix string) []string {
+	rewritten := make([]string, len(lines))
+	for i, line := range lines {
+		if strings.HasPrefix(line, "[s46]") {
+			rewritten[i] = prefix + strings.TrimPrefix(line, "[s46]")
+		} else if strings.HasPrefix(line, "[ok]") || strings.HasPrefix(line, "[fail]") {
+			rewritten[i] = prefix + " " + line
+		} else {
+			rewritten[i] = line
+		}
+	}
+	return rewritten
 }
 
 func RenderPlan(plan harness.Plan) []string {

@@ -8,6 +8,10 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Added `s46 airplane setup`, `s46 airplane mode on|off`, and `s46 mode cloud|airplane` for local Ollama-backed airplane mode orchestration.
+- Added airplane setup checks for OS/architecture, memory, disk, Ollama, model availability/probing, and local S46 gateway readiness.
+- Added airplane-mode human output prefixing as `[s46✈]` while keeping JSON output undecorated.
+- Added cloud-unavailable suggestions that point to airplane mode when local model checks pass or to `s46 airplane setup` when they do not.
 - Added `s46 devices` and `s46 devices delete|revoke|rm <device-id>` for listing and revoking paired devices.
 
 ### Changed
