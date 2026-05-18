@@ -36,6 +36,8 @@ type Runtime struct {
 	Env    map[string]string
 }
 
+const startupUpdateCheckTimeout = 2 * time.Second
+
 type options struct {
 	configPath string
 	json       bool
@@ -73,6 +75,9 @@ func NewRootCommand(runtime Runtime) *cobra.Command {
 		CompletionOptions: cobra.CompletionOptions{
 			HiddenDefaultCmd: true,
 		},
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			return checkForStartupUpdate(cmd.Context(), runtime, opts, cmd)
+		},
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
@@ -104,6 +109,51 @@ func NewRootCommand(runtime Runtime) *cobra.Command {
 	root.AddCommand(modeCommand(runtime, opts))
 	root.AddCommand(runCommand(runtime, opts))
 	return root
+}
+
+func checkForStartupUpdate(ctx context.Context, runtime Runtime, opts *options, cmd *cobra.Command) error {
+	env := runtime.Env
+	if env == nil {
+		env = ProcessEnv()
+	}
+	if skipStartupUpdateCheck(cmd, env) {
+		return nil
+	}
+	stderr := runtime.Stderr
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	ctx, cancel := context.WithTimeout(ctx, startupUpdateCheckTimeout)
+	defer cancel()
+	check, err := updater.Updater{CurrentVersion: version.Get().Version, Env: env}.Check(ctx)
+	if err != nil {
+		if opts.verbose && !errors.Is(err, updater.ErrCheckDisabled) && !errors.Is(err, updater.ErrNoRelease) {
+			_, _ = fmt.Fprintf(stderr, "[s46] update check failed: %v\n", err)
+		}
+		return nil
+	}
+	if !check.UpdateAvailable {
+		return nil
+	}
+	_, _ = fmt.Fprintf(stderr, "[s46] update available: %s (current %s)\n", check.LatestVersion, check.CurrentVersion)
+	_, _ = fmt.Fprintf(stderr, "[s46] update with: %s\n", startupBrewInstruction(env))
+	return nil
+}
+
+func skipStartupUpdateCheck(cmd *cobra.Command, env map[string]string) bool {
+	if truthy(env["S46_SKIP_STARTUP_UPDATE_CHECK"]) || updater.IsCheckDisabled(env) {
+		return true
+	}
+	path := cmd.CommandPath()
+	return path == "s46 completion" || strings.HasPrefix(path, "s46 completion ") || path == "s46 update"
+}
+
+func startupBrewInstruction(env map[string]string) string {
+	formula := strings.TrimSpace(env["S46_HOMEBREW_FORMULA"])
+	if formula == "" {
+		formula = updater.DefaultBrewFormula
+	}
+	return "brew upgrade " + formula
 }
 
 func newApp(runtime Runtime, opts *options) (*app, error) {
@@ -1162,7 +1212,7 @@ func statusCommand(runtime Runtime, opts *options) *cobra.Command {
 			} else {
 				lines = append(lines, "[s46] team:    none")
 			}
-			lines = append(lines, fmt.Sprintf("[s46] sessions:%2d mocked", len(state.Sessions)))
+			lines = append(lines, fmt.Sprintf("[s46] sessions:%2d", len(state.Sessions)))
 			return app.renderer.Lines(lines...)
 		},
 	}

@@ -107,6 +107,7 @@ func (s Service) sessionsForbiddenError(ctx context.Context, ctxState workspaceC
 	if user.Team != "" {
 		parts = append(parts, fmt.Sprintf("the API says this login belongs to team %s, so the token and active team match", user.Team))
 	}
+
 	if localDevelopmentAPI(s.Config.Env) {
 		parts = append(parts, "if this is make shell/local API, restart s46-api so it picks up the session team-routing fix")
 	} else {

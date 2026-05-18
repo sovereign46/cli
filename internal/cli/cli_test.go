@@ -23,14 +23,15 @@ func testEnv(t *testing.T) map[string]string {
 	t.Helper()
 	home := t.TempDir()
 	return map[string]string{
-		"HOME":                home,
-		"XDG_CONFIG_HOME":     filepath.Join(home, ".config"),
-		"XDG_DATA_HOME":       filepath.Join(home, ".data"),
-		"XDG_CACHE_HOME":      filepath.Join(home, ".cache"),
-		"S46_KEYRING_BACKEND": "file",
-		"S46_API_MODE":        "mock",
-		"S46_SHARE_BACKEND":   "mock",
-		"S46_MOCK_GIST_ID":    "0123456789abcdef0123456789abcdef",
+		"HOME":                          home,
+		"XDG_CONFIG_HOME":               filepath.Join(home, ".config"),
+		"XDG_DATA_HOME":                 filepath.Join(home, ".data"),
+		"XDG_CACHE_HOME":                filepath.Join(home, ".cache"),
+		"S46_KEYRING_BACKEND":           "file",
+		"S46_API_MODE":                  "mock",
+		"S46_SHARE_BACKEND":             "mock",
+		"S46_MOCK_GIST_ID":              "0123456789abcdef0123456789abcdef",
+		"S46_SKIP_STARTUP_UPDATE_CHECK": "1",
 	}
 }
 
@@ -156,6 +157,27 @@ func TestUpdateCommandUsesHomebrewInstruction(t *testing.T) {
 	out := requireOK(t, run(t, env, "update"))
 	if !strings.Contains(out, "update available: 999.0.0") || !strings.Contains(out, "brew upgrade s46") {
 		t.Fatalf("unexpected update output: %s", out)
+	}
+}
+
+func TestStartupUpdateCheckPrintsHomebrewInstruction(t *testing.T) {
+	env := testEnv(t)
+	delete(env, "S46_SKIP_STARTUP_UPDATE_CHECK")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"tag_name":"v999.0.0","html_url":"https://github.com/sovereign46/s46-cli/releases/tag/v999.0.0"}`))
+	}))
+	defer server.Close()
+	env["S46_UPDATE_LATEST_URL"] = server.URL
+
+	result := run(t, env, "version")
+	if result.err != nil {
+		t.Fatalf("version failed: %v", result.err)
+	}
+	if !strings.Contains(result.stderr, "[s46] update available: 999.0.0") || !strings.Contains(result.stderr, "[s46] update with: brew upgrade s46") {
+		t.Fatalf("unexpected startup update stderr: %s", result.stderr)
+	}
+	if strings.Contains(result.stdout, "update available") {
+		t.Fatalf("startup update check polluted stdout: %s", result.stdout)
 	}
 }
 
