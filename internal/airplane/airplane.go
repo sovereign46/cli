@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -30,7 +31,12 @@ const (
 	MinDiskBytes    = int64(30 * 1000 * 1000 * 1000)
 )
 
-const checkTimeout = 2 * time.Second
+const (
+	checkTimeout          = 2 * time.Second
+	modelProbeTimeout     = 2 * time.Minute
+	modelProbeNoticeAfter = 2 * time.Second
+	modelProbeBodyLimit   = 4 * 1024
+)
 
 type Check struct {
 	Name     string `json:"name"`
@@ -54,19 +60,20 @@ type Report struct {
 }
 
 type Service struct {
-	Env    map[string]string
-	Stdin  io.Reader
-	Stdout io.Writer
-	Stderr io.Writer
-	Client *http.Client
+	Env               map[string]string
+	Stdin             io.Reader
+	Stdout            io.Writer
+	Stderr            io.Writer
+	Progress          io.Writer
+	Client            *http.Client
+	CheckTimeout      time.Duration
+	ModelProbeTimeout time.Duration
 }
 
 func (s Service) Check(ctx context.Context) Report {
 	if truthy(s.env("S46_AIRPLANE_SKIP_SETUP_CHECKS")) {
 		return s.skippedReport()
 	}
-	ctx, cancel := context.WithTimeout(ctx, checkTimeout)
-	defer cancel()
 
 	report := Report{Mode: ModeAirplane, Model: LocalModelID, BackendModel: s.backendModel(), GatewayURL: s.gatewayURL(), OllamaURL: s.ollamaURL()}
 
@@ -93,16 +100,29 @@ func (s Service) Check(ctx context.Context) Report {
 	report.OllamaPath = ollamaPath
 	report.add(Check{Name: "ollama-installed", OK: ollamaOK, Required: true, Message: nonEmpty(ollamaPath, "ollama not found")})
 
-	ollamaRunning := s.ollamaRunning(ctx)
+	ollamaRunning := s.runBoolCheck(ctx, s.checkTimeout(), s.ollamaRunning)
 	report.add(Check{Name: "ollama-running", OK: ollamaRunning, Required: true, Message: boolMessage(ollamaRunning, s.ollamaURL(), "Ollama is not responding")})
 
-	modelDownloaded := ollamaRunning && s.modelDownloaded(ctx)
-	report.add(Check{Name: "model-downloaded", OK: modelDownloaded, Required: true, Message: boolMessage(modelDownloaded, s.backendModel(), "model is not downloaded")})
+	modelDownloaded := false
+	modelDownloadedMessage := "skipped: Ollama is not running"
+	if ollamaRunning {
+		modelDownloaded = s.runBoolCheck(ctx, s.checkTimeout(), s.modelDownloaded)
+		modelDownloadedMessage = boolMessage(modelDownloaded, s.backendModel(), "model is not downloaded")
+	}
+	report.add(Check{Name: "model-downloaded", OK: modelDownloaded, Required: true, Message: modelDownloadedMessage})
 
-	modelProbe := modelDownloaded && s.modelProbe(ctx)
-	report.add(Check{Name: "model-probe", OK: modelProbe, Required: true, Message: boolMessage(modelProbe, LocalModelID+" responds", "model probe failed")})
+	modelProbe := false
+	modelProbeMessage := "skipped: model is not downloaded"
+	if !ollamaRunning {
+		modelProbeMessage = "skipped: Ollama is not running"
+	} else if modelDownloaded {
+		modelProbeCtx, cancel := context.WithTimeout(ctx, s.modelProbeTimeout())
+		modelProbe, modelProbeMessage = s.modelProbeWithNotice(modelProbeCtx)
+		cancel()
+	}
+	report.add(Check{Name: "model-probe", OK: modelProbe, Required: true, Message: modelProbeMessage})
 
-	gatewayReady := s.gatewayReady(ctx)
+	gatewayReady := s.runBoolCheck(ctx, s.checkTimeout(), s.gatewayReady)
 	gatewayPath, gatewayBinary := s.gatewayBinary()
 	report.GatewayBinary = gatewayPath
 	report.add(Check{Name: "local-gateway", OK: gatewayReady || gatewayBinary, Required: true, Message: gatewayMessage(gatewayReady, gatewayPath)})
@@ -339,22 +359,55 @@ func (s Service) modelDownloaded(ctx context.Context) bool {
 	return false
 }
 
-func (s Service) modelProbe(ctx context.Context) bool {
+func (s Service) modelProbeWithNotice(ctx context.Context) (bool, string) {
+	var timer *time.Timer
+	if s.Progress != nil {
+		timer = time.AfterFunc(modelProbeNoticeAfter, func() {
+			_, _ = fmt.Fprintf(s.Progress, "%s loading %s; the first response can take up to %s...\n", Prefix, LocalModelID, formatDuration(s.modelProbeTimeout()))
+		})
+	}
+	ok, message := s.modelProbe(ctx)
+	if timer != nil {
+		timer.Stop()
+	}
+	return ok, message
+}
+
+func (s Service) modelProbe(ctx context.Context) (bool, string) {
 	if value := strings.TrimSpace(s.env("S46_TEST_MODEL_PROBE")); value != "" {
-		return truthy(value)
+		if truthy(value) {
+			return true, LocalModelID + " responds"
+		}
+		if message := strings.TrimSpace(s.env("S46_TEST_MODEL_PROBE_MESSAGE")); message != "" {
+			return false, message
+		}
+		return false, "model probe failed"
 	}
 	body, _ := json.Marshal(map[string]any{"model": s.backendModel(), "prompt": "ping", "stream": false})
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(s.ollamaURL(), "/")+"/api/generate", bytes.NewReader(body))
 	if err != nil {
-		return false
+		return false, "probe request failed: " + err.Error()
 	}
 	request.Header.Set("Content-Type", "application/json")
 	response, err := s.httpClient().Do(request)
 	if err != nil {
-		return false
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return false, fmt.Sprintf("probe timed out after %s while loading %s", formatDuration(s.modelProbeTimeout()), s.backendModel())
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+			return false, "probe canceled while loading " + s.backendModel()
+		}
+		return false, "probe request failed: " + err.Error()
 	}
 	defer response.Body.Close()
-	return response.StatusCode >= 200 && response.StatusCode < 300
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		detail := readBodySnippet(response.Body)
+		if detail != "" {
+			return false, fmt.Sprintf("Ollama returned HTTP %d: %s", response.StatusCode, detail)
+		}
+		return false, fmt.Sprintf("Ollama returned HTTP %d", response.StatusCode)
+	}
+	return true, LocalModelID + " responds"
 }
 
 func (s Service) gatewayReady(ctx context.Context) bool {
@@ -446,6 +499,52 @@ func (s Service) startDetached(cmd *exec.Cmd, logName string) error {
 	}
 	_, _ = fmt.Fprintf(out, "%s started %s (pid %d, log %s)\n", Prefix, filepath.Base(cmd.Path), cmd.Process.Pid, logPath)
 	return nil
+}
+
+func (s Service) runBoolCheck(ctx context.Context, timeout time.Duration, check func(context.Context) bool) bool {
+	checkCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return check(checkCtx)
+}
+
+func (s Service) checkTimeout() time.Duration {
+	if s.CheckTimeout > 0 {
+		return s.CheckTimeout
+	}
+	return checkTimeout
+}
+
+func (s Service) modelProbeTimeout() time.Duration {
+	if s.ModelProbeTimeout > 0 {
+		return s.ModelProbeTimeout
+	}
+	return modelProbeTimeout
+}
+
+func readBodySnippet(body io.Reader) string {
+	raw, err := io.ReadAll(io.LimitReader(body, modelProbeBodyLimit))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(raw))
+}
+
+func formatDuration(duration time.Duration) string {
+	if duration%time.Minute == 0 {
+		minutes := int(duration / time.Minute)
+		if minutes == 1 {
+			return "1 minute"
+		}
+		return fmt.Sprintf("%d minutes", minutes)
+	}
+	if duration%time.Second == 0 {
+		seconds := int(duration / time.Second)
+		if seconds == 1 {
+			return "1 second"
+		}
+		return fmt.Sprintf("%d seconds", seconds)
+	}
+	return duration.String()
 }
 
 func (s Service) processEnv(extra ...string) []string {

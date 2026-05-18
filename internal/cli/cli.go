@@ -1584,7 +1584,11 @@ func airplaneCommand(runtime Runtime, opts *options) *cobra.Command {
 }
 
 func runAirplaneSetup(ctx context.Context, app *app, allowPrompts bool) (airplane.Report, error) {
-	service := airplane.Service{Env: app.runtime.Env, Stdin: app.runtime.Stdin, Stdout: app.runtime.Stdout, Stderr: app.runtime.Stderr}
+	var progress io.Writer
+	if !app.options.json {
+		progress = app.runtime.Stdout
+	}
+	service := airplane.Service{Env: app.runtime.Env, Stdin: app.runtime.Stdin, Stdout: app.runtime.Stdout, Stderr: app.runtime.Stderr, Progress: progress}
 	report := service.Check(ctx)
 	if app.options.json {
 		return report, nil

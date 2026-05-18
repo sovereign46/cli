@@ -9,6 +9,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 
 - Changed `s46 airplane setup` to continue after installing Ollama by offering to start Ollama, pull the default local model, and start or explain the local gateway.
+- Changed airplane model probing to wait longer for cold model loads, print a first-run loading notice, and report actual Ollama probe errors instead of a generic failure.
 
 ## [0.1.0] - 2026-05-18
 

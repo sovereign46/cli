@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/sovereign46/s46-cli/internal/airplane"
 	"github.com/sovereign46/s46-cli/internal/api"
@@ -113,7 +114,7 @@ func cloudUnavailable(err error) bool {
 }
 
 func offlineSuggestion(ctx context.Context, env map[string]string) string {
-	report := airplane.Service{Env: env}.Check(ctx)
+	report := airplane.Service{Env: env, ModelProbeTimeout: 2 * time.Second}.Check(ctx)
 	if airplaneCheckOK(report, "model-downloaded") && airplaneCheckOK(report, "model-probe") {
 		return "[s46] cloud unavailable.\n[s46] local model is ready.\n[s46] Run: s46 airplane mode on"
 	}

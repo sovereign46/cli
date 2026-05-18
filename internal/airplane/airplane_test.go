@@ -2,7 +2,11 @@ package airplane
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestCheckReportsSkippedReadyState(t *testing.T) {
@@ -39,11 +43,46 @@ func TestCheckReportsInsufficientMemoryAndDisk(t *testing.T) {
 	}
 }
 
+func TestCheckReportsModelProbeHTTPError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/tags":
+			_, _ = w.Write([]byte(`{"models":[{"name":"devstral-small-2:24b-instruct-2512-q4_K_M"}]}`))
+		case "/api/generate":
+			http.Error(w, `{"error":"model load failed"}`, http.StatusInternalServerError)
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	report := Service{
+		Env: map[string]string{
+			"S46_LOCAL_OLLAMA_URL":     server.URL,
+			"S46_TEST_MEMORY_BYTES":    "68000000000",
+			"S46_TEST_FREE_DISK_BYTES": "61000000000",
+			"S46_TEST_OLLAMA_PATH":     "/opt/homebrew/bin/ollama",
+			"S46_TEST_GATEWAY_READY":   "1",
+		},
+		Client:            server.Client(),
+		ModelProbeTimeout: time.Second,
+	}.Check(context.Background())
+
+	check := findCheck(report, "model-probe")
+	if check.OK || !strings.Contains(check.Message, "Ollama returned HTTP 500") || !strings.Contains(check.Message, "model load failed") {
+		t.Fatalf("unexpected model probe check: %#v", check)
+	}
+}
+
 func checkOK(report Report, name string) bool {
+	return findCheck(report, name).OK
+}
+
+func findCheck(report Report, name string) Check {
 	for _, check := range report.Checks {
 		if check.Name == name {
-			return check.OK
+			return check
 		}
 	}
-	return false
+	return Check{}
 }
