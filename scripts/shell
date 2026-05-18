@@ -7,7 +7,10 @@ sandbox="$(mktemp -d "${TMPDIR:-/tmp}/s46-dev-shell.XXXXXX")"
 api_repo_default="$(cd "$repo_root/.." && pwd)/s46-api"
 
 cleanup() {
-  rm -rf "$sandbox"
+  if [ -d "$sandbox" ]; then
+    find -P "$sandbox" -type d -exec chmod u+rwx {} + 2>/dev/null || true
+    rm -rf "$sandbox"
+  fi
 }
 trap cleanup EXIT
 trap 'exit 143' TERM
