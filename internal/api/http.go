@@ -22,6 +22,7 @@ var (
 	ErrNotInvited           = errors.New("not invited")
 	ErrAuthenticateFirst    = errors.New("authenticate first")
 	ErrUnauthorized         = errors.New("unauthorized")
+	ErrForbidden            = errors.New("forbidden")
 )
 
 type Error struct {
@@ -359,6 +360,8 @@ func decodeErrorResponse(method string, endpoint string, response *http.Response
 		return fmt.Errorf("%w", ErrAuthenticateFirst)
 	case "unauthorized":
 		return fmt.Errorf("%w", ErrUnauthorized)
+	case "forbidden":
+		return fmt.Errorf("%w", ErrForbidden)
 	}
 	if apiErr.Code != "" || apiErr.Message != "" {
 		return apiErr

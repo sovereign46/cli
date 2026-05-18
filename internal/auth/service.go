@@ -75,17 +75,29 @@ func (s Service) LoginWithDeviceCallback(ctx context.Context, req LoginRequest, 
 	if err != nil {
 		return LoginResult{}, err
 	}
+
+	user, err := s.API.Me(ctx, tokens.AccessToken)
+	if err != nil {
+		return LoginResult{}, fmt.Errorf("login failed after approval: could not load account details from /v1/me: %w", err)
+	}
+	account := firstNonEmpty(user.Email, tokens.Account)
+	tokens.Account = account
 	if err := s.storeTokens(ctx, tokens); err != nil {
 		return LoginResult{}, err
 	}
-
-	teamName := req.Team
+	teamName := user.Team
 	if teamName == "" {
-		teamName = TeamFromEmail(tokens.Account)
+		return LoginResult{}, fmt.Errorf("login failed after approval: API did not return a team for %s", account)
+	}
+	if req.Team != "" && req.Team != teamName {
+		return LoginResult{}, fmt.Errorf("login failed: %s belongs to team %s, not requested team %s", account, teamName, req.Team)
 	}
 	team, err := s.API.Team(ctx, teamName, api.TeamOptions{AccessToken: tokens.AccessToken})
 	if err != nil {
-		return LoginResult{}, err
+		if errors.Is(err, api.ErrForbidden) {
+			return LoginResult{}, fmt.Errorf("login failed: authenticated as %s for team %s, but the API denied team lookup; ask an admin to check your team membership", account, teamName)
+		}
+		return LoginResult{}, fmt.Errorf("login failed: could not load team %s: %w", teamName, err)
 	}
 
 	cfg, err := s.Config.LoadConfig()
@@ -105,7 +117,7 @@ func (s Service) LoginWithDeviceCallback(ctx context.Context, req LoginRequest, 
 		return LoginResult{}, err
 	}
 	state.Authenticated = true
-	state.CurrentUser = tokens.Account
+	state.CurrentUser = account
 	state.CurrentDeviceID = firstNonEmpty(tokens.DeviceID, loginReq.DeviceID)
 	state.CurrentDeviceName = loginReq.DeviceName
 	state.LastLoginAt = time.Now().UTC().Format(time.RFC3339)
@@ -115,7 +127,7 @@ func (s Service) LoginWithDeviceCallback(ctx context.Context, req LoginRequest, 
 
 	return LoginResult{
 		Authenticated:   true,
-		User:            tokens.Account,
+		User:            account,
 		Team:            team.Name,
 		DeviceID:        state.CurrentDeviceID,
 		DeviceName:      state.CurrentDeviceName,
@@ -142,6 +154,10 @@ func (s Service) resolveLoginRequest(req LoginRequest) (api.DeviceLoginRequest, 
 	}
 	deviceName := firstNonEmpty(req.DeviceName, envValue(s.Config.Env, "S46_DEVICE_NAME"), state.CurrentDeviceName, defaultDeviceName(deviceID))
 	return api.DeviceLoginRequest{Email: req.Email, DeviceID: deviceID, DeviceName: deviceName}, nil
+}
+
+func (s Service) CurrentLogin(ctx context.Context) (LoginResult, bool) {
+	return s.currentLogin(ctx)
 }
 
 func (s Service) currentLogin(ctx context.Context) (LoginResult, bool) {
@@ -323,22 +339,6 @@ func (s Service) loadTokens(ctx context.Context, account string) (api.TokenSet, 
 		return api.TokenSet{}, err
 	}
 	return tokens, nil
-}
-
-func TeamFromEmail(email string) string {
-	parts := strings.Split(email, "@")
-	if len(parts) != 2 {
-		return "acme"
-	}
-	domain := parts[1]
-	if strings.HasSuffix(domain, ".s46.dev") {
-		return strings.TrimSuffix(domain, ".s46.dev")
-	}
-	team := strings.Split(domain, ".")[0]
-	if team == "" || team == "s46" {
-		return "acme"
-	}
-	return team
 }
 
 func sanitizeDeviceID(value string) string {

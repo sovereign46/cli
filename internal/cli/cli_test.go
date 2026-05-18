@@ -36,9 +36,14 @@ func testEnv(t *testing.T) map[string]string {
 
 func run(t *testing.T, env map[string]string, args ...string) commandResult {
 	t.Helper()
+	return runWithStdin(t, env, nil, args...)
+}
+
+func runWithStdin(t *testing.T, env map[string]string, stdin *strings.Reader, args ...string) commandResult {
+	t.Helper()
 	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
-	root := NewRootCommand(Runtime{Stdout: stdout, Stderr: stderr, Env: env})
+	root := NewRootCommand(Runtime{Stdin: stdin, Stdout: stdout, Stderr: stderr, Env: env})
 	root.SetArgs(args)
 	err := root.Execute()
 	return commandResult{stdout: stdout.String(), stderr: stderr.String(), err: err}
@@ -112,7 +117,15 @@ func TestLoginUsesLocalVerificationURL(t *testing.T) {
 				t.Fatalf("unexpected poll body: %#v", body)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"account": "dscape@acme.s46.dev", "deviceId": "dev-laptop", "accessToken": "access", "refreshToken": "refresh", "expiresAt": time.Now().Add(time.Hour).UTC().Format(time.RFC3339)})
+		case "/v1/me":
+			if r.Header.Get("Authorization") != "Bearer access" {
+				t.Fatalf("missing auth header: %s", r.Header.Get("Authorization"))
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"email": "dscape@acme.s46.dev", "team": "acme"})
 		case "/v1/teams/acme":
+			if r.Header.Get("Authorization") != "Bearer access" {
+				t.Fatalf("missing auth header: %s", r.Header.Get("Authorization"))
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"name": "acme", "endpoint": "https://acme.s46.dev", "lane": "EU-OPO", "mode": "cloud", "defaultModel": "s46/kimi-k2.6"})
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
@@ -146,6 +159,30 @@ func TestUpdateCommandUsesHomebrewInstruction(t *testing.T) {
 	}
 }
 
+func TestInteractiveLoginPromptsForRequiredInputs(t *testing.T) {
+	env := testEnv(t)
+	env["HOSTNAME"] = "dev-laptop"
+	out := requireOK(t, runWithStdin(t, env, strings.NewReader("dscape@acme.s46.dev\n\n\n"), "login"))
+	for _, want := range []string{
+		"[s46] interactive login: waiting for input (use --user/--device-id for non-interactive runs)",
+		"Email: ",
+		"Device ID [dev-laptop]: ",
+		"Device name [dev-laptop]: ",
+		"authenticated as dscape@acme.s46.dev",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("interactive login output missing %q:\n%s", want, out)
+		}
+	}
+	state := struct {
+		CurrentDeviceID string `json:"currentDeviceId"`
+	}{}
+	readJSON(t, filepath.Join(env["XDG_DATA_HOME"], "s46", "state.json"), &state)
+	if state.CurrentDeviceID != "dev-laptop" {
+		t.Fatalf("currentDeviceId = %q", state.CurrentDeviceID)
+	}
+}
+
 func TestLoginTokenWhoamiLogout(t *testing.T) {
 	env := testEnv(t)
 	out := requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
@@ -153,7 +190,7 @@ func TestLoginTokenWhoamiLogout(t *testing.T) {
 		t.Fatalf("unexpected login output: %s", out)
 	}
 	second := requireOK(t, run(t, env, "login"))
-	if strings.Contains(second, "visit ") || !strings.Contains(second, "authenticated as dscape@acme.s46.dev") {
+	if strings.Contains(second, "interactive login") || !strings.Contains(second, "authenticated as dscape@acme.s46.dev") {
 		t.Fatalf("unexpected second login output: %s", second)
 	}
 	if got := strings.TrimSpace(requireOK(t, run(t, env, "whoami"))); got != "dscape@acme.s46.dev" {

@@ -167,6 +167,19 @@ func requireBearer(t *testing.T, r *http.Request) {
 	}
 }
 
+func TestHTTPClientMapsForbidden(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"code": "forbidden", "message": "forbidden"}})
+	}))
+	defer server.Close()
+
+	_, err := NewHTTPClient(server.URL).Team(context.Background(), "icloud", TeamOptions{AccessToken: "access"})
+	if !errors.Is(err, ErrForbidden) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 func TestHTTPClientMapsNotInvited(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)

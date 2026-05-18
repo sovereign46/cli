@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -149,9 +150,20 @@ func loginCommand(runtime Runtime, opts *options) *cobra.Command {
 			}
 			service := auth.Service{API: app.api, Config: app.config, Keyring: app.keyring}
 			req := auth.LoginRequest{Email: email, Team: team, DeviceID: deviceID, DeviceName: deviceName}
+			interactive := !opts.json && !loginFlagChanged(cmd)
 			var result auth.LoginResult
 			if err := app.withLock(cmd.Context(), func() error {
 				var err error
+				if interactive {
+					if current, ok := service.CurrentLogin(cmd.Context()); ok {
+						result = current
+						return nil
+					}
+					req, err = promptLoginRequest(app, req)
+					if err != nil {
+						return err
+					}
+				}
 				if opts.json {
 					result, err = service.LoginWithDeviceCallback(cmd.Context(), req, nil)
 					return err
@@ -180,6 +192,96 @@ func loginCommand(runtime Runtime, opts *options) *cobra.Command {
 	cmd.Flags().StringVar(&deviceID, "device-id", "", "stable device id to pair")
 	cmd.Flags().StringVar(&deviceName, "device-name", "", "human-readable device name")
 	return cmd
+}
+
+func loginFlagChanged(cmd *cobra.Command) bool {
+	for _, name := range []string{"user", "email", "team", "device-id", "device-name"} {
+		if cmd.Flags().Changed(name) {
+			return true
+		}
+	}
+	return false
+}
+
+func promptLoginRequest(app *app, req auth.LoginRequest) (auth.LoginRequest, error) {
+	if app.runtime.Stdin == nil {
+		return auth.LoginRequest{}, fmt.Errorf("interactive login requires stdin; pass --user <email> --device-id <id>")
+	}
+	out := app.runtime.Stdout
+	if out == nil {
+		out = io.Discard
+	}
+	state, err := app.config.LoadState()
+	if err != nil {
+		return auth.LoginRequest{}, err
+	}
+	defaultID := firstNonEmpty(app.runtime.Env["S46_DEVICE_ID"], state.CurrentDeviceID, app.runtime.Env["HOSTNAME"], hostname(), "default-device")
+	defaultName := firstNonEmpty(app.runtime.Env["S46_DEVICE_NAME"], state.CurrentDeviceName, app.runtime.Env["HOSTNAME"], hostname(), defaultID)
+	reader := bufio.NewReader(app.runtime.Stdin)
+	if _, err := fmt.Fprintln(out, "[s46] interactive login: waiting for input (use --user/--device-id for non-interactive runs)"); err != nil {
+		return auth.LoginRequest{}, err
+	}
+	req.Email, err = promptRequired(reader, out, "Email")
+	if err != nil {
+		return auth.LoginRequest{}, err
+	}
+	req.DeviceID, err = promptWithDefault(reader, out, "Device ID", defaultID)
+	if err != nil {
+		return auth.LoginRequest{}, err
+	}
+	req.DeviceName, err = promptWithDefault(reader, out, "Device name", defaultName)
+	if err != nil {
+		return auth.LoginRequest{}, err
+	}
+	return req, nil
+}
+
+func promptRequired(reader *bufio.Reader, out io.Writer, label string) (string, error) {
+	for {
+		value, err := promptLine(reader, out, label+": ")
+		if err != nil {
+			return "", err
+		}
+		if value != "" {
+			return value, nil
+		}
+		if _, err := fmt.Fprintf(out, "%s is required\n", label); err != nil {
+			return "", err
+		}
+	}
+}
+
+func promptWithDefault(reader *bufio.Reader, out io.Writer, label string, fallback string) (string, error) {
+	value, err := promptLine(reader, out, fmt.Sprintf("%s [%s]: ", label, fallback))
+	if err != nil {
+		return "", err
+	}
+	if value == "" {
+		return fallback, nil
+	}
+	return value, nil
+}
+
+func promptLine(reader *bufio.Reader, out io.Writer, prompt string) (string, error) {
+	if _, err := fmt.Fprint(out, prompt); err != nil {
+		return "", err
+	}
+	line, err := reader.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", err
+	}
+	if err != nil && errors.Is(err, io.EOF) && line == "" {
+		return "", fmt.Errorf("interactive login input ended; pass --user <email> --device-id <id>")
+	}
+	return strings.TrimSpace(line), nil
+}
+
+func hostname() string {
+	host, err := os.Hostname()
+	if err != nil {
+		return ""
+	}
+	return host
 }
 
 func logoutCommand(runtime Runtime, opts *options) *cobra.Command {

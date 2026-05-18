@@ -16,7 +16,7 @@ func main() {
 	})
 
 	if err := root.Execute(); err != nil {
-		fmt.Fprintf(os.Stderr, "s46: %v\n", err)
+		fmt.Fprintf(os.Stderr, "[s46] error: %v\n", err)
 		os.Exit(1)
 	}
 }

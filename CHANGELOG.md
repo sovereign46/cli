@@ -13,6 +13,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 
 - Changed `s46 login` to start invitation-gated magic-link device auth with email, stable device id, and device name, then poll until approval/expiry.
+- Changed bare `s46 login` to enter an explicit interactive prompt when not already authenticated, with concise waiting-for-input messaging and defaults for device id/name.
 - Changed `s46 login` to report the existing authenticated user without starting a new device flow when valid credentials are already present.
 - Changed the default API client to use the production API unless a local shell/API base URL or explicit mock mode is configured.
 - Changed `make shell` to default `S46_API_BASE_URL` to `http://127.0.0.1:8080` so shell commands hit a local HTTP API instead of the mock backend.
@@ -20,6 +21,8 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Fixed login team selection to use `/v1/me` as the authoritative team source instead of inferring a team from arbitrary email domains.
+- Fixed CLI fatal error formatting to use `[s46] error:` with contextual login errors instead of terse API messages such as `forbidden`.
 - Fixed `s46 doctor` after login so it does not fail on missing third-party harness config before `s46 connect` has been run.
 - Fixed local development URL handling so device-login, tenant endpoints, box/session locations, attach URLs, and share viewer URLs resolve to the configured local origin inside the development shell while defaulting to production outside it.
 

@@ -80,6 +80,41 @@ func TestDevicesAndSelfRevoke(t *testing.T) {
 	}
 }
 
+func TestLoginUsesAuthoritativeTeamFromMe(t *testing.T) {
+	home := t.TempDir()
+	env := map[string]string{"HOME": home, "XDG_CONFIG_HOME": filepath.Join(home, ".config"), "XDG_DATA_HOME": filepath.Join(home, ".data")}
+	store := config.NewStore(env, "")
+	apiClient := &authoritativeTeamAPI{MockClient: api.NewMockClient(), email: "nunojob@icloud.com", team: "acme"}
+	service := Service{API: apiClient, Config: store, Keyring: keyring.FileStore{Path: filepath.Join(home, "keyring.json")}}
+
+	login, err := service.LoginWithDeviceCallback(context.Background(), LoginRequest{Email: "nunojob@icloud.com", DeviceID: "icloud-device", DeviceName: "iCloud Device"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if login.User != "nunojob@icloud.com" || login.Team != "acme" || apiClient.teamRequested != "acme" {
+		t.Fatalf("login=%#v teamRequested=%q", login, apiClient.teamRequested)
+	}
+}
+
+type authoritativeTeamAPI struct {
+	*api.MockClient
+	email         string
+	team          string
+	teamRequested string
+}
+
+func (a *authoritativeTeamAPI) Me(ctx context.Context, accessToken string) (api.User, error) {
+	return api.User{Email: a.email, Team: a.team}, nil
+}
+
+func (a *authoritativeTeamAPI) Team(ctx context.Context, name string, opts api.TeamOptions) (api.Team, error) {
+	a.teamRequested = name
+	if name != a.team {
+		return api.Team{}, api.ErrForbidden
+	}
+	return a.MockClient.Team(ctx, name, opts)
+}
+
 func TestLoginPrintsBeforePollingAndWaitsForApproval(t *testing.T) {
 	home := t.TempDir()
 	env := map[string]string{"HOME": home, "XDG_CONFIG_HOME": filepath.Join(home, ".config"), "XDG_DATA_HOME": filepath.Join(home, ".data")}
@@ -117,17 +152,4 @@ func (p *pendingDeviceAPI) PollDeviceLogin(ctx context.Context, deviceCode strin
 		return api.TokenSet{}, api.ErrAuthorizationPending
 	}
 	return p.MockClient.PollDeviceLogin(ctx, deviceCode)
-}
-
-func TestTeamFromEmail(t *testing.T) {
-	cases := map[string]string{
-		"dscape@acme.s46.dev": "acme",
-		"dev@example.com":     "example",
-		"bad":                 "acme",
-	}
-	for input, want := range cases {
-		if got := TeamFromEmail(input); got != want {
-			t.Fatalf("TeamFromEmail(%q) = %q, want %q", input, got, want)
-		}
-	}
 }
