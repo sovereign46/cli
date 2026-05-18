@@ -154,12 +154,14 @@ func loginCommand(runtime Runtime, opts *options) *cobra.Command {
 			service := auth.Service{API: app.api, Config: app.config, Keyring: app.keyring}
 			req := auth.LoginRequest{Email: email, Team: team, DeviceID: deviceID, DeviceName: deviceName}
 			interactive := !opts.json && !loginFlagChanged(cmd)
+			alreadyAuthenticated := false
 			var result auth.LoginResult
 			if err := app.withLock(cmd.Context(), func() error {
 				var err error
 				if interactive {
 					if current, ok := service.CurrentLogin(cmd.Context()); ok {
 						result = current
+						alreadyAuthenticated = true
 						return nil
 					}
 					req, err = promptLoginRequest(app, req)
@@ -185,6 +187,9 @@ func loginCommand(runtime Runtime, opts *options) *cobra.Command {
 			}
 			if opts.json {
 				return app.renderer.WriteJSON(result)
+			}
+			if alreadyAuthenticated {
+				return app.renderer.Lines(fmt.Sprintf("[s46] already authenticated as %s", result.User))
 			}
 			return app.renderer.Lines(fmt.Sprintf("[s46] authenticated as %s", result.User))
 		},

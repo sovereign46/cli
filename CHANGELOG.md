@@ -28,6 +28,8 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Fixed CLI fatal error formatting to use `[s46] error:` with contextual login errors instead of terse API messages such as `forbidden`.
 - Fixed `s46 use` without arguments to show the expected input instead of only a generic argument-count error.
 - Fixed session listing to send the active team to the API so localhost/dev-shell calls do not get authorized against the default host-derived team.
+- Fixed forbidden session-list errors to explain the active team, authenticated account, likely mismatch/stale-local-API cause, and next action instead of ending with `forbidden`.
+- Fixed bare `s46 login` when credentials already exist to say `already authenticated` so it is clear no new login flow ran.
 - Fixed `s46 doctor` after login so it does not fail on missing third-party harness config before `s46 connect` has been run.
 - Fixed local development URL handling so device-login, tenant endpoints, box/session locations, attach URLs, and share viewer URLs resolve to the configured local origin inside the development shell while defaulting to production outside it.
 
