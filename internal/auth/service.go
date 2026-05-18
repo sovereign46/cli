@@ -10,12 +10,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sovereign46/s46-cli/internal/airplane"
 	"github.com/sovereign46/s46-cli/internal/api"
 	"github.com/sovereign46/s46-cli/internal/config"
 	"github.com/sovereign46/s46-cli/internal/keyring"
 )
 
-const tokenService = "s46.tokens"
+const (
+	tokenService         = "s46.tokens"
+	defaultAirplaneToken = "s46_airplane_local"
+)
 
 type Service struct {
 	API     api.Client
@@ -248,6 +252,9 @@ func (s Service) Whoami(ctx context.Context) (string, error) {
 }
 
 func (s Service) Token(ctx context.Context, refresh bool) (string, error) {
+	if s.airplaneMode() {
+		return s.airplaneToken(), nil
+	}
 	state, tokens, err := s.currentTokenSet(ctx, refresh)
 	_ = state
 	if err != nil {
@@ -339,6 +346,27 @@ func (s Service) loadTokens(ctx context.Context, account string) (api.TokenSet, 
 		return api.TokenSet{}, err
 	}
 	return tokens, nil
+}
+
+func (s Service) airplaneMode() bool {
+	if s.Config == nil {
+		return false
+	}
+	cfg, err := s.Config.LoadConfig()
+	if err != nil {
+		return false
+	}
+	if cfg.Mode == airplane.ModeAirplane {
+		return true
+	}
+	return cfg.ActiveTeam != "" && cfg.Teams[cfg.ActiveTeam].Mode == airplane.ModeAirplane
+}
+
+func (s Service) airplaneToken() string {
+	if s.Config != nil {
+		return firstNonEmpty(envValue(s.Config.Env, "S46_AIRPLANE_TOKEN"), defaultAirplaneToken)
+	}
+	return defaultAirplaneToken
 }
 
 func sanitizeDeviceID(value string) string {

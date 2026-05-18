@@ -8,9 +8,10 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
-- Changed `s46 airplane setup` to continue after installing Ollama by offering to start Ollama, pull the default local model, and start or explain the local gateway.
-- Changed airplane model probing to wait longer for cold model loads, update a single elapsed-time progress line, and report actual Ollama probe errors instead of a generic failure.
+- Changed `s46 airplane setup` to continue after installing Ollama by offering to start Ollama, pull the default local model, start or explain the local gateway, and then ask whether to turn airplane mode on.
+- Changed airplane setup output to keep the standard `[s46]` prefix until airplane mode is actually enabled, while airplane model probing waits longer for cold model loads, updates a single elapsed-time progress line, and reports actual Ollama probe errors instead of a generic failure.
 - Changed airplane gateway setup to use an explicit managed install/source path instead of auto-discovering sibling development checkouts, with GitHub release download support when the gateway is missing.
+- Changed airplane-mode token handling so harness token helpers emit a local airplane token instead of refreshing cloud credentials, CLI calls avoid sending cloud bearer tokens, and cloud-only commands fail fast with a go-online message.
 - Changed `make shell` to preserve the host Ollama model store via `OLLAMA_MODELS` and expose a sandbox `S46_API_REPO` symlink when a sibling `s46-api` checkout exists.
 - Fixed airplane model downloads in sandboxed homes by starting Ollama with the host home, creating Ollama's home/model directories, and passing the configured Ollama environment to `ollama pull`.
 - Fixed airplane model probes so the HTTP client uses the full model-probe timeout instead of the short health-check timeout.

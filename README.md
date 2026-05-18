@@ -92,7 +92,9 @@ Secrets are stored through `internal/keyring.Store`. The file keyring backend is
 
 Tenant endpoints use `https://<team>.s46.dev` in cloud mode. Airplane mode rewrites the active team to the local gateway at `http://127.0.0.1:8080` and uses `s46/local-coder`.
 
-`airplane setup` installs the local gateway from the latest `sovereign46/s46-api` GitHub release into `~/.local/share/s46/gateway/s46-api/` when no gateway is available. For local development, set `S46_API_REPO=/path/to/s46-api`; `make shell` automatically exposes a sandbox symlink when `../s46-api` exists.
+`airplane setup` installs the local gateway from the latest `sovereign46/s46-api` GitHub release into `~/.local/share/s46/gateway/s46-api/` when no gateway is available. For local development, set `S46_API_REPO=/path/to/s46-api`; `make shell` automatically exposes a sandbox symlink when `../s46-api` exists. Setup output uses the normal `[s46]` prefix and asks whether to turn on airplane mode when the local runtime is ready.
+
+In airplane mode, `s46 token --refresh` returns a local airplane token instead of refreshing cloud credentials, and CLI calls to the local gateway do not send cloud bearer tokens. Cloud-only commands fail fast with a go-online message; airplane mode supports local coding only. Override the local helper token with `S46_AIRPLANE_TOKEN` if needed.
 
 Harness config written by `s46 connect`:
 

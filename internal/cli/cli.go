@@ -243,6 +243,9 @@ func loginCommand(runtime Runtime, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if err := app.requireCloudFeature("login"); err != nil {
+				return err
+			}
 			service := auth.Service{API: app.api, Config: app.config, Keyring: app.keyring}
 			req := auth.LoginRequest{Email: email, Team: team, DeviceID: deviceID, DeviceName: deviceName}
 			interactive := !opts.json && !loginFlagChanged(cmd)
@@ -471,6 +474,9 @@ func devicesCommand(runtime Runtime, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if err := app.requireCloudFeature("devices"); err != nil {
+				return err
+			}
 			service := auth.Service{API: app.api, Config: app.config, Keyring: app.keyring}
 			devices, err := service.Devices(cmd.Context())
 			if err != nil {
@@ -495,6 +501,9 @@ func deleteDeviceCommand(runtime Runtime, opts *options) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := newApp(runtime, opts)
 			if err != nil {
+				return err
+			}
+			if err := app.requireCloudFeature("device revocation"); err != nil {
 				return err
 			}
 			service := auth.Service{API: app.api, Config: app.config, Keyring: app.keyring}
@@ -566,6 +575,13 @@ func updateCommand(runtime Runtime, opts *options) *cobra.Command {
 		Short: "check for updates using Homebrew-safe instructions",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := newApp(runtime, opts)
+			if err != nil {
+				return err
+			}
+			if err := app.requireCloudFeature("update"); err != nil {
+				return err
+			}
 			out := runtime.Stdout
 			if out == nil {
 				out = io.Discard
@@ -629,6 +645,9 @@ func connectCommand(runtime Runtime, opts *options) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := newApp(runtime, opts)
 			if err != nil {
+				return err
+			}
+			if err := app.requireCloudFeature("connect"); err != nil {
 				return err
 			}
 			return app.withLock(cmd.Context(), func() error {
@@ -1101,6 +1120,9 @@ func tenantEndpointOK(env map[string]string, teamName string, endpoint string) b
 	if endpoint == fmt.Sprintf("https://%s.s46.dev", teamName) {
 		return true
 	}
+	if endpoint == airplane.LocalGatewayURL {
+		return true
+	}
 	if origin, ok := api.LocalDevelopmentOrigin(env["S46_API_BASE_URL"]); ok && endpoint == origin {
 		return true
 	}
@@ -1299,6 +1321,9 @@ func detachCommand(runtime Runtime, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if err := app.requireCloudFeature("detach"); err != nil {
+				return err
+			}
 			service := sessioncmd.Service{API: app.api, Config: app.config, Keyring: app.keyring}
 			var result api.Session
 			if err := app.withLock(cmd.Context(), func() error {
@@ -1340,6 +1365,9 @@ func resumeCommand(runtime Runtime, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if err := app.requireCloudFeature("resume"); err != nil {
+				return err
+			}
 			service := sessioncmd.Service{API: app.api, Config: app.config, Keyring: app.keyring}
 			var result api.Session
 			var previous string
@@ -1373,6 +1401,9 @@ func shareCommand(runtime Runtime, opts *options) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := newApp(runtime, opts)
 			if err != nil {
+				return err
+			}
+			if err := app.requireCloudFeature("share"); err != nil {
 				return err
 			}
 			service := sessioncmd.Service{API: app.api, Config: app.config, Keyring: app.keyring}
@@ -1417,6 +1448,9 @@ func sessionCommand(runtime Runtime, opts *options) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := newApp(runtime, opts)
 			if err != nil {
+				return err
+			}
+			if err := app.requireCloudFeature("session land"); err != nil {
 				return err
 			}
 			service := sessioncmd.Service{API: app.api, Config: app.config, Keyring: app.keyring}
@@ -1543,7 +1577,7 @@ func airplaneCommand(runtime Runtime, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			app.renderer.Prefix = airplane.Prefix
+			app.renderer.Prefix = "[s46]"
 			report, err := runAirplaneSetup(cmd.Context(), app, true)
 			if err != nil {
 				return err
@@ -1551,7 +1585,7 @@ func airplaneCommand(runtime Runtime, opts *options) *cobra.Command {
 			if opts.json {
 				return app.renderer.WriteJSON(report)
 			}
-			return nil
+			return offerAirplaneModeOnAfterSetup(cmd.Context(), app, report)
 		},
 	})
 	mode := &cobra.Command{Use: "mode", Short: "turn airplane mode on or off"}
@@ -1588,7 +1622,7 @@ func runAirplaneSetup(ctx context.Context, app *app, allowPrompts bool) (airplan
 	if !app.options.json {
 		progress = app.runtime.Stdout
 	}
-	service := airplane.Service{Env: app.runtime.Env, Stdin: app.runtime.Stdin, Stdout: app.runtime.Stdout, Stderr: app.runtime.Stderr, Progress: progress}
+	service := airplane.Service{Env: app.runtime.Env, Stdin: app.runtime.Stdin, Stdout: app.runtime.Stdout, Stderr: app.runtime.Stderr, Progress: progress, LogPrefix: "[s46]"}
 	report := service.Check(ctx)
 	if app.options.json {
 		return report, nil
@@ -1602,7 +1636,7 @@ func runAirplaneSetup(ctx context.Context, app *app, allowPrompts bool) (airplan
 
 	changed := false
 	if missingCheck(report, "ollama-installed") && service.HomebrewAvailable() {
-		if yes, err := promptYesNo(app, airplane.Prefix+" Ollama is not installed.\n"+airplane.Prefix+" Install with Homebrew? [Y/n] ", true); err != nil {
+		if yes, err := promptYesNo(app, "[s46] Ollama is not installed.\n[s46] Install with Homebrew? [Y/n] ", true); err != nil {
 			return report, err
 		} else if yes {
 			if err := app.renderer.Lines("[s46] installing Ollama with Homebrew..."); err != nil {
@@ -1616,7 +1650,7 @@ func runAirplaneSetup(ctx context.Context, app *app, allowPrompts bool) (airplan
 		}
 	}
 	if checkOK(report, "ollama-installed") && missingCheck(report, "ollama-running") {
-		if yes, err := promptYesNo(app, airplane.Prefix+" Ollama is installed but not running.\n"+airplane.Prefix+" Start Ollama now? [Y/n] ", true); err != nil {
+		if yes, err := promptYesNo(app, "[s46] Ollama is installed but not running.\n[s46] Start Ollama now? [Y/n] ", true); err != nil {
 			return report, err
 		} else if yes {
 			if err := app.renderer.Lines("[s46] starting Ollama..."); err != nil {
@@ -1630,7 +1664,7 @@ func runAirplaneSetup(ctx context.Context, app *app, allowPrompts bool) (airplan
 		}
 	}
 	if checkOK(report, "ollama-running") && missingCheck(report, "model-downloaded") {
-		if yes, err := promptYesNo(app, fmt.Sprintf("%s Download %s (~15 GB)? [Y/n] ", airplane.Prefix, airplane.BackendModel), true); err != nil {
+		if yes, err := promptYesNo(app, fmt.Sprintf("[s46] Download %s (~15 GB)? [Y/n] ", airplane.BackendModel), true); err != nil {
 			return report, err
 		} else if yes {
 			if err := service.PullModel(ctx); err != nil {
@@ -1642,7 +1676,7 @@ func runAirplaneSetup(ctx context.Context, app *app, allowPrompts bool) (airplan
 	}
 	if missingCheck(report, "local-gateway") {
 		if _, ok := service.GatewayStartDescription(); !ok && service.GatewayDownloadAvailable() {
-			if yes, err := promptYesNo(app, fmt.Sprintf("%s Local S46 gateway is not installed.\n%s Download %s? [Y/n] ", airplane.Prefix, airplane.Prefix, service.GatewayInstallDescription()), true); err != nil {
+			if yes, err := promptYesNo(app, fmt.Sprintf("[s46] Local S46 gateway is not installed.\n[s46] Download %s? [Y/n] ", service.GatewayInstallDescription()), true); err != nil {
 				return report, err
 			} else if yes {
 				if err := app.renderer.Lines("[s46] downloading local S46 gateway..."); err != nil {
@@ -1658,7 +1692,7 @@ func runAirplaneSetup(ctx context.Context, app *app, allowPrompts bool) (airplan
 	}
 	if missingCheck(report, "local-gateway") {
 		if description, ok := service.GatewayStartDescription(); ok {
-			if yes, err := promptYesNo(app, fmt.Sprintf("%s Local S46 gateway is available as %s.\n%s Start local gateway now? [Y/n] ", airplane.Prefix, description, airplane.Prefix), true); err != nil {
+			if yes, err := promptYesNo(app, fmt.Sprintf("[s46] Local S46 gateway is available as %s.\n[s46] Start local gateway now? [Y/n] ", description), true); err != nil {
 				return report, err
 			} else if yes {
 				if err := app.renderer.Lines("[s46] starting local S46 gateway..."); err != nil {
@@ -1712,6 +1746,25 @@ func waitForGatewayReady(ctx context.Context, service airplane.Service, timeout 
 	}
 }
 
+func offerAirplaneModeOnAfterSetup(ctx context.Context, app *app, report airplane.Report) error {
+	if !report.Ready || app.runtime.Stdin == nil || app.options.dryRun {
+		return nil
+	}
+	cfg, teamName, teamConfig, err := activeTeamConfig(app)
+	if err != nil || activeMode(cfg) == airplane.ModeAirplane {
+		return nil
+	}
+	yes, err := promptYesNo(app, "[s46] Turn on airplane mode now? [Y/n] ", true)
+	if err != nil {
+		return err
+	}
+	if !yes {
+		return nil
+	}
+	service := airplane.Service{Env: app.runtime.Env, Stdin: app.runtime.Stdin, Stdout: app.runtime.Stdout, Stderr: app.runtime.Stderr, LogPrefix: "[s46]"}
+	return enableAirplaneMode(ctx, app, service, cfg, teamName, teamConfig, report)
+}
+
 func renderAirplaneReport(report airplane.Report) []string {
 	lines := []string{
 		"[s46] airplane setup: checking local runtime",
@@ -1746,16 +1799,19 @@ func renderAirplaneReport(report airplane.Report) []string {
 }
 
 func airplaneModeOn(ctx context.Context, app *app) error {
-	app.renderer.Prefix = airplane.Prefix
 	cfg, teamName, teamConfig, err := activeTeamConfig(app)
 	if err != nil {
 		return err
 	}
-	service := airplane.Service{Env: app.runtime.Env, Stdin: app.runtime.Stdin, Stdout: app.runtime.Stdout, Stderr: app.runtime.Stderr}
+	service := airplane.Service{Env: app.runtime.Env, Stdin: app.runtime.Stdin, Stdout: app.runtime.Stdout, Stderr: app.runtime.Stderr, LogPrefix: "[s46]"}
 	report, err := runAirplaneSetup(ctx, app, false)
 	if err != nil {
 		return err
 	}
+	return enableAirplaneMode(ctx, app, service, cfg, teamName, teamConfig, report)
+}
+
+func enableAirplaneMode(ctx context.Context, app *app, service airplane.Service, cfg config.Config, teamName string, teamConfig config.TeamConfig, report airplane.Report) error {
 	if app.options.dryRun {
 		if app.options.json {
 			return app.renderer.WriteJSON(map[string]any{"mode": airplane.ModeAirplane, "team": teamName, "endpoint": airplane.LocalGatewayURL, "model": airplane.LocalModelID, "dryRun": true})
@@ -1776,7 +1832,7 @@ func airplaneModeOn(ctx context.Context, app *app) error {
 		if app.runtime.Stdin == nil {
 			return fmt.Errorf("airplane setup is incomplete; run `s46 airplane setup`")
 		}
-		yes, err := promptYesNo(app, airplane.Prefix+" Airplane setup is incomplete. Run setup now? [Y/n] ", true)
+		yes, err := promptYesNo(app, "[s46] Airplane setup is incomplete. Run setup now? [Y/n] ", true)
 		if err != nil {
 			return err
 		}
@@ -1837,6 +1893,7 @@ func airplaneModeOn(ctx context.Context, app *app) error {
 	if app.options.json {
 		return app.renderer.WriteJSON(map[string]any{"mode": airplane.ModeAirplane, "team": teamName, "endpoint": teamConfig.Endpoint, "model": teamConfig.DefaultModel, "dryRun": app.options.dryRun})
 	}
+	app.renderer.Prefix = airplane.Prefix
 	return app.renderer.Lines(
 		"[s46] mode: airplane",
 		fmt.Sprintf("[s46] team: %s", teamName),
@@ -2052,12 +2109,27 @@ func firstNonEmpty(values ...string) string {
 }
 
 func (a *app) accessToken(ctx context.Context) string {
+	cfg, err := a.config.LoadConfig()
+	if err == nil && activeMode(cfg) == airplane.ModeAirplane {
+		return ""
+	}
 	service := auth.Service{API: a.api, Config: a.config, Keyring: a.keyring}
 	token, err := service.Token(ctx, false)
 	if err != nil {
 		return ""
 	}
 	return token
+}
+
+func (a *app) requireCloudFeature(feature string) error {
+	cfg, err := a.config.LoadConfig()
+	if err != nil {
+		return err
+	}
+	if activeMode(cfg) != airplane.ModeAirplane {
+		return nil
+	}
+	return fmt.Errorf("%s requires cloud connectivity; go online and switch to cloud mode to use it. Airplane mode supports local coding only", feature)
 }
 
 func (a *app) withLock(ctx context.Context, fn func() error) error {

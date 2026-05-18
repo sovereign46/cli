@@ -308,7 +308,7 @@ func TestAirplaneModeOnAndCloudModeRestoreEndpoint(t *testing.T) {
 	requireOK(t, run(t, env, "connect", "acme", "--harness=standard"))
 
 	on := requireOK(t, run(t, env, "mode", "airplane"))
-	for _, want := range []string{"[s46✈] airplane setup: ready", "[s46✈] mode: airplane", "[s46✈] endpoint: http://127.0.0.1:8080", "[s46✈] model: s46/local-coder"} {
+	for _, want := range []string{"[s46] airplane setup: ready", "[s46✈] mode: airplane", "[s46✈] endpoint: http://127.0.0.1:8080", "[s46✈] model: s46/local-coder"} {
 		if !strings.Contains(on, want) {
 			t.Fatalf("airplane output missing %q:\n%s", want, on)
 		}
@@ -346,14 +346,82 @@ func TestAirplaneSetupContinuesAfterInstallingOllama(t *testing.T) {
 
 	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\nY\nY\n"), "airplane", "setup"))
 	for _, want := range []string{
-		"[s46✈] Install with Homebrew? [Y/n]",
-		"[s46✈] Ollama is installed but not running.",
-		"[s46✈] Start Ollama now? [Y/n]",
+		"[s46] Install with Homebrew? [Y/n]",
+		"[s46] Ollama is installed but not running.",
+		"[s46] Start Ollama now? [Y/n]",
 		"Download devstral-small-2:24b-instruct-2512-q4_K_M",
-		"[s46✈] airplane setup: ready",
+		"[s46] airplane setup: ready",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("setup output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestAirplaneSetupOffersToTurnOnAirplaneMode(t *testing.T) {
+	env := testEnv(t)
+	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "connect", "acme", "--harness=standard"))
+
+	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\n"), "airplane", "setup"))
+	for _, want := range []string{
+		"[s46] airplane setup: ready",
+		"[s46] Turn on airplane mode now? [Y/n]",
+		"[s46✈] mode: airplane",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("setup output missing %q:\n%s", want, out)
+		}
+	}
+
+	setupAgain := requireOK(t, run(t, env, "airplane", "setup"))
+	if !strings.Contains(setupAgain, "[s46] airplane setup: ready") || strings.Contains(setupAgain, "[s46✈] airplane setup") {
+		t.Fatalf("setup should use standard prefix even when airplane mode is active:\n%s", setupAgain)
+	}
+}
+
+func TestAirplaneTokenHelperUsesLocalToken(t *testing.T) {
+	env := testEnv(t)
+	env["S46_AIRPLANE_TOKEN"] = "local-airplane-token"
+	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "connect", "acme", "--harness=standard"))
+	requireOK(t, run(t, env, "mode", "airplane"))
+
+	out := requireOK(t, run(t, env, "token", "--refresh"))
+	if strings.TrimSpace(out) != "local-airplane-token" {
+		t.Fatalf("unexpected airplane token: %q", out)
+	}
+	doctor := requireOK(t, run(t, env, "doctor"))
+	if !strings.Contains(doctor, "[ok] tenant") {
+		t.Fatalf("unexpected airplane doctor output: %s", doctor)
+	}
+}
+
+func TestAirplaneCloudCommandsFailFast(t *testing.T) {
+	env := testEnv(t)
+	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "connect", "acme", "--harness=standard"))
+	requireOK(t, run(t, env, "mode", "airplane"))
+
+	commands := map[string][]string{
+		"login":             {"login", "--user", "dscape@acme.s46.dev"},
+		"devices":           {"devices"},
+		"device revocation": {"devices", "delete", "dev-laptop"},
+		"update":            {"update"},
+		"connect":           {"connect", "acme", "--harness=standard"},
+		"detach":            {"detach", "@dscape/task"},
+		"resume":            {"resume", "@dscape/task"},
+		"share":             {"share", "@dscape/task"},
+		"session land":      {"session", "land", "@dscape/task"},
+	}
+	for feature, args := range commands {
+		result := run(t, env, args...)
+		if result.err == nil {
+			t.Fatalf("expected %v to fail in airplane mode", args)
+		}
+		want := feature + " requires cloud connectivity; go online and switch to cloud mode to use it. Airplane mode supports local coding only"
+		if result.err.Error() != want {
+			t.Fatalf("unexpected error for %v:\nwant: %s\n got: %s", args, want, result.err.Error())
 		}
 	}
 }
@@ -374,10 +442,10 @@ func TestAirplaneSetupDownloadsMissingGateway(t *testing.T) {
 
 	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\n"), "airplane", "setup"))
 	for _, want := range []string{
-		"[s46✈] Local S46 gateway is not installed.",
+		"[s46] Local S46 gateway is not installed.",
 		"Download GitHub release sovereign46/s46-api",
-		"[s46✈] downloading local S46 gateway...",
-		"[s46✈] airplane setup: ready",
+		"[s46] downloading local S46 gateway...",
+		"[s46] airplane setup: ready",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("setup output missing %q:\n%s", want, out)
@@ -397,7 +465,7 @@ func TestAirplaneSetupReportsInsufficientHardware(t *testing.T) {
 	env["S46_TEST_GATEWAY_READY"] = "0"
 
 	out := requireOK(t, run(t, env, "airplane", "setup"))
-	for _, want := range []string{"[s46✈] This machine has 16 GB memory.", "[s46✈] s46/local-coder recommends 32–64 GB.", "[s46✈] 18 GB free disk detected.", "[s46✈] s46/local-coder setup needs about 30 GB free."} {
+	for _, want := range []string{"[s46] This machine has 16 GB memory.", "[s46] s46/local-coder recommends 32–64 GB.", "[s46] 18 GB free disk detected.", "[s46] s46/local-coder setup needs about 30 GB free."} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("setup output missing %q:\n%s", want, out)
 		}

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sovereign46/s46-cli/internal/airplane"
 	"github.com/sovereign46/s46-cli/internal/api"
 	"github.com/sovereign46/s46-cli/internal/config"
 	"github.com/sovereign46/s46-cli/internal/keyring"
@@ -48,6 +49,30 @@ func TestLoginRefreshTokenAndLogout(t *testing.T) {
 	}
 	if _, err := service.Whoami(context.Background()); err == nil {
 		t.Fatal("expected whoami to fail after logout")
+	}
+}
+
+func TestTokenReturnsLocalAirplaneTokenWithoutCloudRefresh(t *testing.T) {
+	home := t.TempDir()
+	env := map[string]string{
+		"HOME":               home,
+		"XDG_CONFIG_HOME":    filepath.Join(home, ".config"),
+		"XDG_DATA_HOME":      filepath.Join(home, ".data"),
+		"S46_AIRPLANE_TOKEN": "local-dev-token",
+	}
+	store := config.NewStore(env, "")
+	team := api.Team{Name: "acme", Endpoint: airplane.LocalGatewayURL, Mode: airplane.ModeAirplane, DefaultModel: airplane.LocalModelID}
+	if err := store.SaveConfig(config.Config{Mode: airplane.ModeAirplane, ActiveTeam: "acme", Teams: map[string]config.TeamConfig{"acme": config.TeamConfigFromAPI(team, "standard", airplane.LocalModelID)}}); err != nil {
+		t.Fatal(err)
+	}
+	service := Service{API: refreshFailsAPI{Client: api.NewMockClient()}, Config: store, Keyring: keyring.FileStore{Path: filepath.Join(home, "keyring.json")}}
+
+	token, err := service.Token(context.Background(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token != "local-dev-token" {
+		t.Fatalf("token = %q", token)
 	}
 }
 
@@ -94,6 +119,12 @@ func TestLoginUsesAuthoritativeTeamFromMe(t *testing.T) {
 	if login.User != "nunojob@icloud.com" || login.Team != "acme" || apiClient.teamRequested != "acme" {
 		t.Fatalf("login=%#v teamRequested=%q", login, apiClient.teamRequested)
 	}
+}
+
+type refreshFailsAPI struct{ api.Client }
+
+func (refreshFailsAPI) RefreshToken(ctx context.Context, refreshToken string, account string) (api.TokenSet, error) {
+	return api.TokenSet{}, context.Canceled
 }
 
 type authoritativeTeamAPI struct {

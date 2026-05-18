@@ -72,6 +72,7 @@ type Service struct {
 	Stdout            io.Writer
 	Stderr            io.Writer
 	Progress          io.Writer
+	LogPrefix         string
 	Client            *http.Client
 	CheckTimeout      time.Duration
 	ModelProbeTimeout time.Duration
@@ -602,7 +603,7 @@ func (s Service) writeModelProbeProgress(done <-chan struct{}, finished chan<- s
 		if elapsed <= 0 {
 			elapsed = time.Second
 		}
-		_, _ = fmt.Fprintf(s.Progress, "\r%s loading %s; might take a while... %s elapsed", Prefix, LocalModelID, formatDuration(elapsed))
+		_, _ = fmt.Fprintf(s.Progress, "\r%s loading %s; might take a while... %s elapsed", s.logPrefix(), LocalModelID, formatDuration(elapsed))
 		select {
 		case <-ticker.C:
 		case <-done:
@@ -736,7 +737,7 @@ func (s Service) startDetached(cmd *exec.Cmd, logName string) error {
 	if out == nil {
 		out = io.Discard
 	}
-	_, _ = fmt.Fprintf(out, "%s started %s (pid %d, log %s)\n", Prefix, filepath.Base(cmd.Path), cmd.Process.Pid, logPath)
+	_, _ = fmt.Fprintf(out, "%s started %s (pid %d, log %s)\n", s.logPrefix(), filepath.Base(cmd.Path), cmd.Process.Pid, logPath)
 	return nil
 }
 
@@ -905,6 +906,10 @@ func (s Service) httpClient(timeout ...time.Duration) *http.Client {
 		clientTimeout = timeout[0]
 	}
 	return &http.Client{Timeout: clientTimeout}
+}
+
+func (s Service) logPrefix() string {
+	return nonEmpty(s.LogPrefix, Prefix)
 }
 
 func (s Service) ollamaURL() string {

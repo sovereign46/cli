@@ -10,19 +10,20 @@ cleanup() {
   rm -rf "$sandbox"
 }
 trap cleanup EXIT
-trap 'exit 130' INT TERM
+trap 'exit 143' TERM
 
 mkdir -p "$sandbox/home" "$sandbox/home/.ollama" "$sandbox/home/.config" "$sandbox/home/.local/share" "$sandbox/home/.cache" "$sandbox/bin"
 
 cd "$repo_root"
 go build -o "$sandbox/bin/s46" ./cmd/s46
 
-export HOME="$sandbox/home"
+export TMP_FOLDER="$sandbox"
+export HOME="$TMP_FOLDER/home"
 export S46_HOST_HOME="$host_home"
 export OLLAMA_MODELS="${OLLAMA_MODELS:-$host_home/.ollama/models}"
-export XDG_CONFIG_HOME="$sandbox/home/.config"
-export XDG_DATA_HOME="$sandbox/home/.local/share"
-export XDG_CACHE_HOME="$sandbox/home/.cache"
+export XDG_CONFIG_HOME="$TMP_FOLDER/home/.config"
+export XDG_DATA_HOME="$TMP_FOLDER/home/.local/share"
+export XDG_CACHE_HOME="$TMP_FOLDER/home/.cache"
 export S46_DEV_SHELL=1
 api_base_default="${S46_DEV_BASE_URL:-http://127.0.0.1:8080}"
 export S46_API_BASE_URL="${S46_API_BASE_URL:-$api_base_default}"
@@ -38,18 +39,22 @@ elif [ -n "${S46_API_REPO:-}" ]; then
   ln -s "$S46_API_REPO" "$api_repo_link"
   export S46_API_REPO="$api_repo_link"
 fi
-export PATH="$sandbox/bin:$PATH"
+export PATH="$TMP_FOLDER/bin:$PATH"
 
 api_base="$S46_API_BASE_URL"
+api_repo_display="${S46_API_REPO:-not configured}"
+api_repo_display="${api_repo_display/#$TMP_FOLDER/\$TMP_FOLDER}"
 
 cat <<EOF
 s46 development shell
 
-Temporary HOME: $HOME
-Temporary binary: $sandbox/bin/s46
+TMP_FOLDER: $TMP_FOLDER
+
+Temporary HOME: \$TMP_FOLDER/home
+Temporary binary: \$TMP_FOLDER/bin/s46
 API base: $api_base
 Ollama models: $OLLAMA_MODELS
-S46 API repo: ${S46_API_REPO:-not configured}
+S46 API repo: $api_repo_display
 
 Try:
   s46 login --user dscape@acme.s46.dev --device-id dev-laptop --device-name "Dev laptop"
@@ -65,26 +70,44 @@ EOF
 shell="${SHELL:-/bin/zsh}"
 shell_name="$(basename "$shell")"
 
-case "$shell_name" in
-  zsh)
-    zdotdir="$sandbox/zdot"
-    mkdir -p "$zdotdir"
-    cat > "$zdotdir/.zshrc" <<'EOF'
-TRAPINT() { exit 130 }
+run_shell() {
+  case "$shell_name" in
+    zsh)
+      zdotdir="$sandbox/zdot"
+      mkdir -p "$zdotdir"
+      cat > "$zdotdir/.zshrc" <<'EOF'
+TRAPINT() { print; exit 130 }
 PROMPT='%F{blue}s46-sandbox%f:%~ %# '
 EOF
-    export ZDOTDIR="$zdotdir"
-    "$shell" -i
-    ;;
-  bash)
-    bashrc="$sandbox/bashrc"
-    cat > "$bashrc" <<'EOF'
-trap 'exit 130' INT
+      export ZDOTDIR="$zdotdir"
+      "$shell" -i
+      ;;
+    bash)
+      bashrc="$sandbox/bashrc"
+      cat > "$bashrc" <<'EOF'
+trap 'printf "\n"; exit 130' INT
 PS1='s46-sandbox:\w \$ '
 EOF
-    "$shell" --rcfile "$bashrc" -i
+      "$shell" --rcfile "$bashrc" -i
+      ;;
+    *)
+      "$shell"
+      ;;
+  esac
+}
+
+set +e
+run_shell
+shell_status=$?
+set -e
+
+case "$shell_status" in
+  0|130)
+    echo "Exited s46 development shell."
+    exit 0
     ;;
   *)
-    "$shell"
+    echo "s46 development shell exited with status $shell_status." >&2
+    exit "$shell_status"
     ;;
 esac
