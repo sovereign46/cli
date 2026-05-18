@@ -328,6 +328,36 @@ func TestAirplaneModeOnAndCloudModeRestoreEndpoint(t *testing.T) {
 	}
 }
 
+func TestAirplaneSetupContinuesAfterInstallingOllama(t *testing.T) {
+	env := testEnv(t)
+	delete(env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")
+	env["S46_TEST_MEMORY_BYTES"] = "68000000000"
+	env["S46_TEST_FREE_DISK_BYTES"] = "61000000000"
+	env["S46_TEST_OLLAMA_PATH"] = "missing"
+	env["S46_TEST_BREW_PATH"] = "brew"
+	env["S46_TEST_INSTALL_OLLAMA_OK"] = "1"
+	env["S46_TEST_START_OLLAMA_OK"] = "1"
+	env["S46_TEST_PULL_MODEL_OK"] = "1"
+	env["S46_TEST_OLLAMA_RUNNING"] = "0"
+	env["S46_TEST_MODEL_DOWNLOADED"] = "0"
+	env["S46_TEST_MODEL_PROBE"] = "0"
+	env["S46_TEST_GATEWAY_BINARY"] = "/tmp/s46-api"
+	env["S46_TEST_GATEWAY_READY"] = "0"
+
+	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\nY\nY\n"), "airplane", "setup"))
+	for _, want := range []string{
+		"[s46✈] Install with Homebrew? [Y/n]",
+		"[s46✈] Ollama is installed but not running.",
+		"[s46✈] Start Ollama now? [Y/n]",
+		"Download devstral-small-2:24b-instruct-2512-q4_K_M",
+		"[s46✈] airplane setup: ready",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("setup output missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestAirplaneSetupReportsInsufficientHardware(t *testing.T) {
 	env := testEnv(t)
 	delete(env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")

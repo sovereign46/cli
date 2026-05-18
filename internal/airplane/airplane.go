@@ -111,6 +111,10 @@ func (s Service) Check(ctx context.Context) Report {
 }
 
 func (s Service) InstallOllama(ctx context.Context) error {
+	if truthy(s.env("S46_TEST_INSTALL_OLLAMA_OK")) {
+		s.setEnv("S46_TEST_OLLAMA_PATH", "/opt/homebrew/bin/ollama")
+		return nil
+	}
 	cmd := exec.CommandContext(ctx, "brew", "install", "ollama")
 	cmd.Stdout = s.Stdout
 	cmd.Stderr = s.Stderr
@@ -118,6 +122,11 @@ func (s Service) InstallOllama(ctx context.Context) error {
 }
 
 func (s Service) PullModel(ctx context.Context) error {
+	if truthy(s.env("S46_TEST_PULL_MODEL_OK")) {
+		s.setEnv("S46_TEST_MODEL_DOWNLOADED", "1")
+		s.setEnv("S46_TEST_MODEL_PROBE", "1")
+		return nil
+	}
 	cmd := exec.CommandContext(ctx, "ollama", "pull", s.backendModel())
 	cmd.Stdout = s.Stdout
 	cmd.Stderr = s.Stderr
@@ -131,17 +140,17 @@ func (s Service) StartOllama() error {
 	if s.ollamaRunning(context.Background()) {
 		return nil
 	}
+	if truthy(s.env("S46_TEST_START_OLLAMA_OK")) {
+		s.setEnv("S46_TEST_OLLAMA_RUNNING", "1")
+		return nil
+	}
 	path, ok := s.ollamaPath()
 	if !ok {
 		return fmt.Errorf("ollama is not installed")
 	}
 	cmd := exec.Command(path, "serve")
-	cmd.Stdout = s.Stderr
-	cmd.Stderr = s.Stderr
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-	return nil
+	cmd.Env = s.processEnv("OLLAMA_FLASH_ATTENTION=1", "OLLAMA_KV_CACHE_TYPE=q8_0")
+	return s.startDetached(cmd, "ollama.log")
 }
 
 func (s Service) StartGateway() error {
@@ -151,18 +160,18 @@ func (s Service) StartGateway() error {
 	if s.gatewayReady(context.Background()) {
 		return nil
 	}
-	path, ok := s.gatewayBinary()
+	if truthy(s.env("S46_TEST_START_GATEWAY_OK")) {
+		s.setEnv("S46_TEST_GATEWAY_READY", "1")
+		return nil
+	}
+	command, ok := s.gatewayCommand()
 	if !ok {
-		return fmt.Errorf("local S46 gateway is not running and s46-api was not found in PATH; start it with `S46_ENV=airplane S46_ADDR=127.0.0.1:8080 s46-api`")
+		return fmt.Errorf("local S46 gateway is not running and no start command was found; set S46_API_BINARY or run `S46_ENV=airplane S46_ADDR=127.0.0.1:8080 s46-api`")
 	}
-	cmd := exec.Command(path)
-	cmd.Env = append(os.Environ(), "S46_ENV=airplane", "S46_ADDR=127.0.0.1:8080", "S46_LOCAL_OLLAMA_URL="+s.ollamaURL(), "S46_LOCAL_MODEL="+s.backendModel())
-	cmd.Stdout = s.Stderr
-	cmd.Stderr = s.Stderr
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-	return nil
+	cmd := exec.Command(command.Path, command.Args...)
+	cmd.Dir = command.Dir
+	cmd.Env = s.processEnv("S46_ENV=airplane", "S46_ADDR=127.0.0.1:8080", "S46_LOCAL_OLLAMA_URL="+s.ollamaURL(), "S46_LOCAL_MODEL="+s.backendModel())
+	return s.startDetached(cmd, "s46-api-airplane.log")
 }
 
 func (s Service) HomebrewAvailable() bool {
@@ -171,6 +180,22 @@ func (s Service) HomebrewAvailable() bool {
 	}
 	_, err := exec.LookPath("brew")
 	return err == nil
+}
+
+func (s Service) GatewayStartDescription() (string, bool) {
+	command, ok := s.gatewayCommand()
+	if !ok {
+		return "", false
+	}
+	return command.Description, true
+}
+
+func (s Service) GatewayReady(ctx context.Context) bool {
+	return s.gatewayReady(ctx)
+}
+
+func (s Service) OllamaRunning(ctx context.Context) bool {
+	return s.ollamaRunning(ctx)
 }
 
 func (r *Report) add(check Check) {
@@ -208,18 +233,62 @@ func (s Service) ollamaPath() (string, bool) {
 	return path, err == nil
 }
 
+type gatewayCommand struct {
+	Path        string
+	Args        []string
+	Dir         string
+	Description string
+}
+
 func (s Service) gatewayBinary() (string, bool) {
+	command, ok := s.gatewayCommand()
+	if !ok {
+		return "", false
+	}
+	return command.Description, true
+}
+
+func (s Service) gatewayCommand() (gatewayCommand, bool) {
 	if path := strings.TrimSpace(s.env("S46_API_BINARY")); path != "" {
 		if _, err := os.Stat(path); err == nil {
-			return path, true
+			return gatewayCommand{Path: path, Description: path}, true
 		}
-		return path, false
+		return gatewayCommand{}, false
 	}
 	if path := strings.TrimSpace(s.env("S46_TEST_GATEWAY_BINARY")); path != "" {
-		return path, path != "missing"
+		if path == "missing" {
+			return gatewayCommand{}, false
+		}
+		return gatewayCommand{Path: path, Description: path}, true
 	}
-	path, err := exec.LookPath("s46-api")
-	return path, err == nil
+	if path, err := exec.LookPath("s46-api"); err == nil {
+		return gatewayCommand{Path: path, Description: path}, true
+	}
+	return s.gatewaySourceCommand()
+}
+
+func (s Service) gatewaySourceCommand() (gatewayCommand, bool) {
+	candidates := []string{}
+	if repo := strings.TrimSpace(s.env("S46_API_REPO")); repo != "" {
+		candidates = append(candidates, repo)
+	}
+	if wd, err := os.Getwd(); err == nil {
+		candidates = append(candidates, filepath.Join(filepath.Dir(wd), "s46-api"))
+	}
+	if home := homeDir(s.Env); home != "" {
+		candidates = append(candidates, filepath.Join(home, "dev", "s46-api"))
+	}
+	goPath, goErr := exec.LookPath("go")
+	for _, candidate := range candidates {
+		if candidate == "" || goErr != nil {
+			continue
+		}
+		mainPath := filepath.Join(candidate, "cmd", "s46-api")
+		if info, err := os.Stat(mainPath); err == nil && info.IsDir() {
+			return gatewayCommand{Path: goPath, Args: []string{"run", "./cmd/s46-api"}, Dir: candidate, Description: "go run ./cmd/s46-api in " + candidate}, true
+		}
+	}
+	return gatewayCommand{}, false
 }
 
 func (s Service) ollamaRunning(ctx context.Context) bool {
@@ -353,6 +422,71 @@ func (s Service) freeDiskBytes() int64 {
 		return 0
 	}
 	return int64(stat.Bavail) * int64(stat.Bsize)
+}
+
+func (s Service) startDetached(cmd *exec.Cmd, logName string) error {
+	logPath := filepath.Join(cacheDir(s.Env), logName)
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
+		return err
+	}
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	defer logFile.Close()
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	out := s.Stderr
+	if out == nil {
+		out = io.Discard
+	}
+	_, _ = fmt.Fprintf(out, "%s started %s (pid %d, log %s)\n", Prefix, filepath.Base(cmd.Path), cmd.Process.Pid, logPath)
+	return nil
+}
+
+func (s Service) processEnv(extra ...string) []string {
+	env := os.Environ()
+	for key, value := range s.Env {
+		env = append(env, key+"="+value)
+	}
+	return append(env, extra...)
+}
+
+func (s Service) setEnv(key string, value string) {
+	if s.Env != nil {
+		s.Env[key] = value
+	}
+}
+
+func cacheDir(env map[string]string) string {
+	if value := strings.TrimSpace(envValue(env, "XDG_CACHE_HOME")); value != "" {
+		return filepath.Join(value, "s46")
+	}
+	if home := homeDir(env); home != "" {
+		return filepath.Join(home, ".cache", "s46")
+	}
+	return filepath.Join(os.TempDir(), "s46")
+}
+
+func homeDir(env map[string]string) string {
+	if value := strings.TrimSpace(envValue(env, "HOME")); value != "" {
+		return value
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return home
+	}
+	return ""
+}
+
+func envValue(env map[string]string, key string) string {
+	if env == nil {
+		return os.Getenv(key)
+	}
+	return env[key]
 }
 
 func (s Service) httpClient() *http.Client {

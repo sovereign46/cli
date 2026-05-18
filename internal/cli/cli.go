@@ -1592,33 +1592,108 @@ func runAirplaneSetup(ctx context.Context, app *app, allowPrompts bool) (airplan
 	if err := app.renderer.Lines(renderAirplaneReport(report)...); err != nil {
 		return report, err
 	}
-	if allowPrompts && checkOK(report, "memory") && checkOK(report, "disk") && missingCheck(report, "ollama-installed") && service.HomebrewAvailable() {
+	if !allowPrompts || !checkOK(report, "memory") || !checkOK(report, "disk") {
+		return report, nil
+	}
+
+	changed := false
+	if missingCheck(report, "ollama-installed") && service.HomebrewAvailable() {
 		if yes, err := promptYesNo(app, airplane.Prefix+" Ollama is not installed.\n"+airplane.Prefix+" Install with Homebrew? [Y/n] ", true); err != nil {
 			return report, err
 		} else if yes {
+			if err := app.renderer.Lines("[s46] installing Ollama with Homebrew..."); err != nil {
+				return report, err
+			}
 			if err := service.InstallOllama(ctx); err != nil {
 				return report, fmt.Errorf("failed to install Ollama with Homebrew: %w", err)
 			}
+			changed = true
 			report = service.Check(ctx)
-			if err := app.renderer.Lines(renderAirplaneReport(report)...); err != nil {
-				return report, err
-			}
 		}
 	}
-	if allowPrompts && missingCheck(report, "model-downloaded") && checkOK(report, "ollama-running") {
+	if checkOK(report, "ollama-installed") && missingCheck(report, "ollama-running") {
+		if yes, err := promptYesNo(app, airplane.Prefix+" Ollama is installed but not running.\n"+airplane.Prefix+" Start Ollama now? [Y/n] ", true); err != nil {
+			return report, err
+		} else if yes {
+			if err := app.renderer.Lines("[s46] starting Ollama..."); err != nil {
+				return report, err
+			}
+			if err := service.StartOllama(); err != nil {
+				return report, fmt.Errorf("failed to start Ollama: %w", err)
+			}
+			changed = true
+			report = waitForAirplaneCheck(ctx, service, "ollama-running", 30*time.Second)
+		}
+	}
+	if checkOK(report, "ollama-running") && missingCheck(report, "model-downloaded") {
 		if yes, err := promptYesNo(app, fmt.Sprintf("%s Download %s (~15 GB)? [Y/n] ", airplane.Prefix, airplane.BackendModel), true); err != nil {
 			return report, err
 		} else if yes {
 			if err := service.PullModel(ctx); err != nil {
 				return report, fmt.Errorf("failed to download %s: %w", airplane.BackendModel, err)
 			}
+			changed = true
 			report = service.Check(ctx)
-			if err := app.renderer.Lines(renderAirplaneReport(report)...); err != nil {
+		}
+	}
+	if checkOK(report, "model-downloaded") && missingCheck(report, "model-probe") {
+		report = waitForAirplaneCheck(ctx, service, "model-probe", 10*time.Second)
+	}
+	if missingCheck(report, "local-gateway") {
+		if description, ok := service.GatewayStartDescription(); ok {
+			if yes, err := promptYesNo(app, fmt.Sprintf("%s Local S46 gateway is available as %s.\n%s Start local gateway now? [Y/n] ", airplane.Prefix, description, airplane.Prefix), true); err != nil {
 				return report, err
+			} else if yes {
+				if err := app.renderer.Lines("[s46] starting local S46 gateway..."); err != nil {
+					return report, err
+				}
+				if err := service.StartGateway(); err != nil {
+					return report, fmt.Errorf("failed to start local S46 gateway: %w", err)
+				}
+				changed = true
+				report = waitForAirplaneCheck(ctx, service, "local-gateway", 30*time.Second)
 			}
+		} else if err := app.renderer.Lines(
+			"[s46] Local S46 gateway is not installed or running.",
+			"[s46] In development, start it with:",
+			"[s46]   cd ../s46-api",
+			"[s46]   S46_ENV=airplane S46_ADDR=127.0.0.1:8080 go run ./cmd/s46-api",
+			"[s46] Or set S46_API_BINARY=/path/to/s46-api.",
+		); err != nil {
+			return report, err
+		}
+	}
+	if changed {
+		if err := app.renderer.Lines(renderAirplaneReport(report)...); err != nil {
+			return report, err
 		}
 	}
 	return report, nil
+}
+
+func waitForAirplaneCheck(ctx context.Context, service airplane.Service, name string, timeout time.Duration) airplane.Report {
+	deadline := time.Now().Add(timeout)
+	var report airplane.Report
+	for {
+		report = service.Check(ctx)
+		if checkOK(report, name) || time.Now().After(deadline) {
+			return report
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+func waitForGatewayReady(ctx context.Context, service airplane.Service, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if service.GatewayReady(ctx) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 }
 
 func renderAirplaneReport(report airplane.Report) []string {
@@ -1717,8 +1792,14 @@ func airplaneModeOn(ctx context.Context, app *app) error {
 	if err := service.StartOllama(); err != nil {
 		return fmt.Errorf("could not start Ollama: %w", err)
 	}
+	if !service.OllamaRunning(ctx) && !truthy(app.runtime.Env["S46_AIRPLANE_SKIP_SETUP_CHECKS"]) {
+		return fmt.Errorf("Ollama did not become ready; run `s46 airplane setup`")
+	}
 	if err := service.StartGateway(); err != nil {
 		return fmt.Errorf("could not start local S46 gateway: %w", err)
+	}
+	if !truthy(app.runtime.Env["S46_AIRPLANE_SKIP_SETUP_CHECKS"]) && !waitForGatewayReady(ctx, service, 30*time.Second) {
+		return fmt.Errorf("local S46 gateway did not become ready; check ~/.cache/s46/s46-api-airplane.log or run `S46_ENV=airplane S46_ADDR=127.0.0.1:8080 s46-api`")
 	}
 	if teamConfig.APISnapshot.Endpoint == "" || isLocalEndpoint(teamConfig.APISnapshot.Endpoint) {
 		teamConfig.APISnapshot = hostedTeamSnapshot(teamName, teamConfig)
