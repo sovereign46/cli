@@ -2611,6 +2611,15 @@ func offerAirplaneModeOnAfterSetup(ctx context.Context, app *app, report airplan
 	if !yes {
 		return nil
 	}
+	out := app.runtime.Stdout
+	if out == nil {
+		out = io.Discard
+	}
+	harnessName, err := promptHarness(app, app.stdinReader(), out, defaultConnectHarness("", teamConfig.DefaultHarness))
+	if err != nil {
+		return err
+	}
+	teamConfig.DefaultHarness = harnessName
 	service := airplane.Service{Env: app.runtime.Env, Stdin: app.runtime.Stdin, Stdout: app.runtime.Stdout, Stderr: app.runtime.Stderr, LogPrefix: "[s46]"}
 	return enableAirplaneMode(ctx, app, service, cfg, teamName, teamConfig, report)
 }

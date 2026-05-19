@@ -489,10 +489,11 @@ func TestAirplaneSetupContinuesAfterInstallingOllama(t *testing.T) {
 func TestAirplaneSetupCanTurnOnAirplaneModeWithoutLogin(t *testing.T) {
 	env := testEnv(t)
 
-	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\n"), "airplane", "setup"))
+	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\n\n"), "airplane", "setup"))
 	for _, want := range []string{
 		"[s46] airplane setup: ready",
 		"[s46] Turn on airplane mode now? [Y/n]",
+		"Harness (pi, claude-code, codex, standard) [claude-code]: ",
 		"[s46✈] mode: airplane",
 		"[s46✈] team: local",
 	} {
@@ -505,6 +506,7 @@ func TestAirplaneSetupCanTurnOnAirplaneModeWithoutLogin(t *testing.T) {
 	status := requireOK(t, run(t, env, "status"))
 	for _, want := range []string{
 		"[s46✈] team:    local",
+		"[s46✈] harness: claude-code",
 		"[s46✈] model:   s46/devstral-small-2-24b",
 		"[s46✈] local ollama: http://127.0.0.1:11434 · port 11434 · pid 111 (ollama)",
 		"[s46✈] local api:    http://127.0.0.1:8080 · port 8080 · pid 222 (s46-api)",
@@ -520,10 +522,11 @@ func TestAirplaneSetupOffersToTurnOnAirplaneMode(t *testing.T) {
 	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
 	requireOK(t, run(t, env, "connect", "acme", "--harness=standard"))
 
-	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\n"), "airplane", "setup"))
+	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\n\n"), "airplane", "setup"))
 	for _, want := range []string{
 		"[s46] airplane setup: ready",
 		"[s46] Turn on airplane mode now? [Y/n]",
+		"Harness (pi, claude-code, codex, standard) [claude-code]: ",
 		"[s46✈] mode: airplane",
 	} {
 		if !strings.Contains(out, want) {
