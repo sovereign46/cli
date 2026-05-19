@@ -312,9 +312,9 @@ func TestInteractiveConnectPromptsForRequiredInputs(t *testing.T) {
 	for _, want := range []string{
 		"[s46] interactive connect: waiting for input (use <team>/--harness for non-interactive runs)",
 		"Team [acme]: ",
-		"Harness (pi, claude-code, codex, standard) [standard]: ",
+		"Harness (pi, claude-code, codex, standard) [claude-code]: ",
 		"Scope (user, project) [user]: ",
-		"harness: s46",
+		"harness: claude-code",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("interactive connect output missing %q:\n%s", want, out)
@@ -354,7 +354,7 @@ func TestConnectWithTeamPromptsForMissingAmbiguousHarness(t *testing.T) {
 	out := requireOK(t, runWithStdin(t, env, strings.NewReader("pi\n\n"), "connect", "acme"))
 	for _, want := range []string{
 		"[s46] interactive connect: waiting for input (use <team>/--harness for non-interactive runs)",
-		"Harness (pi, claude-code, codex, standard) [standard]: ",
+		"Harness (pi, claude-code, codex, standard) [claude-code]: ",
 		"Scope (user, project) [user]: ",
 		"harness: pi",
 	} {

@@ -9,6 +9,8 @@ import (
 	"github.com/sovereign46/s46-cli/internal/config"
 )
 
+const DefaultName = "claude-code"
+
 type Detection struct {
 	Installed bool   `json:"installed"`
 	Path      string `json:"path,omitempty"`

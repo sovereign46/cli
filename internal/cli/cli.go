@@ -803,8 +803,7 @@ func promptConnectRequest(app *app, req connectRequest) (connectRequest, error) 
 		}
 	}
 	existing := cfg.Teams[req.TeamName]
-	defaultHarness := firstNonEmpty(existing.DefaultHarness, "standard")
-	req.Harness, err = promptHarness(app, reader, out, defaultHarness)
+	req.Harness, err = promptHarness(app, reader, out, defaultConnectHarness(req.Harness, existing.DefaultHarness))
 	if err != nil {
 		return connectRequest{}, err
 	}
@@ -835,8 +834,17 @@ func promptMissingHarness(app *app, req connectRequest) (string, error) {
 		return "", err
 	}
 	existing := cfg.Teams[req.TeamName]
-	defaultHarness := firstNonEmpty(req.Harness, existing.DefaultHarness, "standard")
-	return promptHarness(app, reader, out, defaultHarness)
+	return promptHarness(app, reader, out, defaultConnectHarness(req.Harness, existing.DefaultHarness))
+}
+
+func defaultConnectHarness(explicit string, configured string) string {
+	if explicit != "" {
+		return explicit
+	}
+	if configured != "" && configured != "standard" {
+		return configured
+	}
+	return harness.DefaultName
 }
 
 func promptHarness(app *app, reader *inputReader, out io.Writer, fallback string) (string, error) {
@@ -1061,7 +1069,7 @@ func runDisconnect(ctx context.Context, app *app, teamName string, harnessName s
 		harnessName = teamConfig.DefaultHarness
 	}
 	if harnessName == "" {
-		harnessName = "standard"
+		harnessName = harness.DefaultName
 	}
 	adapter, err := app.harness.Get(harnessName)
 	if err != nil {
@@ -1204,7 +1212,7 @@ func teamListEntries(cfg config.Config) []teamListEntry {
 			Active:   name == cfg.ActiveTeam,
 			Mode:     team.Mode,
 			Lane:     team.Lane,
-			Harness:  firstNonEmpty(team.DefaultHarness, "standard"),
+			Harness:  firstNonEmpty(team.DefaultHarness, harness.DefaultName),
 			Model:    team.DefaultModel,
 			Endpoint: team.Endpoint,
 		})
@@ -1255,7 +1263,7 @@ func statusChecks(ctx context.Context, app *app, teamName string, teamConfig con
 	checks := []statusCheck{
 		{Name: "tenant", OK: tenantEndpointOK(app.runtime.Env, teamName, teamConfig.Endpoint), Message: teamConfig.Endpoint},
 	}
-	harnessName := firstNonEmpty(teamConfig.DefaultHarness, "standard")
+	harnessName := firstNonEmpty(teamConfig.DefaultHarness, harness.DefaultName)
 	teamConfig.DefaultHarness = harnessName
 	adapter, err := app.harness.Get(harnessName)
 	if err != nil {
@@ -1451,7 +1459,7 @@ func statusCommand(runtime Runtime, opts *options) *cobra.Command {
 					fmt.Sprintf("[s46] team:    %s", cfg.ActiveTeam),
 					fmt.Sprintf("[s46] lane:    %s", team.Lane),
 					fmt.Sprintf("[s46] mode:    %s", team.Mode),
-					fmt.Sprintf("[s46] harness: %s", firstNonEmpty(team.DefaultHarness, "standard")),
+					fmt.Sprintf("[s46] harness: %s", firstNonEmpty(team.DefaultHarness, harness.DefaultName)),
 					fmt.Sprintf("[s46] model:   %s", team.DefaultModel),
 					fmt.Sprintf("[s46] api:     %s", team.Endpoint),
 				)
@@ -2723,7 +2731,7 @@ func enableAirplaneMode(ctx context.Context, app *app, service airplane.Service,
 	teamConfig.DefaultModel = airplane.LocalModelID
 	teamConfig.Models = []string{airplane.LocalModelID}
 	if teamConfig.DefaultHarness == "" {
-		teamConfig.DefaultHarness = "standard"
+		teamConfig.DefaultHarness = harness.DefaultName
 	}
 	if cfg.Teams == nil {
 		cfg.Teams = map[string]config.TeamConfig{}
@@ -2809,7 +2817,7 @@ func airplaneModeTargetConfig(app *app) (config.Config, string, config.TeamConfi
 	teamName := firstNonEmpty(cfg.ActiveTeam, localAirplaneTeamName)
 	teamConfig := cfg.Teams[teamName]
 	if teamConfig.Endpoint == "" {
-		teamConfig = config.TeamConfigFromAPI(localAirplaneTeam(teamName, config.TeamConfig{}, connectRequest{}), "standard", airplane.LocalModelID)
+		teamConfig = config.TeamConfigFromAPI(localAirplaneTeam(teamName, config.TeamConfig{}, connectRequest{}), harness.DefaultName, airplane.LocalModelID)
 	}
 	return cfg, teamName, teamConfig, nil
 }
@@ -2863,7 +2871,7 @@ func restoreCloudTeamConfig(teamName string, teamConfig config.TeamConfig) confi
 }
 
 func applyHarnessConfig(ctx context.Context, app *app, teamName string, teamConfig config.TeamConfig) error {
-	adapter, err := app.harness.Get(firstNonEmpty(teamConfig.DefaultHarness, "standard"))
+	adapter, err := app.harness.Get(firstNonEmpty(teamConfig.DefaultHarness, harness.DefaultName))
 	if err != nil {
 		return err
 	}
