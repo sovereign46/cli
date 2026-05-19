@@ -82,10 +82,55 @@ func (c offlineSuggestionClient) Land(ctx context.Context, req api.LandRequest) 
 }
 
 func (c offlineSuggestionClient) wrap(ctx context.Context, err error) error {
-	if err == nil || !cloudCall(c.env) || !cloudUnavailable(err) {
+	if err == nil || !cloudUnavailable(err) {
+		return err
+	}
+	if baseURL := c.localAPIBaseURL(); baseURL != "" {
+		return fmt.Errorf("%s\n[s46] underlying error: %w", localAPIUnavailableSuggestion(c.env, baseURL), err)
+	}
+	if !cloudCall(c.env) {
 		return err
 	}
 	return fmt.Errorf("%s\n[s46] underlying error: %w", offlineSuggestion(ctx, c.env), err)
+}
+
+func (c offlineSuggestionClient) localAPIBaseURL() string {
+	if client, ok := c.delegate.(*api.HTTPClient); ok {
+		if localBaseURL(client.BaseURL) != "" {
+			return client.BaseURL
+		}
+	}
+	for _, candidate := range []string{c.env["S46_API_BASE_URL"], c.env["S46_DEV_BASE_URL"]} {
+		if baseURL := localBaseURL(candidate); baseURL != "" {
+			return baseURL
+		}
+	}
+	if truthy(c.env["S46_DEV_SHELL"]) {
+		return api.DefaultDevelopmentBaseURL
+	}
+	return ""
+}
+
+func localBaseURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if origin, ok := api.LocalDevelopmentOrigin(raw); ok {
+		return origin
+	}
+	return ""
+}
+
+func localAPIUnavailableSuggestion(env map[string]string, baseURL string) string {
+	lines := []string{
+		fmt.Sprintf("[s46] local S46 API is not running at %s.", baseURL),
+		"[s46] Start the API server, or unset S46_API_BASE_URL / exit make shell to use the cloud API.",
+	}
+	if repo := strings.TrimSpace(env["S46_API_REPO"]); repo != "" {
+		lines = append(lines, fmt.Sprintf("[s46] Try: cd %s && go run ./cmd/s46-api", repo))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func cloudCall(env map[string]string) bool {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -247,6 +248,36 @@ func TestInteractiveLoginCanBeCanceled(t *testing.T) {
 	}
 	if !strings.Contains(result.stdout, "Press Esc, Ctrl-C, Ctrl-D, or type 'cancel' to exit interactive mode") {
 		t.Fatalf("missing cancel hint:\n%s", result.stdout)
+	}
+}
+
+func TestLoginLocalAPIConnectionRefusedExplainsServerNotRunning(t *testing.T) {
+	env := testEnv(t)
+	delete(env, "S46_API_MODE")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseURL := "http://" + listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	env["S46_API_BASE_URL"] = baseURL
+	env["S46_API_REPO"] = "/tmp/s46-api"
+
+	result := run(t, env, "login", "--user", "dscape@acme.s46.dev", "--device-id", "dev-laptop")
+	if result.err == nil {
+		t.Fatal("expected login to fail")
+	}
+	message := result.err.Error()
+	for _, want := range []string{
+		"local S46 API is not running at " + baseURL,
+		"Start the API server",
+		"cd /tmp/s46-api && go run ./cmd/s46-api",
+	} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("error missing %q:\n%s", want, message)
+		}
 	}
 }
 

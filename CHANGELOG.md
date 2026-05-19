@@ -18,6 +18,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Added interactive prompt cancellation with Esc, Ctrl-C, Ctrl-D, or `cancel`/`quit`/`exit` input across login, connect, and confirmation prompts.
 - Merged `s46 doctor` validation checks into `s46 status` and removed the separate `doctor` command.
 - Added local Ollama/API server URL, port, and listener process details to `s46 status` regardless of the current mode.
+- Fixed local API connection failures (for example in `make shell`) to explain that the local S46 API is not running and how to start it instead of showing a raw connection-refused error.
 - Fixed airplane model downloads in sandboxed homes by starting Ollama with the host home, creating Ollama's home/model directories, and passing the configured Ollama environment to `ollama pull`.
 - Fixed airplane model probes so the HTTP client uses the full model-probe timeout instead of the short health-check timeout.
 
