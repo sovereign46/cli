@@ -42,7 +42,6 @@ go run ./cmd/s46 token --refresh
 go run ./cmd/s46 connect acme --harness=claude-code --dry-run
 go run ./cmd/s46 connect acme --harness=claude-code
 go run ./cmd/s46 status
-go run ./cmd/s46 doctor
 go run ./cmd/s46 sessions
 go run ./cmd/s46 share @dscape/auth-redirect-fix
 go run ./cmd/s46 session land
@@ -64,7 +63,6 @@ s46 login
 s46 connect acme --harness=claude-code --dry-run
 s46 connect acme --harness=claude-code
 s46 status
-s46 doctor
 s46 share @dscape/auth-redirect-fix
 ```
 

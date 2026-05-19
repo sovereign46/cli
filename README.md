@@ -52,7 +52,6 @@ s46 devices delete <device-id>
 s46 connect <team> --harness=pi|claude-code|codex|standard [--dry-run]
 s46 disconnect <team> [--harness=pi|claude-code|codex|standard] [--dry-run]
 s46 use <team>
-s46 doctor
 s46 status
 s46 version
 s46 update                         # check latest GitHub release and print Homebrew-safe upgrade command

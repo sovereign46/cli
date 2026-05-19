@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -44,6 +45,8 @@ const (
 	localAirplaneTeamName     = "local"
 )
 
+var errInteractiveCanceled = errors.New("interactive prompt canceled")
+
 type options struct {
 	configPath string
 	json       bool
@@ -59,7 +62,12 @@ type app struct {
 	api          api.Client
 	harness      *harness.Registry
 	renderer     output.Renderer
-	promptReader *bufio.Reader
+	promptReader *inputReader
+}
+
+type inputReader struct {
+	*bufio.Reader
+	source io.Reader
 }
 
 func ProcessEnv() map[string]string {
@@ -106,7 +114,6 @@ func NewRootCommand(runtime Runtime) *cobra.Command {
 	root.AddCommand(connectCommand(runtime, opts))
 	root.AddCommand(disconnectCommand(runtime, opts))
 	root.AddCommand(useCommand(runtime, opts))
-	root.AddCommand(doctorCommand(runtime, opts))
 	root.AddCommand(statusCommand(runtime, opts))
 	root.AddCommand(sessionsCommand(runtime, opts))
 	root.AddCommand(detachCommand(runtime, opts))
@@ -355,6 +362,9 @@ func promptLoginRequest(app *app, req auth.LoginRequest) (auth.LoginRequest, err
 	if _, err := fmt.Fprintln(out, "[s46] interactive login: waiting for input (use --user/--device-id for non-interactive runs)"); err != nil {
 		return auth.LoginRequest{}, err
 	}
+	if err := writeInteractiveCancelHint(out); err != nil {
+		return auth.LoginRequest{}, err
+	}
 	req.Email, err = promptRequired(reader, out, "Email")
 	if err != nil {
 		return auth.LoginRequest{}, err
@@ -370,7 +380,12 @@ func promptLoginRequest(app *app, req auth.LoginRequest) (auth.LoginRequest, err
 	return req, nil
 }
 
-func promptRequired(reader *bufio.Reader, out io.Writer, label string) (string, error) {
+func writeInteractiveCancelHint(out io.Writer) error {
+	_, err := fmt.Fprintln(out, "[s46] Press Esc, Ctrl-C, Ctrl-D, or type 'cancel' to exit interactive mode.")
+	return err
+}
+
+func promptRequired(reader *inputReader, out io.Writer, label string) (string, error) {
 	for {
 		value, err := promptLine(reader, out, label+": ")
 		if err != nil {
@@ -385,7 +400,7 @@ func promptRequired(reader *bufio.Reader, out io.Writer, label string) (string, 
 	}
 }
 
-func promptWithDefault(reader *bufio.Reader, out io.Writer, label string, fallback string) (string, error) {
+func promptWithDefault(reader *inputReader, out io.Writer, label string, fallback string) (string, error) {
 	value, err := promptLine(reader, out, fmt.Sprintf("%s [%s]: ", label, fallback))
 	if err != nil {
 		return "", err
@@ -396,18 +411,41 @@ func promptWithDefault(reader *bufio.Reader, out io.Writer, label string, fallba
 	return value, nil
 }
 
-func promptLine(reader *bufio.Reader, out io.Writer, prompt string) (string, error) {
+func promptLine(reader *inputReader, out io.Writer, prompt string) (string, error) {
 	if _, err := fmt.Fprint(out, prompt); err != nil {
 		return "", err
+	}
+	if line, ok, err := readTerminalPromptLine(reader.Reader, reader.source, out); ok {
+		return line, err
 	}
 	line, err := reader.ReadString('\n')
 	if err != nil && !errors.Is(err, io.EOF) {
 		return "", err
 	}
-	if err != nil && errors.Is(err, io.EOF) && line == "" {
-		return "", fmt.Errorf("interactive input ended before required values were provided")
+	if errors.Is(err, io.EOF) && line == "" {
+		return "", errInteractiveCanceled
 	}
-	return strings.TrimSpace(line), nil
+	value := strings.TrimSpace(line)
+	if isInteractiveCancelInput(value) {
+		return "", errInteractiveCanceled
+	}
+	return value, nil
+}
+
+func isInteractiveCancelInput(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value != "" && strings.Trim(value, "\x1b") == "" {
+		return true
+	}
+	if value != "" && strings.ReplaceAll(value, "^[", "") == "" {
+		return true
+	}
+	switch value {
+	case "^c", "^d", "esc", "cancel", "quit", "exit":
+		return true
+	default:
+		return false
+	}
 }
 
 func hostname() string {
@@ -735,6 +773,9 @@ func promptConnectRequest(app *app, req connectRequest) (connectRequest, error) 
 	if _, err := fmt.Fprintln(out, "[s46] interactive connect: waiting for input (use <team>/--harness for non-interactive runs)"); err != nil {
 		return connectRequest{}, err
 	}
+	if err := writeInteractiveCancelHint(out); err != nil {
+		return connectRequest{}, err
+	}
 	defaultTeam := cfg.ActiveTeam
 	if defaultTeam == "" && len(cfg.Teams) == 1 {
 		for name := range cfg.Teams {
@@ -757,7 +798,7 @@ func promptConnectRequest(app *app, req connectRequest) (connectRequest, error) 
 	if err != nil {
 		return connectRequest{}, err
 	}
-	req.Scope, err = promptWithDefault(reader, out, "Scope", firstNonEmpty(req.Scope, "user"))
+	req.Scope, err = promptWithDefault(reader, out, "Scope (user, project)", firstNonEmpty(req.Scope, "user"))
 	if err != nil {
 		return connectRequest{}, err
 	}
@@ -780,12 +821,15 @@ func promptMissingHarness(app *app, req connectRequest) (string, error) {
 	if _, err := fmt.Fprintln(out, "[s46] interactive connect: waiting for input (use <team>/--harness for non-interactive runs)"); err != nil {
 		return "", err
 	}
+	if err := writeInteractiveCancelHint(out); err != nil {
+		return "", err
+	}
 	existing := cfg.Teams[req.TeamName]
 	defaultHarness := firstNonEmpty(req.Harness, existing.DefaultHarness, "standard")
 	return promptHarness(app, reader, out, defaultHarness)
 }
 
-func promptHarness(app *app, reader *bufio.Reader, out io.Writer, fallback string) (string, error) {
+func promptHarness(app *app, reader *inputReader, out io.Writer, fallback string) (string, error) {
 	for {
 		value, err := promptWithDefault(reader, out, fmt.Sprintf("Harness (%s)", app.harness.NamesString()), fallback)
 		if err != nil {
@@ -1093,74 +1137,30 @@ func useCommand(runtime Runtime, opts *options) *cobra.Command {
 	}
 }
 
-func doctorCommand(runtime Runtime, opts *options) *cobra.Command {
-	return &cobra.Command{
-		Use:   "doctor",
-		Short: "verify local S46 and harness configuration",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			app, err := newApp(runtime, opts)
-			if err != nil {
-				return err
-			}
-			cfg, err := app.config.LoadConfig()
-			if err != nil {
-				return err
-			}
-			if cfg.ActiveTeam == "" {
-				return fmt.Errorf("no active team; run `s46 login` or `s46 connect <team>` first")
-			}
-			teamConfig, ok := cfg.Teams[cfg.ActiveTeam]
-			if !ok {
-				return fmt.Errorf("active team %q is missing from config", cfg.ActiveTeam)
-			}
-			checks := doctorChecks(cmd.Context(), app, cfg.ActiveTeam, teamConfig)
-			if opts.json {
-				return app.renderer.WriteJSON(map[string]any{"team": cfg.ActiveTeam, "checks": checks})
-			}
-			lines := []string{fmt.Sprintf("[s46] doctor: team %s", cfg.ActiveTeam)}
-			failed := false
-			for _, check := range checks {
-				status := "ok"
-				if !check.OK {
-					status = "fail"
-					failed = true
-				}
-				lines = append(lines, fmt.Sprintf("[%s] %s: %s", status, check.Name, check.Message))
-			}
-			if err := app.renderer.Lines(lines...); err != nil {
-				return err
-			}
-			if failed {
-				return fmt.Errorf("doctor found configuration problems")
-			}
-			return nil
-		},
-	}
-}
-
-type doctorCheck struct {
+type statusCheck struct {
 	Name    string `json:"name"`
 	OK      bool   `json:"ok"`
 	Message string `json:"message"`
 }
 
-func doctorChecks(ctx context.Context, app *app, teamName string, teamConfig config.TeamConfig) []doctorCheck {
-	checks := []doctorCheck{
+func statusChecks(ctx context.Context, app *app, teamName string, teamConfig config.TeamConfig) []statusCheck {
+	checks := []statusCheck{
 		{Name: "tenant", OK: tenantEndpointOK(app.runtime.Env, teamName, teamConfig.Endpoint), Message: teamConfig.Endpoint},
 	}
-	adapter, err := app.harness.Get(teamConfig.DefaultHarness)
+	harnessName := firstNonEmpty(teamConfig.DefaultHarness, "standard")
+	teamConfig.DefaultHarness = harnessName
+	adapter, err := app.harness.Get(harnessName)
 	if err != nil {
-		checks = append(checks, doctorCheck{Name: "harness", OK: false, Message: err.Error()})
+		checks = append(checks, statusCheck{Name: "harness", OK: false, Message: err.Error()})
 		return checks
 	}
 	detection, err := adapter.Detect(ctx, app.runtime.Env)
 	if err != nil {
-		checks = append(checks, doctorCheck{Name: "harness", OK: false, Message: err.Error()})
+		checks = append(checks, statusCheck{Name: "harness", OK: false, Message: err.Error()})
 		return checks
 	}
-	checks = append(checks, doctorCheck{Name: "harness", OK: detection.Installed || teamConfig.DefaultHarness == "standard", Message: firstNonEmpty(detection.Path, teamConfig.DefaultHarness)})
-	checks = append(checks, doctorHarnessConfig(app, teamName, teamConfig)...)
+	checks = append(checks, statusCheck{Name: "harness", OK: detection.Installed || harnessName == "standard", Message: firstNonEmpty(detection.Path, harnessName)})
+	checks = append(checks, statusHarnessConfig(app, teamName, teamConfig)...)
 	return checks
 }
 
@@ -1195,53 +1195,53 @@ func truthy(value string) bool {
 	}
 }
 
-func doctorHarnessConfig(app *app, teamName string, teamConfig config.TeamConfig) []doctorCheck {
+func statusHarnessConfig(app *app, teamName string, teamConfig config.TeamConfig) []statusCheck {
 	switch teamConfig.DefaultHarness {
 	case "claude-code":
-		return doctorClaude(app.runtime.Env, teamName, teamConfig)
+		return statusClaude(app.runtime.Env, teamName, teamConfig)
 	case "codex":
-		return doctorCodex(app.runtime.Env, teamName, teamConfig)
+		return statusCodex(app.runtime.Env, teamName, teamConfig)
 	case "pi":
-		return doctorPi(app.runtime.Env, teamName, teamConfig)
+		return statusPi(app.runtime.Env, teamName, teamConfig)
 	case "standard":
-		return []doctorCheck{{Name: "standard", OK: true, Message: "no third-party harness config required"}}
+		return []statusCheck{{Name: "standard", OK: true, Message: "no third-party harness config required"}}
 	default:
-		return []doctorCheck{{Name: "harness-config", OK: false, Message: "unknown harness " + teamConfig.DefaultHarness}}
+		return []statusCheck{{Name: "harness-config", OK: false, Message: "unknown harness " + teamConfig.DefaultHarness}}
 	}
 }
 
-func doctorClaude(env map[string]string, teamName string, teamConfig config.TeamConfig) []doctorCheck {
+func statusClaude(env map[string]string, teamName string, teamConfig config.TeamConfig) []statusCheck {
 	path := filepath.Join(config.HomeDir(env), ".claude", "settings.json")
 	raw, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
-		return []doctorCheck{{Name: "claude-config", OK: false, Message: fmt.Sprintf("not configured; run `s46 connect %s --harness=claude-code`", teamName)}}
+		return []statusCheck{{Name: "claude-config", OK: false, Message: fmt.Sprintf("not configured; run `s46 connect %s --harness=claude-code`", teamName)}}
 	}
 	if err != nil {
-		return []doctorCheck{{Name: "claude-config", OK: false, Message: err.Error()}}
+		return []statusCheck{{Name: "claude-config", OK: false, Message: err.Error()}}
 	}
 	settings := map[string]any{}
 	if err := json.Unmarshal(raw, &settings); err != nil {
-		return []doctorCheck{{Name: "claude-config", OK: false, Message: err.Error()}}
+		return []statusCheck{{Name: "claude-config", OK: false, Message: err.Error()}}
 	}
 	envMap, _ := settings["env"].(map[string]any)
-	return []doctorCheck{
+	return []statusCheck{
 		{Name: "claude-token-helper", OK: settings["apiKeyHelper"] == "s46 token --refresh", Message: fmt.Sprint(settings["apiKeyHelper"])},
 		{Name: "claude-base-url", OK: envMap["ANTHROPIC_BASE_URL"] == teamConfig.Endpoint+"/anthropic", Message: fmt.Sprint(envMap["ANTHROPIC_BASE_URL"])},
 		{Name: "claude-model", OK: envMap["ANTHROPIC_DEFAULT_SONNET_MODEL"] == teamConfig.DefaultModel, Message: fmt.Sprint(envMap["ANTHROPIC_DEFAULT_SONNET_MODEL"])},
 	}
 }
 
-func doctorCodex(env map[string]string, teamName string, teamConfig config.TeamConfig) []doctorCheck {
+func statusCodex(env map[string]string, teamName string, teamConfig config.TeamConfig) []statusCheck {
 	path := filepath.Join(config.HomeDir(env), ".codex", "config.toml")
 	raw, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
-		return []doctorCheck{{Name: "codex-config", OK: false, Message: fmt.Sprintf("not configured; run `s46 connect %s --harness=codex`", teamName)}}
+		return []statusCheck{{Name: "codex-config", OK: false, Message: fmt.Sprintf("not configured; run `s46 connect %s --harness=codex`", teamName)}}
 	}
 	if err != nil {
-		return []doctorCheck{{Name: "codex-config", OK: false, Message: err.Error()}}
+		return []statusCheck{{Name: "codex-config", OK: false, Message: err.Error()}}
 	}
 	text := string(raw)
-	return []doctorCheck{
+	return []statusCheck{
 		{Name: "codex-provider", OK: strings.Contains(text, "[model_providers.s46]"), Message: path},
 		{Name: "codex-base-url", OK: strings.Contains(text, fmt.Sprintf("base_url = %q", teamConfig.Endpoint+"/codex")), Message: teamConfig.Endpoint + "/codex"},
 		{Name: "codex-token-helper", OK: strings.Contains(text, `token_helper = "s46 token --refresh"`), Message: "s46 token --refresh"},
@@ -1249,22 +1249,22 @@ func doctorCodex(env map[string]string, teamName string, teamConfig config.TeamC
 	}
 }
 
-func doctorPi(env map[string]string, teamName string, teamConfig config.TeamConfig) []doctorCheck {
+func statusPi(env map[string]string, teamName string, teamConfig config.TeamConfig) []statusCheck {
 	path := filepath.Join(config.HomeDir(env), ".pi", "agent", "models.json")
 	raw, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
-		return []doctorCheck{{Name: "pi-config", OK: false, Message: fmt.Sprintf("not configured; run `s46 connect %s --harness=pi`", teamName)}}
+		return []statusCheck{{Name: "pi-config", OK: false, Message: fmt.Sprintf("not configured; run `s46 connect %s --harness=pi`", teamName)}}
 	}
 	if err != nil {
-		return []doctorCheck{{Name: "pi-config", OK: false, Message: err.Error()}}
+		return []statusCheck{{Name: "pi-config", OK: false, Message: err.Error()}}
 	}
 	models := map[string]any{}
 	if err := json.Unmarshal(raw, &models); err != nil {
-		return []doctorCheck{{Name: "pi-config", OK: false, Message: err.Error()}}
+		return []statusCheck{{Name: "pi-config", OK: false, Message: err.Error()}}
 	}
 	providers, _ := models["providers"].(map[string]any)
 	s46, _ := providers["s46"].(map[string]any)
-	return []doctorCheck{
+	return []statusCheck{
 		{Name: "pi-provider", OK: s46 != nil, Message: path},
 		{Name: "pi-base-url", OK: s46["baseUrl"] == teamConfig.Endpoint+"/v1", Message: fmt.Sprint(s46["baseUrl"])},
 		{Name: "pi-token-helper", OK: s46["apiKey"] == "!s46 token --refresh", Message: fmt.Sprint(s46["apiKey"])},
@@ -1272,10 +1272,21 @@ func doctorPi(env map[string]string, teamName string, teamConfig config.TeamConf
 	}
 }
 
+type localServerStatus struct {
+	Name    string `json:"name"`
+	URL     string `json:"url"`
+	Host    string `json:"host,omitempty"`
+	Port    string `json:"port,omitempty"`
+	Status  string `json:"status"`
+	PID     string `json:"pid,omitempty"`
+	Process string `json:"process,omitempty"`
+	Message string `json:"message,omitempty"`
+}
+
 func statusCommand(runtime Runtime, opts *options) *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
-		Short: "show active team, lane, harness, and mode",
+		Short: "show active team, lane, harness, mode, and checks",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := newApp(runtime, opts)
@@ -1291,10 +1302,17 @@ func statusCommand(runtime Runtime, opts *options) *cobra.Command {
 				return err
 			}
 			var team *config.TeamConfig
+			checks := []statusCheck{{Name: "active-team", OK: false, Message: "none; run `s46 login` or `s46 connect <team>` first"}}
 			if cfg.ActiveTeam != "" {
-				teamConfig := cfg.Teams[cfg.ActiveTeam]
-				team = &teamConfig
+				teamConfig, ok := cfg.Teams[cfg.ActiveTeam]
+				if ok {
+					team = &teamConfig
+					checks = statusChecks(cmd.Context(), app, cfg.ActiveTeam, teamConfig)
+				} else {
+					checks = []statusCheck{{Name: "active-team", OK: false, Message: fmt.Sprintf("%q is missing from config", cfg.ActiveTeam)}}
+				}
 			}
+			localServers := statusLocalServers(app.runtime.Env, team)
 			result := map[string]any{
 				"authenticated": state.Authenticated,
 				"user":          state.CurrentUser,
@@ -1303,10 +1321,18 @@ func statusCommand(runtime Runtime, opts *options) *cobra.Command {
 				"sessions":      len(state.Sessions),
 				"configPath":    config.DisplayPath(app.config.ConfigPath, runtime.Env),
 				"statePath":     config.DisplayPath(app.config.StatePath, runtime.Env),
+				"checks":        checks,
+				"localServers":  localServers,
 				"mock":          true,
 			}
 			if opts.json {
-				return app.renderer.WriteJSON(result)
+				if err := app.renderer.WriteJSON(result); err != nil {
+					return err
+				}
+				if statusChecksFailed(checks) {
+					return fmt.Errorf("status found configuration problems")
+				}
+				return nil
 			}
 			lines := []string{
 				fmt.Sprintf("[s46] auth:    %s", authStatus(state)),
@@ -1317,17 +1343,223 @@ func statusCommand(runtime Runtime, opts *options) *cobra.Command {
 					fmt.Sprintf("[s46] team:    %s", cfg.ActiveTeam),
 					fmt.Sprintf("[s46] lane:    %s", team.Lane),
 					fmt.Sprintf("[s46] mode:    %s", team.Mode),
-					fmt.Sprintf("[s46] harness: %s", team.DefaultHarness),
+					fmt.Sprintf("[s46] harness: %s", firstNonEmpty(team.DefaultHarness, "standard")),
 					fmt.Sprintf("[s46] model:   %s", team.DefaultModel),
 					fmt.Sprintf("[s46] api:     %s", team.Endpoint),
 				)
+				for _, server := range localServers {
+					lines = append(lines, renderLocalServerStatus(server))
+				}
+				lines = append(lines, renderStatusChecks(checks)...)
 			} else {
 				lines = append(lines, "[s46] team:    none")
+				for _, server := range localServers {
+					lines = append(lines, renderLocalServerStatus(server))
+				}
+				lines = append(lines, renderStatusChecks(checks)...)
 			}
 			lines = append(lines, fmt.Sprintf("[s46] sessions:%2d", len(state.Sessions)))
-			return app.renderer.Lines(lines...)
+			if err := app.renderer.Lines(lines...); err != nil {
+				return err
+			}
+			if statusChecksFailed(checks) {
+				return fmt.Errorf("status found configuration problems")
+			}
+			return nil
 		},
 	}
+}
+
+func renderStatusChecks(checks []statusCheck) []string {
+	if len(checks) == 0 {
+		return nil
+	}
+	lines := []string{"[s46] checks:"}
+	for _, check := range checks {
+		status := "ok"
+		if !check.OK {
+			status = "fail"
+		}
+		lines = append(lines, fmt.Sprintf("[s46]   [%s] %s: %s", status, check.Name, check.Message))
+	}
+	return lines
+}
+
+func statusChecksFailed(checks []statusCheck) bool {
+	for _, check := range checks {
+		if !check.OK {
+			return true
+		}
+	}
+	return false
+}
+
+func statusLocalServers(env map[string]string, team *config.TeamConfig) []localServerStatus {
+	servers := []localServerStatus{}
+	ollamaURL := firstNonEmpty(env["S46_LOCAL_OLLAMA_URL"], airplane.LocalOllamaURL)
+	if isLocalURL(ollamaURL) {
+		servers = append(servers, describeLocalServer(env, "ollama", ollamaURL))
+	}
+	if apiURL := statusLocalAPIURL(env, team); apiURL != "" {
+		servers = append(servers, describeLocalServer(env, "api", apiURL))
+	}
+	return servers
+}
+
+func statusLocalAPIURL(env map[string]string, team *config.TeamConfig) string {
+	for _, candidate := range []string{
+		env["S46_AIRPLANE_GATEWAY_URL"],
+		teamEndpoint(team),
+		localAPIOrigin(env["S46_API_BASE_URL"]),
+		localAPIOrigin(env["S46_DEV_BASE_URL"]),
+		airplane.LocalGatewayURL,
+	} {
+		if candidate != "" && isLocalURL(candidate) {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func teamEndpoint(team *config.TeamConfig) string {
+	if team == nil {
+		return ""
+	}
+	return team.Endpoint
+}
+
+func localAPIOrigin(rawURL string) string {
+	origin, ok := api.LocalDevelopmentOrigin(rawURL)
+	if !ok {
+		return ""
+	}
+	return origin
+}
+
+func describeLocalServer(env map[string]string, name string, rawURL string) localServerStatus {
+	status := localServerStatus{Name: name, URL: rawURL, Status: "unknown"}
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		status.Message = "invalid URL: " + err.Error()
+		return status
+	}
+	status.Host = parsed.Hostname()
+	status.Port = parsed.Port()
+	if status.Port == "" {
+		status.Port = defaultPort(parsed.Scheme)
+	}
+	if status.Port == "" {
+		status.Message = "port unknown"
+		return status
+	}
+	process := listeningProcess(env, status.Port)
+	status.Status = process.Status
+	status.PID = process.PID
+	status.Process = process.Command
+	status.Message = process.Message
+	return status
+}
+
+func renderLocalServerStatus(status localServerStatus) string {
+	parts := []string{status.URL}
+	if status.Port != "" {
+		parts = append(parts, "port "+status.Port)
+	}
+	switch status.Status {
+	case "listening":
+		process := firstNonEmpty(status.Process, "unknown")
+		if status.PID != "" {
+			parts = append(parts, fmt.Sprintf("pid %s (%s)", status.PID, process))
+		} else {
+			parts = append(parts, process)
+		}
+	case "not_listening":
+		parts = append(parts, "not listening")
+	default:
+		parts = append(parts, firstNonEmpty(status.Message, "process unknown"))
+	}
+	return fmt.Sprintf("[s46] local %-7s %s", status.Name+":", strings.Join(parts, " · "))
+}
+
+func isLocalURL(rawURL string) bool {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(parsed.Hostname()) {
+	case "localhost", "127.0.0.1", "::1", "0.0.0.0":
+		return true
+	default:
+		return false
+	}
+}
+
+func defaultPort(scheme string) string {
+	switch strings.ToLower(scheme) {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	default:
+		return ""
+	}
+}
+
+type listeningProcessStatus struct {
+	Status  string
+	PID     string
+	Command string
+	Message string
+}
+
+func listeningProcess(env map[string]string, port string) listeningProcessStatus {
+	if override, ok := env["S46_TEST_LISTENER_"+port]; ok {
+		return parseListeningProcessOverride(override)
+	}
+	if override, ok := env["S46_TEST_LISTENER_DEFAULT"]; ok {
+		return parseListeningProcessOverride(override)
+	}
+	lsof, err := exec.LookPath("lsof")
+	if err != nil {
+		return listeningProcessStatus{Status: "unknown", Message: "process unknown (lsof not found)"}
+	}
+	output, err := exec.Command(lsof, "-nP", "-iTCP:"+port, "-sTCP:LISTEN", "-Fp", "-Fc").Output()
+	if err != nil || len(output) == 0 {
+		return listeningProcessStatus{Status: "not_listening"}
+	}
+	return parseLsofProcess(output)
+}
+
+func parseListeningProcessOverride(value string) listeningProcessStatus {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "0" || strings.EqualFold(value, "none") || strings.EqualFold(value, "missing") {
+		return listeningProcessStatus{Status: "not_listening"}
+	}
+	fields := strings.Fields(value)
+	if len(fields) == 0 {
+		return listeningProcessStatus{Status: "not_listening"}
+	}
+	status := listeningProcessStatus{Status: "listening", PID: fields[0]}
+	if len(fields) > 1 {
+		status.Command = strings.Join(fields[1:], " ")
+	}
+	return status
+}
+
+func parseLsofProcess(output []byte) listeningProcessStatus {
+	status := listeningProcessStatus{Status: "listening"}
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		if strings.HasPrefix(line, "p") && status.PID == "" {
+			status.PID = strings.TrimPrefix(line, "p")
+		}
+		if strings.HasPrefix(line, "c") && status.Command == "" {
+			status.Command = strings.TrimPrefix(line, "c")
+		}
+		if status.PID != "" && status.Command != "" {
+			break
+		}
+	}
+	return status
 }
 
 func sessionsCommand(runtime Runtime, opts *options) *cobra.Command {
@@ -2209,14 +2441,11 @@ func promptYesNo(app *app, prompt string, fallback bool) (bool, error) {
 	if out == nil {
 		out = io.Discard
 	}
-	if _, err := fmt.Fprint(out, prompt); err != nil {
+	value, err := promptLine(app.stdinReader(), out, prompt)
+	if err != nil {
 		return false, err
 	}
-	line, err := app.stdinReader().ReadString('\n')
-	if err != nil && !errors.Is(err, io.EOF) {
-		return false, err
-	}
-	value := strings.ToLower(strings.TrimSpace(line))
+	value = strings.ToLower(value)
 	if value == "" {
 		return fallback, nil
 	}
@@ -2331,9 +2560,9 @@ func (a *app) requireCloudFeature(feature string) error {
 	return fmt.Errorf("%s requires cloud connectivity; go online and switch to cloud mode to use it. Airplane mode supports local coding only", feature)
 }
 
-func (a *app) stdinReader() *bufio.Reader {
+func (a *app) stdinReader() *inputReader {
 	if a.promptReader == nil {
-		a.promptReader = bufio.NewReader(a.runtime.Stdin)
+		a.promptReader = &inputReader{Reader: bufio.NewReader(a.runtime.Stdin), source: a.runtime.Stdin}
 	}
 	return a.promptReader
 }

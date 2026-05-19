@@ -15,6 +15,9 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Changed Pi harness configuration to use OpenAI Chat Completions for the local S46 provider, matching the local gateway/Ollama route Pi can stream from reliably.
 - Added `s46 airplane logs [ollama|gateway|all]` with `--follow` and `--lines` for local runtime log inspection.
 - Changed `make shell` to preserve the host Ollama model store via `OLLAMA_MODELS` and expose a sandbox `S46_API_REPO` symlink when a sibling `s46-api` checkout exists.
+- Added interactive prompt cancellation with Esc, Ctrl-C, Ctrl-D, or `cancel`/`quit`/`exit` input across login, connect, and confirmation prompts.
+- Merged `s46 doctor` validation checks into `s46 status` and removed the separate `doctor` command.
+- Added local Ollama/API server URL, port, and listener process details to `s46 status` regardless of the current mode.
 - Fixed airplane model downloads in sandboxed homes by starting Ollama with the host home, creating Ollama's home/model directories, and passing the configured Ollama environment to `ollama pull`.
 - Fixed airplane model probes so the HTTP client uses the full model-probe timeout instead of the short health-check timeout.
 

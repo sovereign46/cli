@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -34,6 +35,7 @@ func testEnv(t *testing.T) map[string]string {
 		"S46_MOCK_GIST_ID":               "0123456789abcdef0123456789abcdef",
 		"S46_SKIP_STARTUP_UPDATE_CHECK":  "1",
 		"S46_AIRPLANE_SKIP_SETUP_CHECKS": "1",
+		"S46_TEST_LISTENER_DEFAULT":      "missing",
 	}
 }
 
@@ -229,6 +231,25 @@ func TestInteractiveLoginPromptsForRequiredInputs(t *testing.T) {
 	}
 }
 
+func TestInteractiveCancelInputs(t *testing.T) {
+	for _, input := range []string{"\x1b", "\x1b\x1b", "^[", "^[^[", "^D", "cancel", "quit", "exit"} {
+		if !isInteractiveCancelInput(input) {
+			t.Fatalf("expected %q to cancel", input)
+		}
+	}
+}
+
+func TestInteractiveLoginCanBeCanceled(t *testing.T) {
+	env := testEnv(t)
+	result := runWithStdin(t, env, strings.NewReader("cancel\n"), "login")
+	if !errors.Is(result.err, errInteractiveCanceled) {
+		t.Fatalf("expected interactive cancel, got err=%v stdout=%q stderr=%q", result.err, result.stdout, result.stderr)
+	}
+	if !strings.Contains(result.stdout, "Press Esc, Ctrl-C, Ctrl-D, or type 'cancel' to exit interactive mode") {
+		t.Fatalf("missing cancel hint:\n%s", result.stdout)
+	}
+}
+
 func TestLoginTokenWhoamiLogout(t *testing.T) {
 	env := testEnv(t)
 	out := requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
@@ -260,12 +281,21 @@ func TestInteractiveConnectPromptsForRequiredInputs(t *testing.T) {
 		"[s46] interactive connect: waiting for input (use <team>/--harness for non-interactive runs)",
 		"Team [acme]: ",
 		"Harness (pi, claude-code, codex, standard) [standard]: ",
-		"Scope [user]: ",
+		"Scope (user, project) [user]: ",
 		"harness: s46",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("interactive connect output missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestInteractiveConnectCanBeCanceledWithEscapeInput(t *testing.T) {
+	env := testEnv(t)
+	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	result := runWithStdin(t, env, strings.NewReader("\x1b\n"), "connect")
+	if !errors.Is(result.err, errInteractiveCanceled) {
+		t.Fatalf("expected interactive cancel, got err=%v stdout=%q stderr=%q", result.err, result.stdout, result.stderr)
 	}
 }
 
@@ -293,7 +323,7 @@ func TestConnectWithTeamPromptsForMissingAmbiguousHarness(t *testing.T) {
 	for _, want := range []string{
 		"[s46] interactive connect: waiting for input (use <team>/--harness for non-interactive runs)",
 		"Harness (pi, claude-code, codex, standard) [standard]: ",
-		"Scope [user]: ",
+		"Scope (user, project) [user]: ",
 		"harness: pi",
 	} {
 		if !strings.Contains(out, want) {
@@ -374,9 +404,18 @@ func TestAirplaneSetupCanTurnOnAirplaneModeWithoutLogin(t *testing.T) {
 			t.Fatalf("setup output missing %q:\n%s", want, out)
 		}
 	}
+	env["S46_TEST_LISTENER_11434"] = "111 ollama"
+	env["S46_TEST_LISTENER_8080"] = "222 s46-api"
 	status := requireOK(t, run(t, env, "status"))
-	if !strings.Contains(status, "[s46✈] team:    local") || !strings.Contains(status, "[s46✈] model:   s46/local-coder") {
-		t.Fatalf("unexpected airplane status without login:\n%s", status)
+	for _, want := range []string{
+		"[s46✈] team:    local",
+		"[s46✈] model:   s46/local-coder",
+		"[s46✈] local ollama: http://127.0.0.1:11434 · port 11434 · pid 111 (ollama)",
+		"[s46✈] local api:    http://127.0.0.1:8080 · port 8080 · pid 222 (s46-api)",
+	} {
+		if !strings.Contains(status, want) {
+			t.Fatalf("unexpected airplane status without login missing %q:\n%s", want, status)
+		}
 	}
 }
 
@@ -413,9 +452,9 @@ func TestAirplaneTokenHelperUsesLocalToken(t *testing.T) {
 	if strings.TrimSpace(out) != "local-airplane-token" {
 		t.Fatalf("unexpected airplane token: %q", out)
 	}
-	doctor := requireOK(t, run(t, env, "doctor"))
-	if !strings.Contains(doctor, "[ok] tenant") {
-		t.Fatalf("unexpected airplane doctor output: %s", doctor)
+	status := requireOK(t, run(t, env, "status"))
+	if !strings.Contains(status, "[ok] tenant") {
+		t.Fatalf("unexpected airplane status output: %s", status)
 	}
 }
 
@@ -484,6 +523,14 @@ func TestAirplaneLogsShowsKnownLogFiles(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("logs output missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestAirplaneSetupPromptCanBeCanceledWithCtrlD(t *testing.T) {
+	env := testEnv(t)
+	result := runWithStdin(t, env, strings.NewReader(""), "airplane", "setup")
+	if !errors.Is(result.err, errInteractiveCanceled) {
+		t.Fatalf("expected interactive cancel, got err=%v stdout=%q stderr=%q", result.err, result.stdout, result.stderr)
 	}
 }
 
@@ -679,12 +726,12 @@ func TestBackupsBeforeOverwriteAndIdempotency(t *testing.T) {
 	}
 }
 
-func TestDoctorAfterLoginDoesNotRequireHarnessConnect(t *testing.T) {
+func TestStatusAfterLoginDoesNotRequireHarnessConnect(t *testing.T) {
 	env := testEnv(t)
 	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
-	out := requireOK(t, run(t, env, "doctor"))
+	out := requireOK(t, run(t, env, "status"))
 	if !strings.Contains(out, "[ok] standard") || strings.Contains(out, "claude-config") {
-		t.Fatalf("unexpected doctor output: %s", out)
+		t.Fatalf("unexpected status output: %s", out)
 	}
 }
 
@@ -700,7 +747,7 @@ func TestUseWithoutTeamShowsExpectedInput(t *testing.T) {
 	}
 }
 
-func TestDisconnectUseDoctorAndModeRequireActiveTeam(t *testing.T) {
+func TestDisconnectUseStatusAndModeRequireActiveTeam(t *testing.T) {
 	env := testEnv(t)
 	airplaneOut := requireOK(t, run(t, env, "mode", "airplane"))
 	if !strings.Contains(airplaneOut, "[s46✈] team: local") {
@@ -709,8 +756,8 @@ func TestDisconnectUseDoctorAndModeRequireActiveTeam(t *testing.T) {
 	requireOK(t, run(t, env, "airplane", "mode", "off"))
 	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
 	requireOK(t, run(t, env, "connect", "acme", "--harness=claude-code"))
-	if out := requireOK(t, run(t, env, "doctor")); !strings.Contains(out, "[ok] tenant") || !strings.Contains(out, "[ok] harness") {
-		t.Fatalf("unexpected doctor output: %s", out)
+	if out := requireOK(t, run(t, env, "status")); !strings.Contains(out, "[ok] tenant") || !strings.Contains(out, "[ok] harness") {
+		t.Fatalf("unexpected status output: %s", out)
 	}
 	requireOK(t, run(t, env, "use", "acme"))
 	settingsPath := filepath.Join(env["HOME"], ".claude", "settings.json")

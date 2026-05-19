@@ -9,7 +9,6 @@ Available Commands:
   detach      mock-detach a session to an S46 box
   devices     list and revoke paired devices
   disconnect  remove S46 configuration for a team and harness
-  doctor      verify local S46 and harness configuration
   help        Help about any command
   login       authenticate with Sovereign46 using magic-link device auth
   logout      clear local credentials
@@ -19,7 +18,7 @@ Available Commands:
   session     session subcommands
   sessions    list local and remote sessions
   share       mock Pi-style HTML share via secret gist
-  status      show active team, lane, harness, and mode
+  status      show active team, lane, harness, mode, and checks
   token       print a bearer token for harness helpers
   update      check for updates using Homebrew-safe instructions
   use         switch the active connected team

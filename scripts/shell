@@ -64,7 +64,6 @@ Try:
   s46 connect acme --harness=claude-code --dry-run
   s46 connect acme --harness=claude-code
   s46 status
-  s46 doctor
   s46 share @dscape/auth-redirect-fix
 
 Exit with Ctrl-C, Ctrl-D, or: exit
