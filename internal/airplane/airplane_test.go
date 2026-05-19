@@ -139,6 +139,64 @@ func TestInstallGatewayDownloadsArchive(t *testing.T) {
 	}
 }
 
+func TestInstallGatewayFallsBackToGitClone(t *testing.T) {
+	bin := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "commands.log")
+	writeExecutable(t, filepath.Join(bin, "git"), `#!/bin/sh
+echo git "$@" >> "$S46_TEST_COMMAND_LOG"
+if [ "$1" = clone ]; then
+  /bin/mkdir -p "$5/cmd/s46-api"
+  exit 0
+fi
+exit 1
+`)
+	writeExecutable(t, filepath.Join(bin, "go"), `#!/bin/sh
+echo go "$@" >> "$S46_TEST_COMMAND_LOG"
+out=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = -o ]; then
+    out="$2"
+    shift 2
+    continue
+  fi
+  shift
+done
+printf '#!/bin/sh\n' > "$out"
+/bin/chmod +x "$out"
+`)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	server := httptest.NewServer(http.NotFoundHandler())
+	defer server.Close()
+
+	home := t.TempDir()
+	service := Service{Env: map[string]string{
+		"XDG_DATA_HOME":              filepath.Join(home, ".data"),
+		"S46_API_GATEWAY_LATEST_URL": server.URL,
+		"S46_TEST_COMMAND_LOG":       logPath,
+	}}
+	if err := service.InstallGateway(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	path := service.managedGatewayBinaryPath()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.IsDir() || info.Mode()&0o111 == 0 {
+		t.Fatalf("expected executable gateway binary, mode=%s", info.Mode())
+	}
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"git clone --depth 1 git@github.com:sovereign46/api.git", "go build -o " + path + " ./cmd/s46-api"} {
+		if !strings.Contains(string(log), want) {
+			t.Fatalf("command log missing %q:\n%s", want, string(log))
+		}
+	}
+}
+
 func TestCheckRequiresAirplaneReadyGateway(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -226,6 +284,13 @@ func envListToMap(env []string) map[string]string {
 		}
 	}
 	return values
+}
+
+func writeExecutable(t *testing.T, path string, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func gatewayArchive(t *testing.T) []byte {

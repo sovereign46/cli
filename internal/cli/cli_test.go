@@ -657,7 +657,7 @@ func TestAirplaneSetupPromptCanBeCanceledWithCtrlD(t *testing.T) {
 	}
 }
 
-func TestAirplaneSetupDownloadsMissingGateway(t *testing.T) {
+func TestAirplaneSetupInstallsMissingGateway(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	env := testEnv(t)
 	delete(env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")
@@ -675,8 +675,8 @@ func TestAirplaneSetupDownloadsMissingGateway(t *testing.T) {
 	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\nY\nn\n"), "airplane", "setup"))
 	for _, want := range []string{
 		"[s46] Local S46 gateway is not installed.",
-		"Download GitHub release sovereign46/s46-api",
-		"[s46] downloading local S46 gateway...",
+		"Install from GitHub release or git clone sovereign46/api",
+		"[s46] installing local S46 gateway...",
 		"[s46] Start local gateway now? [Y/n]",
 		"[s46] airplane setup: ready",
 	} {

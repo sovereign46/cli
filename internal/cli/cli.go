@@ -2359,14 +2359,14 @@ func runAirplaneSetup(ctx context.Context, app *app, allowPrompts bool) (airplan
 	}
 	if missingCheck(report, "local-gateway") {
 		if _, ok := service.GatewayStartDescription(); !ok && service.GatewayDownloadAvailable() {
-			if yes, err := promptYesNo(app, fmt.Sprintf("[s46] Local S46 gateway is not installed.\n[s46] Download %s? [Y/n] ", service.GatewayInstallDescription()), true); err != nil {
+			if yes, err := promptYesNo(app, fmt.Sprintf("[s46] Local S46 gateway is not installed.\n[s46] Install %s? [Y/n] ", service.GatewayInstallDescription()), true); err != nil {
 				return report, err
 			} else if yes {
-				if err := app.renderer.Lines("[s46] downloading local S46 gateway..."); err != nil {
+				if err := app.renderer.Lines("[s46] installing local S46 gateway..."); err != nil {
 					return report, err
 				}
 				if err := service.InstallGateway(ctx); err != nil {
-					return report, fmt.Errorf("failed to download local S46 gateway: %w", err)
+					return report, fmt.Errorf("failed to install local S46 gateway: %w", err)
 				}
 				changed = true
 				report = service.Check(ctx)
@@ -2389,8 +2389,8 @@ func runAirplaneSetup(ctx context.Context, app *app, allowPrompts bool) (airplan
 			}
 		} else if err := app.renderer.Lines(
 			"[s46] Local S46 gateway is not installed or running.",
-			"[s46] In development, set S46_API_REPO=/path/to/s46-api or use make shell with ../s46-api present.",
-			"[s46] In production, connect to the network and rerun setup to download the gateway release.",
+			"[s46] In development, set S46_API_REPO=/path/to/api or use make shell with ../s46-api present.",
+			"[s46] In production, connect to the network and rerun setup to install the gateway release or clone the source.",
 			"[s46] Or set S46_API_BINARY=/path/to/s46-api.",
 		); err != nil {
 			return report, err

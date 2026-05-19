@@ -29,20 +29,21 @@ const (
 	LocalModelID       = "s46/devstral-small-2-24b"
 	BackendModel       = "devstral-small-2:24b-instruct-2512-q4_K_M"
 	GatewayBinaryName  = "s46-api"
-	DefaultGatewayRepo = "sovereign46/s46-api"
+	DefaultGatewayRepo = "sovereign46/api"
 	MinMemoryBytes     = int64(32 * 1000 * 1000 * 1000)
 	RecMemoryBytes     = int64(64 * 1000 * 1000 * 1000)
 	MinDiskBytes       = int64(30 * 1000 * 1000 * 1000)
 )
 
 const (
-	checkTimeout            = 2 * time.Second
-	modelProbeTimeout       = 5 * time.Minute
-	modelProbeNoticeAfter   = 2 * time.Second
-	modelProbeProgressEvery = time.Second
-	modelProbeBodyLimit     = 4 * 1024
-	gatewayDownloadTimeout  = 30 * time.Second
-	githubLatestURLFormat   = "https://api.github.com/repos/%s/releases/latest"
+	checkTimeout             = 2 * time.Second
+	modelProbeTimeout        = 5 * time.Minute
+	modelProbeNoticeAfter    = 2 * time.Second
+	modelProbeProgressEvery  = time.Second
+	modelProbeBodyLimit      = 4 * 1024
+	gatewayDownloadTimeout   = 30 * time.Second
+	gatewaySourceInstallTime = 5 * time.Minute
+	githubLatestURLFormat    = "https://api.github.com/repos/%s/releases/latest"
 )
 
 type Check struct {
@@ -229,8 +230,17 @@ func (s Service) InstallGateway(ctx context.Context) error {
 		return nil
 	}
 	if !s.GatewayDownloadAvailable() {
-		return fmt.Errorf("gateway download is not available for %s/%s", runtime.GOOS, runtime.GOARCH)
+		return fmt.Errorf("gateway install is not available for %s/%s", runtime.GOOS, runtime.GOARCH)
 	}
+	if err := s.installGatewayRelease(ctx); err != nil {
+		if sourceErr := s.installGatewayFromSource(ctx); sourceErr != nil {
+			return fmt.Errorf("%w; source clone fallback failed: %v", err, sourceErr)
+		}
+	}
+	return nil
+}
+
+func (s Service) installGatewayRelease(ctx context.Context) error {
 	downloadURL, err := s.gatewayDownloadURL(ctx)
 	if err != nil {
 		return err
@@ -249,6 +259,84 @@ func (s Service) InstallGateway(ctx context.Context) error {
 		return fmt.Errorf("download gateway release failed: %s", response.Status)
 	}
 	return s.installGatewayArchive(response.Body)
+}
+
+func (s Service) installGatewayFromSource(ctx context.Context) error {
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		return fmt.Errorf("git is not installed")
+	}
+	goPath, err := exec.LookPath("go")
+	if err != nil {
+		return fmt.Errorf("go is not installed")
+	}
+	sourceDir := s.managedGatewaySourceDir()
+	if err := os.MkdirAll(filepath.Dir(sourceDir), 0o755); err != nil {
+		return err
+	}
+	installCtx, cancel := context.WithTimeout(ctx, gatewaySourceInstallTime)
+	defer cancel()
+	if err := s.cloneGatewaySource(installCtx, gitPath, sourceDir); err != nil {
+		return err
+	}
+	return s.buildGatewaySource(installCtx, goPath, sourceDir)
+}
+
+func (s Service) cloneGatewaySource(ctx context.Context, gitPath string, sourceDir string) error {
+	cloneURLs := s.gatewayCloneURLs()
+	failures := []string{}
+	for _, cloneURL := range cloneURLs {
+		if err := os.RemoveAll(sourceDir); err != nil {
+			return err
+		}
+		if err := s.runGatewayInstallCommand(ctx, "", gitPath, "clone", "--depth", "1", cloneURL, sourceDir); err != nil {
+			failures = append(failures, fmt.Sprintf("%s: %v", cloneURL, err))
+			_ = os.RemoveAll(sourceDir)
+			continue
+		}
+		return nil
+	}
+	if len(failures) == 0 {
+		return fmt.Errorf("no gateway clone URLs configured")
+	}
+	return fmt.Errorf("git clone failed: %s", strings.Join(failures, "; "))
+}
+
+func (s Service) buildGatewaySource(ctx context.Context, goPath string, sourceDir string) error {
+	target := s.managedGatewayBinaryPath()
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+	if err := s.runGatewayInstallCommand(ctx, sourceDir, goPath, "build", "-o", target, "./cmd/"+GatewayBinaryName); err != nil {
+		return fmt.Errorf("build cloned gateway: %w", err)
+	}
+	return nil
+}
+
+func (s Service) runGatewayInstallCommand(ctx context.Context, dir string, path string, args ...string) error {
+	cmd := exec.CommandContext(ctx, path, args...)
+	cmd.Dir = dir
+	cmd.Env = s.gatewayInstallEnv()
+	output, err := cmd.CombinedOutput()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if err != nil {
+		detail := strings.TrimSpace(string(output))
+		if detail != "" {
+			return fmt.Errorf("%w: %s", err, detail)
+		}
+		return err
+	}
+	return nil
+}
+
+func (s Service) gatewayInstallEnv() []string {
+	extra := []string{"GIT_TERMINAL_PROMPT=0"}
+	if strings.TrimSpace(envValue(s.Env, "GIT_SSH_COMMAND")) == "" && strings.TrimSpace(os.Getenv("GIT_SSH_COMMAND")) == "" {
+		extra = append(extra, "GIT_SSH_COMMAND=ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new")
+	}
+	return s.processEnv(extra...)
 }
 
 func (s Service) HomebrewAvailable() bool {
@@ -273,7 +361,7 @@ func (s Service) GatewayDownloadAvailable() bool {
 }
 
 func (s Service) GatewayInstallDescription() string {
-	return fmt.Sprintf("GitHub release %s into %s", s.gatewayGitHubRepo(), s.gatewayInstallDir())
+	return fmt.Sprintf("from GitHub release or git clone %s into %s", s.gatewayGitHubRepo(), s.gatewayInstallDir())
 }
 
 func (s Service) GatewayStartDescription() (string, bool) {
@@ -446,6 +534,17 @@ func (s Service) gatewayGitHubRepo() string {
 	return nonEmpty(s.env("S46_API_GATEWAY_REPO"), DefaultGatewayRepo)
 }
 
+func (s Service) gatewayCloneURLs() []string {
+	if cloneURL := strings.TrimSpace(s.env("S46_API_GATEWAY_CLONE_URL")); cloneURL != "" {
+		return []string{cloneURL}
+	}
+	repo := s.gatewayGitHubRepo()
+	return []string{
+		fmt.Sprintf("git@github.com:%s.git", repo),
+		fmt.Sprintf("https://github.com/%s.git", repo),
+	}
+}
+
 func selectGatewayAsset(assets []gatewayAsset, version string) gatewayAsset {
 	exact := fmt.Sprintf("%s_%s_%s_%s.tar.gz", GatewayBinaryName, version, runtime.GOOS, runtime.GOARCH)
 	for _, asset := range assets {
@@ -531,6 +630,10 @@ func (s Service) setGitHubHeaders(request *http.Request) {
 
 func (s Service) managedGatewayBinaryPath() string {
 	return filepath.Join(s.gatewayInstallDir(), "bin", GatewayBinaryName)
+}
+
+func (s Service) managedGatewaySourceDir() string {
+	return filepath.Join(s.gatewayInstallDir(), "source")
 }
 
 func (s Service) gatewayInstallDir() string {
