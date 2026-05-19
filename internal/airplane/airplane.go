@@ -205,7 +205,7 @@ func (s Service) StartGateway() error {
 		return nil
 	}
 	if s.gatewayResponding(context.Background()) {
-		return fmt.Errorf("local S46 API at %s is running but is not airplane-ready; stop it (see `s46 status`) and rerun setup, or restart it with S46_ENV=airplane", s.gatewayURL())
+		return fmt.Errorf("local S46 API at %s is running but is not airplane-ready; run `s46 airplane setup` to restart it in airplane mode", s.gatewayURL())
 	}
 	command, ok := s.gatewayCommand()
 	if !ok {

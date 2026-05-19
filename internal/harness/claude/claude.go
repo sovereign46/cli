@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/sovereign46/s46-cli/internal/config"
 	"github.com/sovereign46/s46-cli/internal/harness"
@@ -46,10 +47,12 @@ func (a Adapter) PlanConnect(ctx context.Context, req harness.ConnectRequest) (h
 		envMap = map[string]any{}
 	}
 	envMap["ANTHROPIC_BASE_URL"] = req.Team.Endpoint + "/anthropic"
+	envMap["ANTHROPIC_MODEL"] = req.Model
 	envMap["ANTHROPIC_DEFAULT_SONNET_MODEL"] = req.Model
 	envMap["ANTHROPIC_DEFAULT_OPUS_MODEL"] = req.Model
 	envMap["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = req.Model
 	existing["apiKeyHelper"] = "s46 token --refresh"
+	existing["model"] = req.Model
 	existing["env"] = envMap
 
 	content, err := json.MarshalIndent(existing, "", "  ")
@@ -70,6 +73,7 @@ func (a Adapter) PlanConnect(ctx context.Context, req harness.ConnectRequest) (h
 		Operations: []string{
 			"set apiKeyHelper to 's46 token --refresh'",
 			fmt.Sprintf("set ANTHROPIC_BASE_URL to %s/anthropic", req.Team.Endpoint),
+			fmt.Sprintf("set Claude Code model to %s", req.Model),
 			fmt.Sprintf("set default Claude model aliases to %s", req.Model),
 		},
 		Files: []harness.FilePlan{{
@@ -99,8 +103,11 @@ func (a Adapter) PlanDisconnect(ctx context.Context, req harness.DisconnectReque
 	if existing["apiKeyHelper"] == "s46 token --refresh" {
 		delete(existing, "apiKeyHelper")
 	}
+	if model, ok := existing["model"].(string); ok && strings.HasPrefix(model, "s46/") {
+		delete(existing, "model")
+	}
 	if envMap, ok := existing["env"].(map[string]any); ok {
-		for _, key := range []string{"ANTHROPIC_BASE_URL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"} {
+		for _, key := range []string{"ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL"} {
 			delete(envMap, key)
 		}
 		if len(envMap) == 0 {

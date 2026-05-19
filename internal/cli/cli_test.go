@@ -390,7 +390,7 @@ func TestAirplaneModeOnAndCloudModeRestoreEndpoint(t *testing.T) {
 	}
 }
 
-func TestAirplaneSetupExplainsExistingGatewayThatIsNotAirplaneReady(t *testing.T) {
+func TestAirplaneSetupExplainsUnknownExistingGatewayThatIsNotAirplaneReady(t *testing.T) {
 	env := testEnv(t)
 	delete(env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")
 	env["S46_TEST_MEMORY_BYTES"] = "68000000000"
@@ -402,19 +402,55 @@ func TestAirplaneSetupExplainsExistingGatewayThatIsNotAirplaneReady(t *testing.T
 	env["S46_TEST_GATEWAY_BINARY"] = "/tmp/s46-api"
 	env["S46_TEST_GATEWAY_READY"] = "0"
 	env["S46_TEST_GATEWAY_RESPONDING"] = "1"
+	env["S46_TEST_LISTENER_8080"] = "444 node"
 
 	out := requireOK(t, run(t, env, "airplane", "setup"))
 	for _, want := range []string{
 		"[s46] [fail] local-gateway: responding at http://127.0.0.1:8080 but not airplane-ready",
 		"[s46] Local S46 API is already running at http://127.0.0.1:8080, but it is not airplane-ready.",
-		"[s46] Stop that process (see `s46 status`) and rerun `s46 airplane setup`.",
+		"[s46] Process: pid 444 (node)",
+		"[s46] Setup will not stop an unknown or non-S46 process automatically.",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("setup output missing %q:\n%s", want, out)
 		}
 	}
+	if strings.Contains(out, "see `s46 status`) and rerun") || strings.Contains(out, "reports local-ollama ready") {
+		t.Fatalf("setup output included stale manual restart guidance:\n%s", out)
+	}
 	if strings.Contains(out, "Start local gateway now?") || strings.Contains(out, "starting local S46 gateway") {
-		t.Fatalf("setup should not offer to start over an existing gateway:\n%s", out)
+		t.Fatalf("setup should not offer to start over an unknown existing gateway:\n%s", out)
+	}
+}
+
+func TestAirplaneSetupOffersToRestartExistingS46Gateway(t *testing.T) {
+	env := testEnv(t)
+	delete(env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")
+	env["S46_TEST_MEMORY_BYTES"] = "68000000000"
+	env["S46_TEST_FREE_DISK_BYTES"] = "61000000000"
+	env["S46_TEST_OLLAMA_PATH"] = "/opt/homebrew/bin/ollama"
+	env["S46_TEST_OLLAMA_RUNNING"] = "1"
+	env["S46_TEST_MODEL_DOWNLOADED"] = "1"
+	env["S46_TEST_MODEL_PROBE"] = "1"
+	env["S46_TEST_GATEWAY_BINARY"] = "/tmp/s46-api"
+	env["S46_TEST_GATEWAY_READY"] = "0"
+	env["S46_TEST_GATEWAY_RESPONDING"] = "1"
+	env["S46_TEST_LISTENER_8080"] = "444 s46-api"
+	env["S46_TEST_STOP_GATEWAY_OK"] = "1"
+	env["S46_TEST_START_GATEWAY_OK"] = "1"
+
+	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\nn\n"), "airplane", "setup"))
+	for _, want := range []string{
+		"[s46] Local S46 API is already running at http://127.0.0.1:8080, but it is not airplane-ready.",
+		"[s46] Process: pid 444 (s46-api)",
+		"[s46] Restart the local S46 API in airplane mode now? [Y/n]",
+		"[s46] stopping local S46 API...",
+		"[s46] starting local S46 gateway...",
+		"[s46] airplane setup: ready",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("setup output missing %q:\n%s", want, out)
+		}
 	}
 }
 

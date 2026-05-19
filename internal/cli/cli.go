@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -1334,7 +1335,7 @@ func statusClaude(env map[string]string, teamName string, teamConfig config.Team
 	return []statusCheck{
 		{Name: "claude-token-helper", OK: settings["apiKeyHelper"] == "s46 token --refresh", Message: fmt.Sprint(settings["apiKeyHelper"])},
 		{Name: "claude-base-url", OK: envMap["ANTHROPIC_BASE_URL"] == teamConfig.Endpoint+"/anthropic", Message: fmt.Sprint(envMap["ANTHROPIC_BASE_URL"])},
-		{Name: "claude-model", OK: envMap["ANTHROPIC_DEFAULT_SONNET_MODEL"] == teamConfig.DefaultModel, Message: fmt.Sprint(envMap["ANTHROPIC_DEFAULT_SONNET_MODEL"])},
+		{Name: "claude-model", OK: settings["model"] == teamConfig.DefaultModel && envMap["ANTHROPIC_MODEL"] == teamConfig.DefaultModel && envMap["ANTHROPIC_DEFAULT_SONNET_MODEL"] == teamConfig.DefaultModel, Message: fmt.Sprint(settings["model"])},
 	}
 }
 
@@ -2341,10 +2342,20 @@ func runAirplaneSetup(ctx context.Context, app *app, allowPrompts bool) (airplan
 		}
 	}
 	if missingCheck(report, "local-gateway") && service.GatewayResponding(ctx) && !service.GatewayReady(ctx) {
-		if err := app.renderer.Lines(renderAirplaneGatewayConflict(report.GatewayURL)...); err != nil {
+		var err error
+		report, changed, err = offerAirplaneGatewayRestart(ctx, app, service, report)
+		if err != nil {
 			return report, err
 		}
-		return report, nil
+		if !changed {
+			return report, nil
+		}
+		if missingCheck(report, "local-gateway") && service.GatewayResponding(ctx) && !service.GatewayReady(ctx) {
+			if err := app.renderer.Lines(renderAirplaneReport(report)...); err != nil {
+				return report, err
+			}
+			return report, nil
+		}
 	}
 	if missingCheck(report, "local-gateway") {
 		if _, ok := service.GatewayStartDescription(); !ok && service.GatewayDownloadAvailable() {
@@ -2393,13 +2404,154 @@ func runAirplaneSetup(ctx context.Context, app *app, allowPrompts bool) (airplan
 	return report, nil
 }
 
-func renderAirplaneGatewayConflict(gatewayURL string) []string {
+func offerAirplaneGatewayRestart(ctx context.Context, app *app, service airplane.Service, report airplane.Report) (airplane.Report, bool, error) {
+	listener := gatewayListeningProcess(app.runtime.Env, report.GatewayURL)
+	if err := app.renderer.Lines(renderAirplaneGatewayConflict(report.GatewayURL, listener)...); err != nil {
+		return report, false, err
+	}
+	if !canRestartAirplaneGateway(listener) {
+		if err := app.renderer.Lines("[s46] Setup will not stop an unknown or non-S46 process automatically."); err != nil {
+			return report, false, err
+		}
+		return report, false, nil
+	}
+	if app.runtime.Stdin == nil {
+		if err := app.renderer.Lines("[s46] Run `s46 airplane setup` interactively to restart it automatically."); err != nil {
+			return report, false, err
+		}
+		return report, false, nil
+	}
+	if yes, err := promptYesNo(app, "[s46] Restart the local S46 API in airplane mode now? [Y/n] ", true); err != nil {
+		return report, false, err
+	} else if !yes {
+		return report, false, nil
+	}
+	if err := app.renderer.Lines("[s46] stopping local S46 API..."); err != nil {
+		return report, false, err
+	}
+	if err := stopListeningProcess(app.runtime.Env, report.GatewayURL, listener.PID, 5*time.Second); err != nil {
+		return report, false, fmt.Errorf("failed to stop local S46 API: %w", err)
+	}
+	if err := app.renderer.Lines("[s46] starting local S46 gateway..."); err != nil {
+		return report, false, err
+	}
+	if err := service.StartGateway(); err != nil {
+		return report, false, fmt.Errorf("failed to start local S46 gateway: %w", err)
+	}
+	return waitForAirplaneCheck(ctx, service, "local-gateway", 30*time.Second), true, nil
+}
+
+func renderAirplaneGatewayConflict(gatewayURL string, listener listeningProcessStatus) []string {
 	return []string{
 		fmt.Sprintf("[s46] Local S46 API is already running at %s, but it is not airplane-ready.", gatewayURL),
 		"[s46] This usually means another s46-api process owns the port without the local Ollama worker configured.",
-		"[s46] Stop that process (see `s46 status`) and rerun `s46 airplane setup`.",
-		"[s46] Or restart s46-api with S46_ENV=airplane so /v1/workers reports local-ollama ready.",
+		renderAirplaneGatewayProcess(listener),
 	}
+}
+
+func renderAirplaneGatewayProcess(listener listeningProcessStatus) string {
+	switch listener.Status {
+	case "listening":
+		if listener.PID != "" && listener.Command != "" {
+			return fmt.Sprintf("[s46] Process: pid %s (%s)", listener.PID, listener.Command)
+		}
+		if listener.PID != "" {
+			return fmt.Sprintf("[s46] Process: pid %s", listener.PID)
+		}
+		if listener.Command != "" {
+			return fmt.Sprintf("[s46] Process: %s", listener.Command)
+		}
+		return "[s46] Process: listening process unknown"
+	case "not_listening":
+		return "[s46] Process: no listener found on the gateway port"
+	default:
+		return "[s46] Process: " + firstNonEmpty(listener.Message, "unknown")
+	}
+}
+
+func gatewayListeningProcess(env map[string]string, gatewayURL string) listeningProcessStatus {
+	port := localServerPort(gatewayURL)
+	if port == "" {
+		return listeningProcessStatus{Status: "unknown", Message: "gateway port unknown"}
+	}
+	return listeningProcess(env, port)
+}
+
+func localServerPort(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	if port := parsed.Port(); port != "" {
+		return port
+	}
+	return defaultPort(parsed.Scheme)
+}
+
+func canRestartAirplaneGateway(listener listeningProcessStatus) bool {
+	return listener.Status == "listening" && listener.PID != "" && isS46APIProcess(listener.Command)
+}
+
+func isS46APIProcess(command string) bool {
+	for _, field := range strings.Fields(command) {
+		if filepath.Base(field) == airplane.GatewayBinaryName {
+			return true
+		}
+	}
+	return filepath.Base(strings.TrimSpace(command)) == airplane.GatewayBinaryName
+}
+
+func stopListeningProcess(env map[string]string, gatewayURL string, pid string, timeout time.Duration) error {
+	port := localServerPort(gatewayURL)
+	if truthy(env["S46_TEST_STOP_GATEWAY_OK"]) {
+		env["S46_TEST_GATEWAY_RESPONDING"] = "0"
+		if port != "" {
+			env["S46_TEST_LISTENER_"+port] = "missing"
+		}
+		return nil
+	}
+	pidInt, err := strconv.Atoi(pid)
+	if err != nil || pidInt <= 0 {
+		return fmt.Errorf("invalid pid %q", pid)
+	}
+	process, err := os.FindProcess(pidInt)
+	if err != nil {
+		return err
+	}
+	if err := process.Signal(syscall.SIGTERM); err != nil && sameListeningPID(env, port, pid) {
+		return err
+	}
+	if waitForListenerToExit(env, port, pid, timeout) {
+		return nil
+	}
+	if err := process.Kill(); err != nil && sameListeningPID(env, port, pid) {
+		return err
+	}
+	if waitForListenerToExit(env, port, pid, 2*time.Second) {
+		return nil
+	}
+	return fmt.Errorf("process %s is still listening on port %s", pid, port)
+}
+
+func waitForListenerToExit(env map[string]string, port string, pid string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if !sameListeningPID(env, port, pid) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+func sameListeningPID(env map[string]string, port string, pid string) bool {
+	if port == "" {
+		return false
+	}
+	listener := listeningProcess(env, port)
+	return listener.Status == "listening" && listener.PID == pid
 }
 
 func waitForAirplaneCheck(ctx context.Context, service airplane.Service, name string, timeout time.Duration) airplane.Report {
