@@ -97,7 +97,7 @@ func TestHTTPClientUsesRequestedTimeout(t *testing.T) {
 }
 
 func TestAirplaneRuntimeEnvDefaultsAndOverrides(t *testing.T) {
-	if ContextWindow(nil) != 32768 || MaxTokens(nil) != 4096 || KeepAlive(nil) != "60s" || NumParallel(nil) != 1 || MaxLoadedModels(nil) != 1 {
+	if ContextWindow(nil) != 32768 || MaxTokens(nil) != 4096 || KeepAlive(nil) != "10m" || GatewayWriteTimeout(nil) != "10m" || NumParallel(nil) != 1 || MaxLoadedModels(nil) != 1 {
 		t.Fatalf("unexpected defaults")
 	}
 	env := map[string]string{
@@ -106,8 +106,9 @@ func TestAirplaneRuntimeEnvDefaultsAndOverrides(t *testing.T) {
 		"S46_AIRPLANE_KEEP_ALIVE":        "5m",
 		"S46_AIRPLANE_NUM_PARALLEL":      "2",
 		"S46_AIRPLANE_MAX_LOADED_MODELS": "3",
+		"S46_WRITE_TIMEOUT":              "7m",
 	}
-	if ContextWindow(env) != 65536 || MaxTokens(env) != 8192 || KeepAlive(env) != "5m" || NumParallel(env) != 2 || MaxLoadedModels(env) != 3 {
+	if ContextWindow(env) != 65536 || MaxTokens(env) != 8192 || KeepAlive(env) != "5m" || GatewayWriteTimeout(env) != "7m" || NumParallel(env) != 2 || MaxLoadedModels(env) != 3 {
 		t.Fatalf("unexpected overrides")
 	}
 }

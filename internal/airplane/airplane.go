@@ -21,23 +21,24 @@ import (
 )
 
 const (
-	ModeCloud              = "cloud"
-	ModeAirplane           = "airplane"
-	Prefix                 = "[s46✈]"
-	LocalGatewayURL        = "http://127.0.0.1:8080"
-	LocalOllamaURL         = "http://127.0.0.1:11434"
-	LocalModelID           = "s46/devstral-small-2-24b"
-	BackendModel           = "devstral-small-2:24b-instruct-2512-q4_K_M"
-	GatewayBinaryName      = "s46-api"
-	DefaultGatewayRepo     = "sovereign46/api"
-	DefaultContextWindow   = 32768
-	DefaultMaxTokens       = 4096
-	DefaultKeepAlive       = "60s"
-	DefaultNumParallel     = 1
-	DefaultMaxLoadedModels = 1
-	MinMemoryBytes         = int64(32 * 1000 * 1000 * 1000)
-	RecMemoryBytes         = int64(64 * 1000 * 1000 * 1000)
-	MinDiskBytes           = int64(30 * 1000 * 1000 * 1000)
+	ModeCloud                  = "cloud"
+	ModeAirplane               = "airplane"
+	Prefix                     = "[s46✈]"
+	LocalGatewayURL            = "http://127.0.0.1:8080"
+	LocalOllamaURL             = "http://127.0.0.1:11434"
+	LocalModelID               = "s46/devstral-small-2-24b"
+	BackendModel               = "devstral-small-2:24b-instruct-2512-q4_K_M"
+	GatewayBinaryName          = "s46-api"
+	DefaultGatewayRepo         = "sovereign46/api"
+	DefaultContextWindow       = 32768
+	DefaultMaxTokens           = 4096
+	DefaultKeepAlive           = "10m"
+	DefaultGatewayWriteTimeout = "10m"
+	DefaultNumParallel         = 1
+	DefaultMaxLoadedModels     = 1
+	MinMemoryBytes             = int64(32 * 1000 * 1000 * 1000)
+	RecMemoryBytes             = int64(64 * 1000 * 1000 * 1000)
+	MinDiskBytes               = int64(30 * 1000 * 1000 * 1000)
 )
 
 const (
@@ -382,6 +383,7 @@ func AirplaneGatewayEnv(env map[string]string) []string {
 		"S46_AIRPLANE_CONTEXT=" + strconv.Itoa(ContextWindow(env)),
 		"S46_AIRPLANE_MAX_TOKENS=" + strconv.Itoa(MaxTokens(env)),
 		"S46_AIRPLANE_KEEP_ALIVE=" + KeepAlive(env),
+		"S46_WRITE_TIMEOUT=" + GatewayWriteTimeout(env),
 	}
 }
 
@@ -395,6 +397,10 @@ func MaxTokens(env map[string]string) int {
 
 func KeepAlive(env map[string]string) string {
 	return nonEmpty(envValue(env, "S46_AIRPLANE_KEEP_ALIVE"), envValue(env, "OLLAMA_KEEP_ALIVE"), DefaultKeepAlive)
+}
+
+func GatewayWriteTimeout(env map[string]string) string {
+	return nonEmpty(envValue(env, "S46_WRITE_TIMEOUT"), DefaultGatewayWriteTimeout)
 }
 
 func NumParallel(env map[string]string) int {
