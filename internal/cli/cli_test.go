@@ -343,13 +343,15 @@ func TestAirplaneSetupContinuesAfterInstallingOllama(t *testing.T) {
 	env["S46_TEST_MODEL_PROBE"] = "0"
 	env["S46_TEST_GATEWAY_BINARY"] = "/tmp/s46-api"
 	env["S46_TEST_GATEWAY_READY"] = "0"
+	env["S46_TEST_START_GATEWAY_OK"] = "1"
 
-	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\nY\nY\nn\n"), "airplane", "setup"))
+	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\nY\nY\nY\nn\n"), "airplane", "setup"))
 	for _, want := range []string{
 		"[s46] Install with Homebrew? [Y/n]",
 		"[s46] Ollama is installed but not running.",
 		"[s46] Start Ollama now? [Y/n]",
 		"Download devstral-small-2:24b-instruct-2512-q4_K_M",
+		"[s46] Start local gateway now? [Y/n]",
 		"[s46] airplane setup: ready",
 	} {
 		if !strings.Contains(out, want) {
@@ -498,12 +500,14 @@ func TestAirplaneSetupDownloadsMissingGateway(t *testing.T) {
 	env["S46_TEST_GATEWAY_READY"] = "0"
 	env["S46_TEST_GATEWAY_DOWNLOAD_AVAILABLE"] = "1"
 	env["S46_TEST_INSTALL_GATEWAY_OK"] = "1"
+	env["S46_TEST_START_GATEWAY_OK"] = "1"
 
-	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\nn\n"), "airplane", "setup"))
+	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\nY\nn\n"), "airplane", "setup"))
 	for _, want := range []string{
 		"[s46] Local S46 gateway is not installed.",
 		"Download GitHub release sovereign46/s46-api",
 		"[s46] downloading local S46 gateway...",
+		"[s46] Start local gateway now? [Y/n]",
 		"[s46] airplane setup: ready",
 	} {
 		if !strings.Contains(out, want) {

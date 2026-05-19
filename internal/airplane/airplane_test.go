@@ -131,6 +131,40 @@ func TestInstallGatewayDownloadsArchive(t *testing.T) {
 	}
 }
 
+func TestCheckRequiresAirplaneReadyGateway(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/tags":
+			_, _ = w.Write([]byte(`{"models":[{"name":"devstral-small-2:24b-instruct-2512-q4_K_M"}]}`))
+		case "/api/generate":
+			_, _ = w.Write([]byte(`{"response":"pong"}`))
+		case "/v1/models":
+			_, _ = w.Write([]byte(`{"data":[]}`))
+		case "/v1/workers":
+			_, _ = w.Write([]byte(`{"workers":[{"id":"local-ollama","mode":"airplane","state":"not_configured","models":[{"id":"s46/local-coder","state":"missing"}]}]}`))
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	report := Service{
+		Env: map[string]string{
+			"S46_LOCAL_OLLAMA_URL":     server.URL,
+			"S46_AIRPLANE_GATEWAY_URL": server.URL,
+			"S46_TEST_MEMORY_BYTES":    "68000000000",
+			"S46_TEST_FREE_DISK_BYTES": "61000000000",
+			"S46_TEST_OLLAMA_PATH":     "/opt/homebrew/bin/ollama",
+		},
+		Client: server.Client(),
+	}.Check(context.Background())
+
+	check := findCheck(report, "local-gateway")
+	if check.OK || !strings.Contains(check.Message, "not airplane-ready") || report.Ready {
+		t.Fatalf("unexpected local-gateway check: %#v report.Ready=%v", check, report.Ready)
+	}
+}
+
 func TestCheckReportsModelProbeHTTPError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

@@ -136,9 +136,9 @@ func (s Service) Check(ctx context.Context) Report {
 	report.add(Check{Name: "model-probe", OK: modelProbe, Required: true, Message: modelProbeMessage})
 
 	gatewayReady := s.runBoolCheck(ctx, s.checkTimeout(), s.gatewayReady)
-	gatewayPath, gatewayBinary := s.gatewayBinary()
+	gatewayPath, _ := s.gatewayBinary()
 	report.GatewayBinary = gatewayPath
-	report.add(Check{Name: "local-gateway", OK: gatewayReady || gatewayBinary, Required: true, Message: s.gatewayMessage(gatewayReady, gatewayPath)})
+	report.add(Check{Name: "local-gateway", OK: gatewayReady, Required: true, Message: s.gatewayMessage(ctx, gatewayReady, gatewayPath)})
 	report.Ready = report.allRequiredOK()
 	return report
 }
@@ -203,6 +203,9 @@ func (s Service) StartGateway() error {
 	if truthy(s.env("S46_TEST_START_GATEWAY_OK")) {
 		s.setEnv("S46_TEST_GATEWAY_READY", "1")
 		return nil
+	}
+	if s.gatewayResponding(context.Background()) {
+		return fmt.Errorf("local S46 gateway at %s is responding but is not airplane-ready; stop the existing gateway and rerun setup", s.gatewayURL())
 	}
 	command, ok := s.gatewayCommand()
 	if !ok {
@@ -667,6 +670,46 @@ func (s Service) gatewayReady(ctx context.Context) bool {
 	if value := strings.TrimSpace(s.env("S46_TEST_GATEWAY_READY")); value != "" {
 		return truthy(value)
 	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(s.gatewayURL(), "/")+"/v1/workers", nil)
+	if err != nil {
+		return false
+	}
+	response, err := s.httpClient().Do(request)
+	if err != nil {
+		return false
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return false
+	}
+	var payload struct {
+		Workers []struct {
+			ID     string `json:"id"`
+			Mode   string `json:"mode"`
+			State  string `json:"state"`
+			Models []struct {
+				ID    string `json:"id"`
+				State string `json:"state"`
+			} `json:"models"`
+		} `json:"workers"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&payload); err != nil {
+		return false
+	}
+	for _, worker := range payload.Workers {
+		if worker.ID != "local-ollama" || worker.Mode != ModeAirplane || worker.State != "ready" {
+			continue
+		}
+		for _, model := range worker.Models {
+			if model.ID == LocalModelID && model.State == "ready" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (s Service) gatewayResponding(ctx context.Context) bool {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(s.gatewayURL(), "/")+"/v1/models", nil)
 	if err != nil {
 		return false
@@ -944,9 +987,12 @@ func (s Service) env(key string) string {
 	return s.Env[key]
 }
 
-func (s Service) gatewayMessage(ready bool, path string) string {
+func (s Service) gatewayMessage(ctx context.Context, ready bool, path string) string {
 	if ready {
-		return "responding at " + s.gatewayURL()
+		return "airplane-ready at " + s.gatewayURL()
+	}
+	if s.gatewayResponding(ctx) {
+		return "responding at " + s.gatewayURL() + " but not airplane-ready"
 	}
 	if path != "" {
 		return "startable: " + path
