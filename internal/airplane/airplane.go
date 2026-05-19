@@ -205,7 +205,7 @@ func (s Service) StartGateway() error {
 		return nil
 	}
 	if s.gatewayResponding(context.Background()) {
-		return fmt.Errorf("local S46 gateway at %s is responding but is not airplane-ready; stop the existing gateway and rerun setup", s.gatewayURL())
+		return fmt.Errorf("local S46 API at %s is running but is not airplane-ready; stop it (see `s46 status`) and rerun setup, or restart it with S46_ENV=airplane", s.gatewayURL())
 	}
 	command, ok := s.gatewayCommand()
 	if !ok {
@@ -286,6 +286,10 @@ func (s Service) GatewayStartDescription() (string, bool) {
 
 func (s Service) GatewayReady(ctx context.Context) bool {
 	return s.gatewayReady(ctx)
+}
+
+func (s Service) GatewayResponding(ctx context.Context) bool {
+	return s.gatewayResponding(ctx)
 }
 
 func (s Service) LogFiles() []LogFile {
@@ -710,6 +714,9 @@ func (s Service) gatewayReady(ctx context.Context) bool {
 }
 
 func (s Service) gatewayResponding(ctx context.Context) bool {
+	if value := strings.TrimSpace(s.env("S46_TEST_GATEWAY_RESPONDING")); value != "" {
+		return truthy(value)
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(s.gatewayURL(), "/")+"/v1/models", nil)
 	if err != nil {
 		return false

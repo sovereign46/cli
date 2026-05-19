@@ -36,6 +36,7 @@ func testEnv(t *testing.T) map[string]string {
 		"S46_MOCK_GIST_ID":               "0123456789abcdef0123456789abcdef",
 		"S46_SKIP_STARTUP_UPDATE_CHECK":  "1",
 		"S46_AIRPLANE_SKIP_SETUP_CHECKS": "1",
+		"S46_TEST_GATEWAY_RESPONDING":    "0",
 		"S46_TEST_LISTENER_DEFAULT":      "missing",
 	}
 }
@@ -386,6 +387,34 @@ func TestAirplaneModeOnAndCloudModeRestoreEndpoint(t *testing.T) {
 	off := requireOK(t, run(t, env, "airplane", "mode", "off"))
 	if !strings.Contains(off, "[s46] mode: cloud") || !strings.Contains(off, "[s46] endpoint: https://acme.s46.dev") || strings.Contains(off, "[s46✈]") {
 		t.Fatalf("unexpected cloud output:\n%s", off)
+	}
+}
+
+func TestAirplaneSetupExplainsExistingGatewayThatIsNotAirplaneReady(t *testing.T) {
+	env := testEnv(t)
+	delete(env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")
+	env["S46_TEST_MEMORY_BYTES"] = "68000000000"
+	env["S46_TEST_FREE_DISK_BYTES"] = "61000000000"
+	env["S46_TEST_OLLAMA_PATH"] = "/opt/homebrew/bin/ollama"
+	env["S46_TEST_OLLAMA_RUNNING"] = "1"
+	env["S46_TEST_MODEL_DOWNLOADED"] = "1"
+	env["S46_TEST_MODEL_PROBE"] = "1"
+	env["S46_TEST_GATEWAY_BINARY"] = "/tmp/s46-api"
+	env["S46_TEST_GATEWAY_READY"] = "0"
+	env["S46_TEST_GATEWAY_RESPONDING"] = "1"
+
+	out := requireOK(t, run(t, env, "airplane", "setup"))
+	for _, want := range []string{
+		"[s46] [fail] local-gateway: responding at http://127.0.0.1:8080 but not airplane-ready",
+		"[s46] Local S46 API is already running at http://127.0.0.1:8080, but it is not airplane-ready.",
+		"[s46] Stop that process (see `s46 status`) and rerun `s46 airplane setup`.",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("setup output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "Start local gateway now?") || strings.Contains(out, "starting local S46 gateway") {
+		t.Fatalf("setup should not offer to start over an existing gateway:\n%s", out)
 	}
 }
 

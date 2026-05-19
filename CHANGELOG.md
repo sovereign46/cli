@@ -6,6 +6,10 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `s46 airplane setup` to stop offering to start a local gateway over an existing non-airplane-ready API process and instead explain how to resolve the port conflict.
+
 ## [0.1.1] - 2026-05-19
 
 ### Changed

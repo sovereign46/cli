@@ -2061,6 +2061,12 @@ func runAirplaneSetup(ctx context.Context, app *app, allowPrompts bool) (airplan
 			report = service.Check(ctx)
 		}
 	}
+	if missingCheck(report, "local-gateway") && service.GatewayResponding(ctx) && !service.GatewayReady(ctx) {
+		if err := app.renderer.Lines(renderAirplaneGatewayConflict(report.GatewayURL)...); err != nil {
+			return report, err
+		}
+		return report, nil
+	}
 	if missingCheck(report, "local-gateway") {
 		if _, ok := service.GatewayStartDescription(); !ok && service.GatewayDownloadAvailable() {
 			if yes, err := promptYesNo(app, fmt.Sprintf("[s46] Local S46 gateway is not installed.\n[s46] Download %s? [Y/n] ", service.GatewayInstallDescription()), true); err != nil {
@@ -2106,6 +2112,15 @@ func runAirplaneSetup(ctx context.Context, app *app, allowPrompts bool) (airplan
 		}
 	}
 	return report, nil
+}
+
+func renderAirplaneGatewayConflict(gatewayURL string) []string {
+	return []string{
+		fmt.Sprintf("[s46] Local S46 API is already running at %s, but it is not airplane-ready.", gatewayURL),
+		"[s46] This usually means another s46-api process owns the port without the local Ollama worker configured.",
+		"[s46] Stop that process (see `s46 status`) and rerun `s46 airplane setup`.",
+		"[s46] Or restart s46-api with S46_ENV=airplane so /v1/workers reports local-ollama ready.",
+	}
 }
 
 func waitForAirplaneCheck(ctx context.Context, service airplane.Service, name string, timeout time.Duration) airplane.Report {
