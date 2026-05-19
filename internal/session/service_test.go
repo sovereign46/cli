@@ -161,6 +161,45 @@ func TestListForbiddenExplainsMatchingTeamAndLocalAPI(t *testing.T) {
 	}
 }
 
+func TestListForbiddenSuggestsTeamsUseForMismatchedTeam(t *testing.T) {
+	home := t.TempDir()
+	env := map[string]string{
+		"HOME":            home,
+		"XDG_CONFIG_HOME": home + "/.config",
+		"XDG_DATA_HOME":   home + "/.data",
+	}
+	store := config.NewStore(env, "")
+	team := api.Team{Name: "s46", Endpoint: "https://s46.s46.dev", Lane: "EU-OPO", Mode: "cloud", DefaultModel: api.DefaultModel}
+	if err := store.SaveConfig(config.Config{ActiveTeam: "s46", Teams: map[string]config.TeamConfig{"s46": config.TeamConfigFromAPI(team, "standard", api.DefaultModel)}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveState(config.State{Authenticated: true, CurrentUser: "nunojob@icloud.com"}); err != nil {
+		t.Fatal(err)
+	}
+	keyringStore := keyring.FileStore{Path: home + "/keyring.json"}
+	tokens, err := json.Marshal(api.TokenSet{Account: "nunojob@icloud.com", AccessToken: "access", RefreshToken: "refresh", ExpiresAt: time.Now().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := keyringStore.Set(context.Background(), tokenService, "nunojob@icloud.com", string(tokens)); err != nil {
+		t.Fatal(err)
+	}
+	mock := api.NewMockClient()
+	mock.Fixtures.Account = "nunojob@icloud.com"
+	mock.Fixtures.Team = "acme"
+
+	_, err = Service{API: forbiddenSessionsAPI{MockClient: mock}, Config: store, Keyring: keyringStore}.List(context.Background())
+	if err == nil {
+		t.Fatal("expected forbidden error")
+	}
+	message := err.Error()
+	for _, want := range []string{"the API says this login belongs to team acme", "run `s46 teams use acme`"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("error missing %q: %v", want, err)
+		}
+	}
+}
+
 func newTestService(t *testing.T, team api.Team, extraEnv map[string]string) (Service, *config.Store) {
 	t.Helper()
 	home := t.TempDir()

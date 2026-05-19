@@ -27,6 +27,14 @@ export OLLAMA_MODELS="${OLLAMA_MODELS:-$host_home/.ollama/models}"
 export XDG_CONFIG_HOME="$TMP_FOLDER/home/.config"
 export XDG_DATA_HOME="$TMP_FOLDER/home/.local/share"
 export XDG_CACHE_HOME="$TMP_FOLDER/home/.cache"
+if [ -z "${S46_LOG_DIR:-}" ]; then
+  if [ -n "$host_home" ]; then
+    export S46_LOG_DIR="$host_home/.cache/s46"
+  else
+    export S46_LOG_DIR="$XDG_CACHE_HOME/s46"
+  fi
+fi
+mkdir -p "$S46_LOG_DIR"
 export S46_DEV_SHELL=1
 api_base_default="${S46_DEV_BASE_URL:-http://127.0.0.1:8080}"
 export S46_API_BASE_URL="${S46_API_BASE_URL:-$api_base_default}"
@@ -57,6 +65,7 @@ Temporary HOME: \$TMP_FOLDER/home
 Temporary binary: \$TMP_FOLDER/bin/s46
 API base: $api_base
 Ollama models: $OLLAMA_MODELS
+S46 logs: $S46_LOG_DIR
 S46 API repo: $api_repo_display
 
 Try:

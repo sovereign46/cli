@@ -43,7 +43,7 @@ func TestHTTPClientWireShape(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(User{Email: "dscape@acme.s46.dev", Team: "acme"})
 		case "/v1/devices":
 			requireBearer(t, r)
-			_ = json.NewEncoder(w).Encode(map[string]any{"devices": []Device{{ID: "dev-laptop", Name: "Dev laptop", LastSeenAt: time.Now().UTC()}}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"devices": []Device{{ID: "dev-laptop", Name: "Dev laptop", LastSeenAt: time.Now().UTC(), LastSeenIP: "203.0.113.9"}}})
 		case "/v1/devices/dev-laptop":
 			requireBearer(t, r)
 			if r.Method != http.MethodDelete {
@@ -113,7 +113,7 @@ func TestHTTPClientWireShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(devices) != 1 || devices[0].ID != "dev-laptop" {
+	if len(devices) != 1 || devices[0].ID != "dev-laptop" || devices[0].LastSeenIP != "203.0.113.9" {
 		t.Fatalf("devices = %#v", devices)
 	}
 	if err := client.DeleteDevice(context.Background(), "dev-laptop", "access"); err != nil {

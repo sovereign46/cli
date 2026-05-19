@@ -6,9 +6,20 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Added `s46 teams list` for discovering connected team configurations and the active team.
+
+### Changed
+
+- Moved active-team switching from `s46 use <team>` to `s46 teams use <team>`.
+- Renamed airplane model IDs from role-style names to concrete model names (`s46/devstral-small-2-24b`, `s46/qwen3-coder-30b`).
+
 ### Fixed
 
 - Fixed `s46 airplane setup` to stop offering to start a local gateway over an existing non-airplane-ready API process and instead explain how to resolve the port conflict.
+- Fixed `s46 airplane logs` to discover log files attached to running Ollama/gateway processes started from another shell.
+- Fixed `make shell` to write S46 airplane logs to a stable host log directory via `S46_LOG_DIR` so logs survive temporary shell cleanup.
 
 ## [0.1.1] - 2026-05-19
 

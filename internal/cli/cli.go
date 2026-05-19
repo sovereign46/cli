@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -113,7 +114,7 @@ func NewRootCommand(runtime Runtime) *cobra.Command {
 	root.AddCommand(updateCommand(runtime, opts))
 	root.AddCommand(connectCommand(runtime, opts))
 	root.AddCommand(disconnectCommand(runtime, opts))
-	root.AddCommand(useCommand(runtime, opts))
+	root.AddCommand(teamsCommand(runtime, opts))
 	root.AddCommand(statusCommand(runtime, opts))
 	root.AddCommand(sessionsCommand(runtime, opts))
 	root.AddCommand(detachCommand(runtime, opts))
@@ -600,11 +601,19 @@ func renderDevices(devices []api.Device) []string {
 	if len(devices) == 0 {
 		return []string{"[s46] no paired devices"}
 	}
-	lines := []string{"ID  NAME  LAST SEEN"}
+	lines := []string{"ID  NAME  LAST SEEN  IP ADDRESS"}
 	for _, device := range devices {
-		lines = append(lines, fmt.Sprintf("%s  %s  %s", device.ID, device.Name, formatDeviceTime(device.LastSeenAt)))
+		lines = append(lines, fmt.Sprintf("%s  %s  %s  %s", device.ID, device.Name, formatDeviceTime(device.LastSeenAt), formatDeviceIP(device.LastSeenIP)))
 	}
 	return lines
+}
+
+func formatDeviceIP(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "-"
+	}
+	return value
 }
 
 func formatDeviceTime(value time.Time) string {
@@ -1097,7 +1106,40 @@ func runDisconnect(ctx context.Context, app *app, teamName string, harnessName s
 	return app.renderer.Lines(lines...)
 }
 
-func useCommand(runtime Runtime, opts *options) *cobra.Command {
+func teamsCommand(runtime Runtime, opts *options) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "teams",
+		Short: "list and switch connected teams",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := newApp(runtime, opts)
+			if err != nil {
+				return err
+			}
+			return runTeamsList(app)
+		},
+	}
+	cmd.AddCommand(teamsListCommand(runtime, opts))
+	cmd.AddCommand(teamsUseCommand(runtime, opts))
+	return cmd
+}
+
+func teamsListCommand(runtime Runtime, opts *options) *cobra.Command {
+	return &cobra.Command{
+		Use:   "list",
+		Short: "list connected team configurations",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := newApp(runtime, opts)
+			if err != nil {
+				return err
+			}
+			return runTeamsList(app)
+		},
+	}
+}
+
+func teamsUseCommand(runtime Runtime, opts *options) *cobra.Command {
 	return &cobra.Command{
 		Use:   "use <team>",
 		Short: "switch the active connected team",
@@ -1106,9 +1148,9 @@ func useCommand(runtime Runtime, opts *options) *cobra.Command {
 				return nil
 			}
 			if len(args) == 0 {
-				return fmt.Errorf("missing team\n[s46] expected: s46 use <team>")
+				return fmt.Errorf("missing team\n[s46] expected: s46 teams use <team>")
 			}
-			return fmt.Errorf("too many arguments\n[s46] expected: s46 use <team>")
+			return fmt.Errorf("too many arguments\n[s46] expected: s46 teams use <team>")
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := newApp(runtime, opts)
@@ -1116,25 +1158,90 @@ func useCommand(runtime Runtime, opts *options) *cobra.Command {
 				return err
 			}
 			return app.withLock(cmd.Context(), func() error {
-				cfg, err := app.config.LoadConfig()
-				if err != nil {
-					return err
-				}
-				teamName := args[0]
-				if _, ok := cfg.Teams[teamName]; !ok {
-					return fmt.Errorf("team %q is not connected; run `s46 connect %s` first", teamName, teamName)
-				}
-				cfg.ActiveTeam = teamName
-				if err := app.config.SaveConfig(cfg); err != nil {
-					return err
-				}
-				if opts.json {
-					return app.renderer.WriteJSON(map[string]any{"activeTeam": teamName})
-				}
-				return app.renderer.Lines(fmt.Sprintf("[s46] active team: %s", teamName))
+				return runTeamsUse(app, args[0])
 			})
 		},
 	}
+}
+
+type teamListEntry struct {
+	Name     string `json:"name"`
+	Active   bool   `json:"active"`
+	Mode     string `json:"mode"`
+	Lane     string `json:"lane"`
+	Harness  string `json:"harness"`
+	Model    string `json:"model"`
+	Endpoint string `json:"endpoint"`
+}
+
+func runTeamsList(app *app) error {
+	cfg, err := app.config.LoadConfig()
+	if err != nil {
+		return err
+	}
+	entries := teamListEntries(cfg)
+	if app.options.json {
+		return app.renderer.WriteJSON(map[string]any{"activeTeam": cfg.ActiveTeam, "teams": entries})
+	}
+	if len(entries) == 0 {
+		return app.renderer.Lines("[s46] no connected teams", "[s46] connect with: s46 connect <team> --harness=<name>")
+	}
+	return app.renderer.Lines(renderTeamsList(entries)...)
+}
+
+func teamListEntries(cfg config.Config) []teamListEntry {
+	names := make([]string, 0, len(cfg.Teams))
+	for name := range cfg.Teams {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	entries := make([]teamListEntry, 0, len(names))
+	for _, name := range names {
+		team := cfg.Teams[name]
+		entries = append(entries, teamListEntry{
+			Name:     name,
+			Active:   name == cfg.ActiveTeam,
+			Mode:     team.Mode,
+			Lane:     team.Lane,
+			Harness:  firstNonEmpty(team.DefaultHarness, "standard"),
+			Model:    team.DefaultModel,
+			Endpoint: team.Endpoint,
+		})
+	}
+	return entries
+}
+
+func renderTeamsList(entries []teamListEntry) []string {
+	rows := make([][]string, 0, len(entries)+1)
+	rows = append(rows, []string{"ACTIVE", "TEAM", "MODE", "LANE", "HARNESS", "MODEL", "ENDPOINT"})
+	for _, entry := range entries {
+		active := ""
+		if entry.Active {
+			active = "*"
+		}
+		rows = append(rows, []string{active, entry.Name, entry.Mode, entry.Lane, entry.Harness, entry.Model, entry.Endpoint})
+	}
+	lines := []string{"[s46] connected teams:"}
+	lines = append(lines, output.Table(rows[0], rows[1:])...)
+	return lines
+}
+
+func runTeamsUse(app *app, teamName string) error {
+	cfg, err := app.config.LoadConfig()
+	if err != nil {
+		return err
+	}
+	if _, ok := cfg.Teams[teamName]; !ok {
+		return fmt.Errorf("team %q is not connected; run `s46 connect %s` first", teamName, teamName)
+	}
+	cfg.ActiveTeam = teamName
+	if err := app.config.SaveConfig(cfg); err != nil {
+		return err
+	}
+	if app.options.json {
+		return app.renderer.WriteJSON(map[string]any{"activeTeam": teamName})
+	}
+	return app.renderer.Lines(fmt.Sprintf("[s46] active team: %s", teamName))
 }
 
 type statusCheck struct {
@@ -1866,6 +1973,7 @@ func airplaneLogsCommand(runtime Runtime, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			files = resolveAirplaneLogFiles(app.runtime.Env, files)
 			if opts.json {
 				return app.renderer.WriteJSON(map[string]any{"logs": files})
 			}
@@ -1893,13 +2001,184 @@ func selectedAirplaneLogFiles(files []airplane.LogFile, selected string) ([]airp
 	return nil, fmt.Errorf("unknown log %q; expected ollama, gateway, or all", selected)
 }
 
+func resolveAirplaneLogFiles(env map[string]string, files []airplane.LogFile) []airplane.LogFile {
+	resolved := make([]airplane.LogFile, 0, len(files))
+	for _, file := range files {
+		if fileExists(file.Path) {
+			resolved = append(resolved, file)
+			continue
+		}
+		if discovered := discoverAirplaneLogPath(env, file); discovered != "" {
+			file.Path = discovered
+		}
+		resolved = append(resolved, file)
+	}
+	return resolved
+}
+
+func discoverAirplaneLogPath(env map[string]string, file airplane.LogFile) string {
+	if override := testAirplaneLogPath(env, file.Name); override != "" {
+		return override
+	}
+	filename := filepath.Base(file.Path)
+	candidates := []string{}
+	if port := airplaneLogPort(env, file.Name); port != "" {
+		for _, pid := range listeningProcessIDs(port) {
+			candidates = append(candidates, processOpenLogPaths(pid, filename)...)
+		}
+	}
+	candidates = append(candidates, devShellLogCandidates(filename)...)
+	return newestExistingFile(candidates)
+}
+
+func testAirplaneLogPath(env map[string]string, name string) string {
+	if env == nil {
+		return ""
+	}
+	path := strings.TrimSpace(env["S46_TEST_LOG_"+strings.ToUpper(name)])
+	if fileExists(path) {
+		return path
+	}
+	return ""
+}
+
+func airplaneLogPort(env map[string]string, name string) string {
+	switch name {
+	case "ollama":
+		return portFromURL(firstNonEmpty(envValue(env, "S46_LOCAL_OLLAMA_URL"), airplane.LocalOllamaURL))
+	case "gateway":
+		return portFromURL(firstNonEmpty(envValue(env, "S46_AIRPLANE_GATEWAY_URL"), airplane.LocalGatewayURL))
+	default:
+		return ""
+	}
+}
+
+func portFromURL(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	if port := parsed.Port(); port != "" {
+		return port
+	}
+	return defaultPort(parsed.Scheme)
+}
+
+func envValue(env map[string]string, key string) string {
+	if env == nil {
+		return os.Getenv(key)
+	}
+	return env[key]
+}
+
+func listeningProcessIDs(port string) []string {
+	lsof, err := exec.LookPath("lsof")
+	if err != nil {
+		return nil
+	}
+	output, err := exec.Command(lsof, "-nP", "-iTCP:"+port, "-sTCP:LISTEN", "-Fp").Output()
+	if err != nil {
+		return nil
+	}
+	return parseLsofProcessIDs(output)
+}
+
+func parseLsofProcessIDs(output []byte) []string {
+	ids := []string{}
+	seen := map[string]bool{}
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		if !strings.HasPrefix(line, "p") {
+			continue
+		}
+		id := strings.TrimSpace(strings.TrimPrefix(line, "p"))
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func processOpenLogPaths(pid string, filename string) []string {
+	lsof, err := exec.LookPath("lsof")
+	if err != nil {
+		return nil
+	}
+	output, err := exec.Command(lsof, "-nP", "-p", pid, "-a", "-d", "1,2", "-Fn").Output()
+	if err != nil {
+		return nil
+	}
+	return parseLsofOpenLogPaths(output, filename)
+}
+
+func parseLsofOpenLogPaths(output []byte, filename string) []string {
+	paths := []string{}
+	seen := map[string]bool{}
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		if !strings.HasPrefix(line, "n") {
+			continue
+		}
+		path := strings.TrimPrefix(line, "n")
+		if filepath.Base(path) != filename || seen[path] {
+			continue
+		}
+		seen[path] = true
+		paths = append(paths, path)
+	}
+	return paths
+}
+
+func devShellLogCandidates(filename string) []string {
+	patterns := []string{
+		filepath.Join(os.TempDir(), "s46-dev-shell.*", "home", ".cache", "s46", filename),
+		filepath.Join(os.TempDir(), "s46-*", "home", ".cache", "s46", filename),
+	}
+	candidates := []string{}
+	for _, pattern := range patterns {
+		matches, _ := filepath.Glob(pattern)
+		candidates = append(candidates, matches...)
+	}
+	return candidates
+}
+
+func newestExistingFile(paths []string) string {
+	var newest string
+	var newestTime time.Time
+	seen := map[string]bool{}
+	for _, path := range paths {
+		if path == "" || seen[path] {
+			continue
+		}
+		seen[path] = true
+		info, err := os.Stat(path)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		if newest == "" || info.ModTime().After(newestTime) {
+			newest = path
+			newestTime = info.ModTime()
+		}
+	}
+	return newest
+}
+
+func fileExists(path string) bool {
+	if path == "" {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
+}
+
 func renderAirplaneLogs(app *app, files []airplane.LogFile, lines int) error {
 	outputLines := []string{}
 	for _, file := range files {
 		outputLines = append(outputLines, fmt.Sprintf("[s46] %s log: %s", file.Name, file.Path))
 		if _, err := os.Stat(file.Path); err != nil {
 			if os.IsNotExist(err) {
-				outputLines = append(outputLines, "[s46] log not found; this process may have been started outside this shell")
+				outputLines = append(outputLines, "[s46] log not found in this shell or attached running process")
+				outputLines = append(outputLines, "[s46] if you started it manually, its logs are in that process's terminal")
 				continue
 			}
 			return err
@@ -2191,14 +2470,14 @@ func renderAirplaneReport(report airplane.Report) []string {
 	if !checkOK(report, "memory") && report.MemoryGB > 0 {
 		lines = append(lines,
 			fmt.Sprintf("[s46] This machine has %d GB memory.", report.MemoryGB),
-			"[s46] s46/local-coder recommends 32–64 GB.",
+			"[s46] s46/devstral-small-2-24b recommends 32–64 GB.",
 			"[s46] Use cloud mode or choose a smaller local model when available.",
 		)
 	}
 	if !checkOK(report, "disk") && report.FreeDiskGB > 0 {
 		lines = append(lines,
 			fmt.Sprintf("[s46] %d GB free disk detected.", report.FreeDiskGB),
-			"[s46] s46/local-coder setup needs about 30 GB free.",
+			"[s46] s46/devstral-small-2-24b setup needs about 30 GB free.",
 		)
 	}
 	if report.Ready {

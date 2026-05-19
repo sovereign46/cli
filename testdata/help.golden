@@ -19,9 +19,9 @@ Available Commands:
   sessions    list local and remote sessions
   share       mock Pi-style HTML share via secret gist
   status      show active team, lane, harness, mode, and checks
+  teams       list and switch connected teams
   token       print a bearer token for harness helpers
   update      check for updates using Homebrew-safe instructions
-  use         switch the active connected team
   version     print build version information
   whoami      print the authenticated user
 

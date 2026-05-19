@@ -370,13 +370,13 @@ func TestAirplaneModeOnAndCloudModeRestoreEndpoint(t *testing.T) {
 	requireOK(t, run(t, env, "connect", "acme", "--harness=standard"))
 
 	on := requireOK(t, run(t, env, "mode", "airplane"))
-	for _, want := range []string{"[s46] airplane setup: ready", "[s46✈] mode: airplane", "[s46✈] endpoint: http://127.0.0.1:8080", "[s46✈] model: s46/local-coder"} {
+	for _, want := range []string{"[s46] airplane setup: ready", "[s46✈] mode: airplane", "[s46✈] endpoint: http://127.0.0.1:8080", "[s46✈] model: s46/devstral-small-2-24b"} {
 		if !strings.Contains(on, want) {
 			t.Fatalf("airplane output missing %q:\n%s", want, on)
 		}
 	}
 	status := requireOK(t, run(t, env, "status"))
-	if !strings.Contains(status, "[s46✈] mode:    airplane") || !strings.Contains(status, "[s46✈] model:   s46/local-coder") {
+	if !strings.Contains(status, "[s46✈] mode:    airplane") || !strings.Contains(status, "[s46✈] model:   s46/devstral-small-2-24b") {
 		t.Fatalf("unexpected airplane status:\n%s", status)
 	}
 	modeJSON := requireOK(t, run(t, env, "mode", "--json"))
@@ -469,7 +469,7 @@ func TestAirplaneSetupCanTurnOnAirplaneModeWithoutLogin(t *testing.T) {
 	status := requireOK(t, run(t, env, "status"))
 	for _, want := range []string{
 		"[s46✈] team:    local",
-		"[s46✈] model:   s46/local-coder",
+		"[s46✈] model:   s46/devstral-small-2-24b",
 		"[s46✈] local ollama: http://127.0.0.1:11434 · port 11434 · pid 111 (ollama)",
 		"[s46✈] local api:    http://127.0.0.1:8080 · port 8080 · pid 222 (s46-api)",
 	} {
@@ -586,6 +586,33 @@ func TestAirplaneLogsShowsKnownLogFiles(t *testing.T) {
 	}
 }
 
+func TestAirplaneLogsCanUseDiscoveredExternalLog(t *testing.T) {
+	env := testEnv(t)
+	external := filepath.Join(t.TempDir(), "s46-api-airplane.log")
+	if err := os.WriteFile(external, []byte("outside shell\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env["S46_TEST_LOG_GATEWAY"] = external
+
+	out := requireOK(t, run(t, env, "airplane", "logs", "gateway"))
+	for _, want := range []string{"[s46] gateway log: " + external, "outside shell"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("logs output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestParseLsofOpenLogPaths(t *testing.T) {
+	paths := parseLsofOpenLogPaths([]byte("p123\nf1\nn/tmp/s46/ollama.log\nf2\nn/tmp/s46/ollama.log\nf3\nn/tmp/s46/other.log\n"), "ollama.log")
+	if len(paths) != 1 || paths[0] != "/tmp/s46/ollama.log" {
+		t.Fatalf("paths = %#v", paths)
+	}
+	ids := parseLsofProcessIDs([]byte("p123\nf5\np123\np456\n"))
+	if len(ids) != 2 || ids[0] != "123" || ids[1] != "456" {
+		t.Fatalf("ids = %#v", ids)
+	}
+}
+
 func TestAirplaneSetupPromptCanBeCanceledWithCtrlD(t *testing.T) {
 	env := testEnv(t)
 	result := runWithStdin(t, env, strings.NewReader(""), "airplane", "setup")
@@ -635,7 +662,7 @@ func TestAirplaneSetupReportsInsufficientHardware(t *testing.T) {
 	env["S46_TEST_GATEWAY_READY"] = "0"
 
 	out := requireOK(t, run(t, env, "airplane", "setup"))
-	for _, want := range []string{"[s46] This machine has 16 GB memory.", "[s46] s46/local-coder recommends 32–64 GB.", "[s46] 18 GB free disk detected.", "[s46] s46/local-coder setup needs about 30 GB free.", "[s46] Airplane mode was not offered because setup is incomplete."} {
+	for _, want := range []string{"[s46] This machine has 16 GB memory.", "[s46] s46/devstral-small-2-24b recommends 32–64 GB.", "[s46] 18 GB free disk detected.", "[s46] s46/devstral-small-2-24b setup needs about 30 GB free.", "[s46] Airplane mode was not offered because setup is incomplete."} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("setup output missing %q:\n%s", want, out)
 		}
@@ -729,6 +756,41 @@ func TestStatusModeSessionsAndShare(t *testing.T) {
 	}
 }
 
+func TestTeamsListShowsConnectedTeamsAndActiveTeam(t *testing.T) {
+	env := testEnv(t)
+	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "connect", "acme", "--harness=standard"))
+	requireOK(t, run(t, env, "connect", "beta", "--harness=standard", "--model=s46/qwen3-coder"))
+
+	out := requireOK(t, run(t, env, "teams", "list"))
+	for _, want := range []string{
+		"[s46] connected teams:",
+		"ACTIVE  TEAM  MODE   LANE    HARNESS   MODEL            ENDPOINT",
+		"        acme  cloud  EU-OPO  standard  s46/kimi-k2.6    https://acme.s46.dev",
+		"*       beta  cloud  EU-OPO  standard  s46/qwen3-coder  https://beta.s46.dev",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("teams list missing %q:\n%s", want, out)
+		}
+	}
+
+	raw := requireOK(t, run(t, env, "teams", "list", "--json"))
+	var payload struct {
+		ActiveTeam string `json:"activeTeam"`
+		Teams      []struct {
+			Name   string `json:"name"`
+			Active bool   `json:"active"`
+			Model  string `json:"model"`
+		} `json:"teams"`
+	}
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.ActiveTeam != "beta" || len(payload.Teams) != 2 || !payload.Teams[1].Active || payload.Teams[1].Model != "s46/qwen3-coder" {
+		t.Fatalf("unexpected teams json: %s", raw)
+	}
+}
+
 func TestSessionLifecycleAndRunSlug(t *testing.T) {
 	env := testEnv(t)
 	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
@@ -795,19 +857,30 @@ func TestStatusAfterLoginDoesNotRequireHarnessConnect(t *testing.T) {
 	}
 }
 
-func TestUseWithoutTeamShowsExpectedInput(t *testing.T) {
+func TestTeamsUseWithoutTeamShowsExpectedInput(t *testing.T) {
 	env := testEnv(t)
-	result := run(t, env, "use")
+	result := run(t, env, "teams", "use")
 	if result.err == nil {
-		t.Fatal("expected use without team to fail")
+		t.Fatal("expected teams use without team to fail")
 	}
 	message := result.err.Error()
-	if !strings.Contains(message, "missing team") || !strings.Contains(message, "[s46] expected: s46 use <team>") {
+	if !strings.Contains(message, "missing team") || !strings.Contains(message, "[s46] expected: s46 teams use <team>") {
 		t.Fatalf("unexpected error: %v", result.err)
 	}
 }
 
-func TestDisconnectUseStatusAndModeRequireActiveTeam(t *testing.T) {
+func TestRootUseCommandIsRemoved(t *testing.T) {
+	env := testEnv(t)
+	result := run(t, env, "use", "acme")
+	if result.err == nil {
+		t.Fatal("expected root use command to fail")
+	}
+	if !strings.Contains(result.err.Error(), `unknown command "use" for "s46"`) {
+		t.Fatalf("unexpected error: %v", result.err)
+	}
+}
+
+func TestDisconnectTeamsUseStatusAndModeRequireActiveTeam(t *testing.T) {
 	env := testEnv(t)
 	airplaneOut := requireOK(t, run(t, env, "mode", "airplane"))
 	if !strings.Contains(airplaneOut, "[s46✈] team: local") {
@@ -819,7 +892,7 @@ func TestDisconnectUseStatusAndModeRequireActiveTeam(t *testing.T) {
 	if out := requireOK(t, run(t, env, "status")); !strings.Contains(out, "[ok] tenant") || !strings.Contains(out, "[ok] harness") {
 		t.Fatalf("unexpected status output: %s", out)
 	}
-	requireOK(t, run(t, env, "use", "acme"))
+	requireOK(t, run(t, env, "teams", "use", "acme"))
 	settingsPath := filepath.Join(env["HOME"], ".claude", "settings.json")
 	requireOK(t, run(t, env, "disconnect", "acme", "--harness=claude-code"))
 	settings := map[string]any{}
@@ -827,8 +900,8 @@ func TestDisconnectUseStatusAndModeRequireActiveTeam(t *testing.T) {
 	if _, ok := settings["apiKeyHelper"]; ok {
 		t.Fatalf("disconnect left apiKeyHelper: %#v", settings)
 	}
-	if result := run(t, env, "use", "acme"); result.err == nil || !strings.Contains(result.err.Error(), "not connected") {
-		t.Fatalf("expected use failure after disconnect, got %#v", result)
+	if result := run(t, env, "teams", "use", "acme"); result.err == nil || !strings.Contains(result.err.Error(), "not connected") {
+		t.Fatalf("expected teams use failure after disconnect, got %#v", result)
 	}
 }
 

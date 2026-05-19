@@ -57,6 +57,7 @@ type Device struct {
 	Name       string    `json:"name"`
 	CreatedAt  time.Time `json:"createdAt"`
 	LastSeenAt time.Time `json:"lastSeenAt"`
+	LastSeenIP string    `json:"lastSeenIp,omitempty"`
 }
 
 type User struct {

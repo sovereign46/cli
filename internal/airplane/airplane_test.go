@@ -67,6 +67,14 @@ func TestEnsureOllamaDirsCreatesHostHomeAndModelDirs(t *testing.T) {
 	}
 }
 
+func TestLogFilesUseExplicitLogDir(t *testing.T) {
+	logDir := t.TempDir()
+	files := Service{Env: map[string]string{"S46_LOG_DIR": logDir}}.LogFiles()
+	if len(files) != 2 || files[0].Path != filepath.Join(logDir, "ollama.log") || files[1].Path != filepath.Join(logDir, "s46-api-airplane.log") {
+		t.Fatalf("unexpected log files: %#v", files)
+	}
+}
+
 func TestOllamaEnvUsesHostHomeWithoutDuplicateKeys(t *testing.T) {
 	sandboxHome := t.TempDir()
 	hostHome := t.TempDir()
@@ -141,7 +149,7 @@ func TestCheckRequiresAirplaneReadyGateway(t *testing.T) {
 		case "/v1/models":
 			_, _ = w.Write([]byte(`{"data":[]}`))
 		case "/v1/workers":
-			_, _ = w.Write([]byte(`{"workers":[{"id":"local-ollama","mode":"airplane","state":"not_configured","models":[{"id":"s46/local-coder","state":"missing"}]}]}`))
+			_, _ = w.Write([]byte(`{"workers":[{"id":"local-ollama","mode":"airplane","state":"not_configured","models":[{"id":"s46/devstral-small-2-24b","state":"missing"}]}]}`))
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}

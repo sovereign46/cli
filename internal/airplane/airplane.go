@@ -26,7 +26,7 @@ const (
 	Prefix             = "[s46✈]"
 	LocalGatewayURL    = "http://127.0.0.1:8080"
 	LocalOllamaURL     = "http://127.0.0.1:11434"
-	LocalModelID       = "s46/local-coder"
+	LocalModelID       = "s46/devstral-small-2-24b"
 	BackendModel       = "devstral-small-2:24b-instruct-2512-q4_K_M"
 	GatewayBinaryName  = "s46-api"
 	DefaultGatewayRepo = "sovereign46/s46-api"
@@ -924,6 +924,9 @@ func (s Service) setEnv(key string, value string) {
 }
 
 func cacheDir(env map[string]string) string {
+	if value := strings.TrimSpace(envValue(env, "S46_LOG_DIR")); value != "" {
+		return value
+	}
 	if value := strings.TrimSpace(envValue(env, "XDG_CACHE_HOME")); value != "" {
 		return filepath.Join(value, "s46")
 	}

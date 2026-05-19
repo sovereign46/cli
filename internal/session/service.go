@@ -105,7 +105,7 @@ func (s Service) sessionsForbiddenError(ctx context.Context, ctxState workspaceC
 			account = "this account"
 		}
 		parts = append(parts, fmt.Sprintf("the API says this login belongs to team %s, but the active team is %s", user.Team, ctxState.TeamName))
-		parts = append(parts, fmt.Sprintf("run `s46 use %s` or ask an admin to add %s to team %s", user.Team, account, ctxState.TeamName))
+		parts = append(parts, fmt.Sprintf("run `s46 teams use %s` or ask an admin to add %s to team %s", user.Team, account, ctxState.TeamName))
 		return errors.New(strings.Join(parts, ". "))
 	}
 	if user.Team != "" {

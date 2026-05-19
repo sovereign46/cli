@@ -108,7 +108,7 @@ func (c *MockClient) Devices(ctx context.Context, accessToken string) ([]Device,
 		name = "Mock device"
 	}
 	now := time.Now().UTC()
-	return []Device{{ID: deviceID, Name: name, CreatedAt: now, LastSeenAt: now}}, nil
+	return []Device{{ID: deviceID, Name: name, CreatedAt: now, LastSeenAt: now, LastSeenIP: "127.0.0.1"}}, nil
 }
 
 func (c *MockClient) DeleteDevice(ctx context.Context, deviceID string, accessToken string) error {
