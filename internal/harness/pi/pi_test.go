@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/sovereign46/s46-cli/internal/airplane"
 	"github.com/sovereign46/s46-cli/internal/api"
 	"github.com/sovereign46/s46-cli/internal/harness"
 )
@@ -37,5 +38,25 @@ func TestPlanConnectPreservesProvidersAndAddsS46(t *testing.T) {
 	s46 := providers["s46"].(map[string]any)
 	if s46["baseUrl"] != "https://acme.s46.dev/v1" || s46["api"] != "openai-completions" || s46["apiKey"] != "!s46 token --refresh" || s46["authHeader"] != true {
 		t.Fatalf("unexpected s46 provider: %#v", s46)
+	}
+}
+
+func TestPlanConnectUsesAirplaneModelLimits(t *testing.T) {
+	home := t.TempDir()
+	env := map[string]string{"HOME": home, "S46_AIRPLANE_CONTEXT": "16384", "S46_AIRPLANE_MAX_TOKENS": "2048"}
+	team := api.Team{Name: "local", Endpoint: airplane.LocalGatewayURL, Mode: airplane.ModeAirplane, Models: []string{airplane.LocalModelID}, DefaultModel: airplane.LocalModelID}
+	plan, err := New().PlanConnect(context.Background(), harness.ConnectRequest{Env: env, Team: team, Model: airplane.LocalModelID, Mode: airplane.ModeAirplane})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var models map[string]any
+	if err := json.Unmarshal(plan.Files[0].Content, &models); err != nil {
+		t.Fatal(err)
+	}
+	s46 := models["providers"].(map[string]any)["s46"].(map[string]any)
+	configuredModels := s46["models"].([]any)
+	model := configuredModels[0].(map[string]any)
+	if model["contextWindow"] != float64(16384) || model["maxTokens"] != float64(2048) {
+		t.Fatalf("unexpected airplane limits: %#v", model)
 	}
 }

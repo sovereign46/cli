@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sovereign46/s46-cli/internal/airplane"
 	"github.com/sovereign46/s46-cli/internal/config"
 	"github.com/sovereign46/s46-cli/internal/harness"
 )
@@ -51,7 +52,7 @@ func (a Adapter) PlanConnect(ctx context.Context, req harness.ConnectRequest) (h
 		"api":        "openai-completions",
 		"apiKey":     "!s46 token --refresh",
 		"authHeader": true,
-		"models":     piModels(req.Team.Models),
+		"models":     piModels(req.Team.Models, req.Mode, req.Env),
 	}
 	existing["providers"] = providers
 	content, err := json.MarshalIndent(existing, "", "  ")
@@ -125,7 +126,13 @@ func (a Adapter) ApplyConnect(ctx context.Context, plan harness.Plan) (harness.A
 	return harness.ApplyPlan(nil, plan)
 }
 
-func piModels(ids []string) []map[string]any {
+func piModels(ids []string, mode string, env map[string]string) []map[string]any {
+	contextWindow := 128000
+	maxTokens := 32000
+	if mode == airplane.ModeAirplane {
+		contextWindow = airplane.ContextWindow(env)
+		maxTokens = airplane.MaxTokens(env)
+	}
 	models := make([]map[string]any, 0, len(ids))
 	for _, id := range ids {
 		models = append(models, map[string]any{
@@ -133,8 +140,8 @@ func piModels(ids []string) []map[string]any {
 			"name":          modelName(id),
 			"reasoning":     strings.Contains(id, "kimi") || strings.Contains(id, "deepseek") || strings.Contains(id, "qwen"),
 			"input":         []string{"text"},
-			"contextWindow": 128000,
-			"maxTokens":     32000,
+			"contextWindow": contextWindow,
+			"maxTokens":     maxTokens,
 			"cost": map[string]float64{
 				"input":      0,
 				"output":     0,

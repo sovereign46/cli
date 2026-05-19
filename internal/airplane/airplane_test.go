@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -92,6 +93,60 @@ func TestHTTPClientUsesRequestedTimeout(t *testing.T) {
 	client := service.httpClient(5 * time.Minute)
 	if client.Timeout != 5*time.Minute {
 		t.Fatalf("expected requested timeout, got %s", client.Timeout)
+	}
+}
+
+func TestAirplaneRuntimeEnvDefaultsAndOverrides(t *testing.T) {
+	if ContextWindow(nil) != 32768 || MaxTokens(nil) != 4096 || KeepAlive(nil) != "60s" || NumParallel(nil) != 1 || MaxLoadedModels(nil) != 1 {
+		t.Fatalf("unexpected defaults")
+	}
+	env := map[string]string{
+		"S46_AIRPLANE_CONTEXT":           "65536",
+		"S46_AIRPLANE_MAX_TOKENS":        "8192",
+		"S46_AIRPLANE_KEEP_ALIVE":        "5m",
+		"S46_AIRPLANE_NUM_PARALLEL":      "2",
+		"S46_AIRPLANE_MAX_LOADED_MODELS": "3",
+	}
+	if ContextWindow(env) != 65536 || MaxTokens(env) != 8192 || KeepAlive(env) != "5m" || NumParallel(env) != 2 || MaxLoadedModels(env) != 3 {
+		t.Fatalf("unexpected overrides")
+	}
+}
+
+func TestModelProbeSendsAirplaneRuntimeLimits(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/generate" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		options := body["options"].(map[string]any)
+		if options["num_ctx"] != float64(16384) || body["keep_alive"] != "30s" {
+			t.Fatalf("unexpected probe body: %#v", body)
+		}
+		_, _ = w.Write([]byte(`{"response":"pong"}`))
+	}))
+	defer server.Close()
+
+	ok, message := Service{Env: map[string]string{"S46_LOCAL_OLLAMA_URL": server.URL, "S46_AIRPLANE_CONTEXT": "16384", "S46_AIRPLANE_KEEP_ALIVE": "30s"}, Client: server.Client()}.modelProbe(context.Background())
+	if !ok || !strings.Contains(message, LocalModelID) {
+		t.Fatalf("unexpected probe result ok=%v message=%q", ok, message)
+	}
+}
+
+func TestStartOllamaStopsLoadedModelWhenContextIsTooLarge(t *testing.T) {
+	env := map[string]string{
+		"S46_TEST_OLLAMA_RUNNING":        "1",
+		"S46_TEST_OLLAMA_LOADED_CONTEXT": "262144",
+		"S46_TEST_OLLAMA_PATH":           "/opt/homebrew/bin/ollama",
+		"S46_TEST_STOP_OLLAMA_MODEL_OK":  "1",
+	}
+	if err := (Service{Env: env}).StartOllama(); err != nil {
+		t.Fatal(err)
+	}
+	if env["S46_TEST_OLLAMA_LOADED_CONTEXT"] != "32768" {
+		t.Fatalf("expected loaded model context to be reset, env=%#v", env)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sovereign46/s46-cli/internal/airplane"
 	"github.com/sovereign46/s46-cli/internal/config"
 	"github.com/sovereign46/s46-cli/internal/harness"
 )
@@ -104,7 +105,7 @@ func codexBlock(req harness.ConnectRequest) string {
 }
 
 func codexBlockBody(req harness.ConnectRequest) string {
-	return strings.Join([]string{
+	lines := []string{
 		"[model_providers.s46]",
 		`name = "Sovereign46"`,
 		fmt.Sprintf("base_url = %q", req.Team.Endpoint+"/codex"),
@@ -115,7 +116,14 @@ func codexBlockBody(req harness.ConnectRequest) string {
 		`model_provider = "s46"`,
 		fmt.Sprintf("model = %q", req.Model),
 		`approval_policy = "on-request"`,
-	}, "\n")
+	}
+	if req.Mode == airplane.ModeAirplane {
+		lines = append(lines,
+			fmt.Sprintf("model_context_window = %d", airplane.ContextWindow(req.Env)),
+			fmt.Sprintf("model_max_output_tokens = %d", airplane.MaxTokens(req.Env)),
+		)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func removeMarkedBlock(existing string, name string) string {
@@ -200,10 +208,13 @@ func validateManagedBlock(block string) error {
 		}
 		if strings.HasPrefix(trimmed, `name = "Sovereign46"`) ||
 			strings.HasPrefix(trimmed, `base_url = "https://`) && strings.HasSuffix(trimmed, `/codex"`) ||
+			strings.HasPrefix(trimmed, `base_url = "http://127.0.0.1:`) && strings.HasSuffix(trimmed, `/codex"`) ||
 			trimmed == `wire_api = "responses"` ||
 			trimmed == `token_helper = "s46 token --refresh"` ||
 			trimmed == `model_provider = "s46"` ||
 			strings.HasPrefix(trimmed, `model = "s46/`) ||
+			strings.HasPrefix(trimmed, `model_context_window = `) ||
+			strings.HasPrefix(trimmed, `model_max_output_tokens = `) ||
 			trimmed == `approval_policy = "on-request"` {
 			continue
 		}

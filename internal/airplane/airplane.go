@@ -21,18 +21,23 @@ import (
 )
 
 const (
-	ModeCloud          = "cloud"
-	ModeAirplane       = "airplane"
-	Prefix             = "[s46✈]"
-	LocalGatewayURL    = "http://127.0.0.1:8080"
-	LocalOllamaURL     = "http://127.0.0.1:11434"
-	LocalModelID       = "s46/devstral-small-2-24b"
-	BackendModel       = "devstral-small-2:24b-instruct-2512-q4_K_M"
-	GatewayBinaryName  = "s46-api"
-	DefaultGatewayRepo = "sovereign46/api"
-	MinMemoryBytes     = int64(32 * 1000 * 1000 * 1000)
-	RecMemoryBytes     = int64(64 * 1000 * 1000 * 1000)
-	MinDiskBytes       = int64(30 * 1000 * 1000 * 1000)
+	ModeCloud              = "cloud"
+	ModeAirplane           = "airplane"
+	Prefix                 = "[s46✈]"
+	LocalGatewayURL        = "http://127.0.0.1:8080"
+	LocalOllamaURL         = "http://127.0.0.1:11434"
+	LocalModelID           = "s46/devstral-small-2-24b"
+	BackendModel           = "devstral-small-2:24b-instruct-2512-q4_K_M"
+	GatewayBinaryName      = "s46-api"
+	DefaultGatewayRepo     = "sovereign46/api"
+	DefaultContextWindow   = 32768
+	DefaultMaxTokens       = 4096
+	DefaultKeepAlive       = "60s"
+	DefaultNumParallel     = 1
+	DefaultMaxLoadedModels = 1
+	MinMemoryBytes         = int64(32 * 1000 * 1000 * 1000)
+	RecMemoryBytes         = int64(64 * 1000 * 1000 * 1000)
+	MinDiskBytes           = int64(30 * 1000 * 1000 * 1000)
 )
 
 const (
@@ -176,7 +181,7 @@ func (s Service) StartOllama() error {
 		return nil
 	}
 	if s.ollamaRunning(context.Background()) {
-		return nil
+		return s.ensureOllamaContextLimit(context.Background())
 	}
 	if truthy(s.env("S46_TEST_START_OLLAMA_OK")) {
 		s.setEnv("S46_TEST_OLLAMA_RUNNING", "1")
@@ -190,7 +195,7 @@ func (s Service) StartOllama() error {
 		return err
 	}
 	cmd := exec.Command(path, "serve")
-	cmd.Env = s.ollamaEnv("OLLAMA_FLASH_ATTENTION=1", "OLLAMA_KV_CACHE_TYPE=q8_0")
+	cmd.Env = s.ollamaEnv(AirplaneOllamaEnv(s.Env)...)
 	return s.startDetached(cmd, "ollama.log")
 }
 
@@ -214,7 +219,8 @@ func (s Service) StartGateway() error {
 	}
 	cmd := exec.Command(command.Path, command.Args...)
 	cmd.Dir = command.Dir
-	cmd.Env = s.processEnv("S46_ENV=airplane", "S46_ADDR=127.0.0.1:8080", "S46_LOCAL_OLLAMA_URL="+s.ollamaURL(), "S46_LOCAL_MODEL="+s.backendModel())
+	env := append([]string{"S46_ENV=airplane", "S46_ADDR=127.0.0.1:8080", "S46_LOCAL_OLLAMA_URL=" + s.ollamaURL(), "S46_LOCAL_MODEL=" + s.backendModel()}, AirplaneGatewayEnv(s.Env)...)
+	cmd.Env = s.processEnv(env...)
 	return s.startDetached(cmd, "s46-api-airplane.log")
 }
 
@@ -358,6 +364,59 @@ func (s Service) GatewayDownloadAvailable() bool {
 		return false
 	}
 	return runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64"
+}
+
+func AirplaneOllamaEnv(env map[string]string) []string {
+	return []string{
+		"OLLAMA_CONTEXT_LENGTH=" + strconv.Itoa(ContextWindow(env)),
+		"OLLAMA_KEEP_ALIVE=" + KeepAlive(env),
+		"OLLAMA_NUM_PARALLEL=" + strconv.Itoa(NumParallel(env)),
+		"OLLAMA_MAX_LOADED_MODELS=" + strconv.Itoa(MaxLoadedModels(env)),
+		"OLLAMA_FLASH_ATTENTION=1",
+		"OLLAMA_KV_CACHE_TYPE=q8_0",
+	}
+}
+
+func AirplaneGatewayEnv(env map[string]string) []string {
+	return []string{
+		"S46_AIRPLANE_CONTEXT=" + strconv.Itoa(ContextWindow(env)),
+		"S46_AIRPLANE_MAX_TOKENS=" + strconv.Itoa(MaxTokens(env)),
+		"S46_AIRPLANE_KEEP_ALIVE=" + KeepAlive(env),
+	}
+}
+
+func ContextWindow(env map[string]string) int {
+	return positiveIntSetting(env, DefaultContextWindow, "S46_AIRPLANE_CONTEXT", "OLLAMA_CONTEXT_LENGTH")
+}
+
+func MaxTokens(env map[string]string) int {
+	return positiveIntSetting(env, DefaultMaxTokens, "S46_AIRPLANE_MAX_TOKENS")
+}
+
+func KeepAlive(env map[string]string) string {
+	return nonEmpty(envValue(env, "S46_AIRPLANE_KEEP_ALIVE"), envValue(env, "OLLAMA_KEEP_ALIVE"), DefaultKeepAlive)
+}
+
+func NumParallel(env map[string]string) int {
+	return positiveIntSetting(env, DefaultNumParallel, "S46_AIRPLANE_NUM_PARALLEL", "OLLAMA_NUM_PARALLEL")
+}
+
+func MaxLoadedModels(env map[string]string) int {
+	return positiveIntSetting(env, DefaultMaxLoadedModels, "S46_AIRPLANE_MAX_LOADED_MODELS", "OLLAMA_MAX_LOADED_MODELS")
+}
+
+func positiveIntSetting(env map[string]string, fallback int, keys ...string) int {
+	for _, key := range keys {
+		value := strings.TrimSpace(envValue(env, key))
+		if value == "" {
+			continue
+		}
+		parsed, err := strconv.Atoi(value)
+		if err == nil && parsed > 0 {
+			return parsed
+		}
+	}
+	return fallback
 }
 
 func (s Service) GatewayInstallDescription() string {
@@ -696,6 +755,66 @@ func (s Service) modelDownloaded(ctx context.Context) bool {
 	return false
 }
 
+func (s Service) ensureOllamaContextLimit(ctx context.Context) error {
+	loadedContext, ok := s.loadedBackendModelContext(ctx)
+	if !ok || loadedContext <= ContextWindow(s.Env) {
+		return nil
+	}
+	return s.stopLoadedBackendModel(ctx)
+}
+
+func (s Service) loadedBackendModelContext(ctx context.Context) (int, bool) {
+	if value := strings.TrimSpace(s.env("S46_TEST_OLLAMA_LOADED_CONTEXT")); value != "" {
+		parsed, _ := strconv.Atoi(value)
+		return parsed, parsed > 0
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(s.ollamaURL(), "/")+"/api/ps", nil)
+	if err != nil {
+		return 0, false
+	}
+	response, err := s.httpClient().Do(request)
+	if err != nil {
+		return 0, false
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return 0, false
+	}
+	var payload struct {
+		Models []struct {
+			Name          string `json:"name"`
+			Model         string `json:"model"`
+			ContextLength int    `json:"context_length"`
+		} `json:"models"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		return 0, false
+	}
+	backend := s.backendModel()
+	for _, model := range payload.Models {
+		if model.Name == backend || model.Model == backend {
+			return model.ContextLength, model.ContextLength > 0
+		}
+	}
+	return 0, false
+}
+
+func (s Service) stopLoadedBackendModel(ctx context.Context) error {
+	if truthy(s.env("S46_TEST_STOP_OLLAMA_MODEL_OK")) {
+		s.setEnv("S46_TEST_OLLAMA_LOADED_CONTEXT", strconv.Itoa(ContextWindow(s.Env)))
+		return nil
+	}
+	path, ok := s.ollamaPath()
+	if !ok {
+		path = "ollama"
+	}
+	cmd := exec.CommandContext(ctx, path, "stop", s.backendModel())
+	cmd.Env = s.ollamaEnv()
+	cmd.Stdout = s.Stdout
+	cmd.Stderr = s.Stderr
+	return cmd.Run()
+}
+
 func (s Service) modelProbeWithNotice(ctx context.Context) (bool, string) {
 	if s.Progress == nil {
 		return s.modelProbe(ctx)
@@ -746,7 +865,7 @@ func (s Service) modelProbe(ctx context.Context) (bool, string) {
 		}
 		return false, "model probe failed"
 	}
-	body, _ := json.Marshal(map[string]any{"model": s.backendModel(), "prompt": "ping", "stream": false})
+	body, _ := json.Marshal(map[string]any{"model": s.backendModel(), "prompt": "ping", "stream": false, "options": map[string]any{"num_ctx": ContextWindow(s.Env)}, "keep_alive": KeepAlive(s.Env)})
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(s.ollamaURL(), "/")+"/api/generate", bytes.NewReader(body))
 	if err != nil {
 		return false, "probe request failed: " + err.Error()

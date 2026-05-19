@@ -7,9 +7,26 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sovereign46/s46-cli/internal/airplane"
 	"github.com/sovereign46/s46-cli/internal/api"
 	"github.com/sovereign46/s46-cli/internal/harness"
 )
+
+func TestPlanConnectUsesAirplaneModelLimits(t *testing.T) {
+	home := t.TempDir()
+	env := map[string]string{"HOME": home, "S46_AIRPLANE_CONTEXT": "16384", "S46_AIRPLANE_MAX_TOKENS": "2048"}
+	team := api.Team{Name: "local", Endpoint: airplane.LocalGatewayURL, Mode: airplane.ModeAirplane, DefaultModel: airplane.LocalModelID}
+	plan, err := New().PlanConnect(context.Background(), harness.ConnectRequest{Env: env, Team: team, Model: airplane.LocalModelID, Mode: airplane.ModeAirplane})
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(plan.Files[0].Content)
+	for _, want := range []string{"model_context_window = 16384", "model_max_output_tokens = 2048"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("config missing %q:\n%s", want, content)
+		}
+	}
+}
 
 func TestPlanConnectRejectsModifiedManagedBlock(t *testing.T) {
 	home := t.TempDir()
