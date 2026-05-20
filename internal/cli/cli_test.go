@@ -640,6 +640,14 @@ func TestAirplaneSetupCanTurnOnAirplaneModeWithoutLogin(t *testing.T) {
 			t.Fatalf("unexpected airplane status without login missing %q:\n%s", want, status)
 		}
 	}
+	off := requireOK(t, run(t, env, "airplane", "mode", "off"))
+	if !strings.Contains(off, "[s46] mode: cloud") || !strings.Contains(off, "[s46] removed local airplane team: local") || strings.Contains(off, "local.s46.dev") {
+		t.Fatalf("unexpected airplane mode off without cloud team:\n%s", off)
+	}
+	teams := requireOK(t, run(t, env, "teams", "list"))
+	if !strings.Contains(teams, "[s46] no connected teams") {
+		t.Fatalf("expected local-only airplane team to be removed, got:\n%s", teams)
+	}
 }
 
 func TestAirplaneModeOffRestoresPiModelsJSON(t *testing.T) {

@@ -69,11 +69,11 @@ S46 logs: $S46_LOG_DIR
 S46 API repo: $api_repo_display
 
 Try:
-  s46 login --user dscape@acme.s46.dev --device-id dev-laptop --device-name "Dev laptop"
-  s46 connect acme --harness=claude-code --dry-run
-  s46 connect acme --harness=claude-code
+  s46 airplane setup
+  s46 login --user <your-email> --device-id dev-laptop --device-name "Dev laptop"
+  s46 connect <your-team> --harness=claude-code --dry-run
+  s46 connect <your-team> --harness=claude-code
   s46 status
-  s46 share @dscape/auth-redirect-fix
 
 Exit with Ctrl-C, Ctrl-D, or: exit
 EOF

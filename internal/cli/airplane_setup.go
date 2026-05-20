@@ -581,8 +581,10 @@ func enableAirplaneMode(ctx context.Context, app *app, service airplane.Service,
 	if err := startAirplaneRuntime(ctx, app, service); err != nil {
 		return err
 	}
-	if teamConfig.APISnapshot.Endpoint == "" || isLocalEndpoint(teamConfig.APISnapshot.Endpoint) {
-		teamConfig.APISnapshot = hostedTeamSnapshot(teamName, teamConfig)
+	if snapshot, ok := cloudTeamSnapshot(teamName, teamConfig); ok {
+		teamConfig.APISnapshot = snapshot
+	} else {
+		teamConfig.APISnapshot = api.Team{}
 	}
 	teamConfig.Endpoint = airplane.LocalGatewayURL
 	teamConfig.DefaultModel = airplane.LocalModelID
@@ -704,17 +706,26 @@ func airplaneModeOff(ctx context.Context, app *app) error {
 		return err
 	}
 	snapshot := teamConfig.HarnessSnapshot
-	restored := restoreCloudTeamConfig(teamName, teamConfig)
-	restored.HarnessSnapshot = nil
+	restored, hasCloudConfig := restoreCloudTeamConfig(teamName, teamConfig)
 	cfg.Mode = config.ModeCloud
-	cfg.Teams[teamName] = restored
+	if hasCloudConfig {
+		restored.HarnessSnapshot = nil
+		cfg.Teams[teamName] = restored
+	} else {
+		delete(cfg.Teams, teamName)
+		if cfg.ActiveTeam == teamName {
+			cfg.ActiveTeam = ""
+		}
+	}
 	if !app.options.dryRun {
 		if snapshot != nil {
 			if err := harness.RestoreSnapshot(app.runtime.Env, *snapshot); err != nil {
 				return err
 			}
-		} else if err := applyHarnessConfig(ctx, app, teamName, restored, config.ModeCloud); err != nil {
-			return err
+		} else if hasCloudConfig {
+			if err := applyHarnessConfig(ctx, app, teamName, restored, config.ModeCloud); err != nil {
+				return err
+			}
 		}
 		if err := app.config.SaveConfig(cfg); err != nil {
 			return err
@@ -722,17 +733,29 @@ func airplaneModeOff(ctx context.Context, app *app) error {
 	}
 	app.renderer.Prefix = "[s46]"
 	if app.options.json {
-		return app.renderer.WriteJSON(map[string]any{"mode": config.ModeCloud, "team": teamName, "endpoint": restored.Endpoint, "model": restored.DefaultModel, "dryRun": app.options.dryRun})
+		result := map[string]any{"mode": config.ModeCloud, "team": teamName, "dryRun": app.options.dryRun}
+		if hasCloudConfig {
+			result["endpoint"] = restored.Endpoint
+			result["model"] = restored.DefaultModel
+		} else {
+			result["removedLocalTeam"] = true
+		}
+		return app.renderer.WriteJSON(result)
 	}
 	if app.options.dryRun {
 		return app.renderer.Lines(fmt.Sprintf("[s46] dry-run: would set cloud mode for %s", teamName))
 	}
-	return app.renderer.Lines(
-		"[s46] mode: cloud",
-		fmt.Sprintf("[s46] team: %s", teamName),
-		fmt.Sprintf("[s46] endpoint: %s", restored.Endpoint),
-		fmt.Sprintf("[s46] model: %s", restored.DefaultModel),
-	)
+	lines := []string{"[s46] mode: cloud"}
+	if hasCloudConfig {
+		lines = append(lines,
+			fmt.Sprintf("[s46] team: %s", teamName),
+			fmt.Sprintf("[s46] endpoint: %s", restored.Endpoint),
+			fmt.Sprintf("[s46] model: %s", restored.DefaultModel),
+		)
+	} else {
+		lines = append(lines, fmt.Sprintf("[s46] removed local airplane team: %s", teamName))
+	}
+	return app.renderer.Lines(lines...)
 }
 
 func activeTeamConfig(app *app) (config.Config, string, config.TeamConfig, error) {
@@ -771,13 +794,16 @@ func localAirplaneTeam(teamName string, existing config.TeamConfig, req connectR
 	}
 }
 
-func hostedTeamSnapshot(teamName string, teamConfig config.TeamConfig) api.Team {
+func cloudTeamSnapshot(teamName string, teamConfig config.TeamConfig) (api.Team, bool) {
 	snapshot := teamConfig.APISnapshot
+	if snapshot.Endpoint == "" || isLocalEndpoint(snapshot.Endpoint) {
+		if teamConfig.Endpoint == "" || isLocalEndpoint(teamConfig.Endpoint) {
+			return api.Team{}, false
+		}
+		snapshot = teamConfig.API(teamName)
+	}
 	if snapshot.Name == "" {
 		snapshot.Name = teamName
-	}
-	if snapshot.Endpoint == "" || isLocalEndpoint(snapshot.Endpoint) {
-		snapshot.Endpoint = fmt.Sprintf("https://%s.s46.dev", teamName)
 	}
 	if snapshot.Lane == "" {
 		snapshot.Lane = teamConfig.Lane
@@ -788,18 +814,21 @@ func hostedTeamSnapshot(teamName string, teamConfig config.TeamConfig) api.Team 
 	if len(snapshot.Models) == 0 {
 		snapshot.Models = api.DefaultModels
 	}
-	return snapshot
+	return snapshot, true
 }
 
-func restoreCloudTeamConfig(teamName string, teamConfig config.TeamConfig) config.TeamConfig {
-	snapshot := hostedTeamSnapshot(teamName, teamConfig)
+func restoreCloudTeamConfig(teamName string, teamConfig config.TeamConfig) (config.TeamConfig, bool) {
+	snapshot, ok := cloudTeamSnapshot(teamName, teamConfig)
+	if !ok {
+		return config.TeamConfig{}, false
+	}
 	teamConfig.Endpoint = snapshot.Endpoint
 	teamConfig.Lane = strs.FirstNonEmpty(snapshot.Lane, teamConfig.Lane)
 	teamConfig.DefaultModel = strs.FirstNonEmpty(snapshot.DefaultModel, api.DefaultModel)
 	teamConfig.Boxes = snapshot.Boxes
 	teamConfig.Models = snapshot.Models
 	teamConfig.APISnapshot = snapshot
-	return teamConfig
+	return teamConfig, true
 }
 
 func applyHarnessConfig(ctx context.Context, app *app, teamName string, teamConfig config.TeamConfig, mode string) error {
