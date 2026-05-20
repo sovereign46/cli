@@ -1,3 +1,5 @@
+//go:build !release
+
 package api
 
 import (
@@ -9,7 +11,13 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/sovereign46/s46-cli/internal/strs"
 )
+
+func init() {
+	mockClientFactory = func(env map[string]string) Client { return NewMockClient() }
+}
 
 type MockFixtures struct {
 	Account         string
@@ -136,10 +144,6 @@ func (c *MockClient) Team(ctx context.Context, name string, opts TeamOptions) (T
 	if lane == "" {
 		lane = fixtures.Lane
 	}
-	mode := opts.Mode
-	if mode == "" {
-		mode = fixtures.Mode
-	}
 	model := opts.DefaultModel
 	if model == "" {
 		model = DefaultModel
@@ -148,7 +152,6 @@ func (c *MockClient) Team(ctx context.Context, name string, opts TeamOptions) (T
 		Name:         team,
 		Endpoint:     endpoint,
 		Lane:         lane,
-		Mode:         mode,
 		Boxes:        append([]string(nil), fixtures.Boxes...),
 		DefaultModel: model,
 		Models:       append([]string(nil), DefaultModels...),
@@ -156,7 +159,7 @@ func (c *MockClient) Team(ctx context.Context, name string, opts TeamOptions) (T
 }
 
 func (c *MockClient) Sessions(ctx context.Context, team Team, accessToken string) ([]Session, error) {
-	session := DefaultSession(team)
+	session := defaultMockSession(team)
 	fixtures := c.fixtures()
 	if fixtures.Endpoint != "" {
 		session.Location = fixtures.DefaultBox
@@ -232,7 +235,7 @@ func (c *MockClient) Land(ctx context.Context, req LandRequest) (LandResult, err
 		ID:      req.SessionID,
 		Title:   title,
 		Branch:  "s46/" + branchSlug,
-		RanOn:   []string{"localhost", nonEmpty(session.Location, fixtures.DefaultBox), "localhost"},
+		RanOn:   []string{"localhost", strs.FirstNonEmpty(session.Location, fixtures.DefaultBox), "localhost"},
 		Harness: session.Harness,
 		Model:   session.Model,
 		Cost:    session.Spent,
@@ -244,7 +247,7 @@ func (c *MockClient) Land(ctx context.Context, req LandRequest) (LandResult, err
 	}, nil
 }
 
-func DefaultSession(team Team) Session {
+func defaultMockSession(team Team) Session {
 	if team.Name == "" {
 		team.Name = DefaultMockFixtures.Team
 	}
@@ -264,10 +267,6 @@ func DefaultSession(team Team) Session {
 		Age:      "14h",
 		Spent:    DefaultMockFixtures.DefaultSpend,
 	}
-}
-
-func (t Team) DefaultHarness() string {
-	return "claude-code"
 }
 
 func (c *MockClient) fixtures() MockFixtures {
@@ -316,11 +315,4 @@ func safeTokenPart(value string) string {
 func sanitizeTeam(value string) string {
 	value = strings.TrimSpace(strings.ToLower(value))
 	return regexp.MustCompile(`[^a-z0-9-]+`).ReplaceAllString(value, "")
-}
-
-func nonEmpty(value string, fallback string) string {
-	if value != "" {
-		return value
-	}
-	return fallback
 }

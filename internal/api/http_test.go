@@ -52,7 +52,7 @@ func TestHTTPClientWireShape(t *testing.T) {
 			w.WriteHeader(http.StatusNoContent)
 		case "/v1/teams/acme":
 			requireBearer(t, r)
-			_ = json.NewEncoder(w).Encode(Team{Name: "acme", Endpoint: "https://acme.s46.dev", Lane: "EU-OPO", Mode: "cloud", Boxes: []string{"box-01.acme.s46.dev"}, DefaultModel: DefaultModel})
+			_ = json.NewEncoder(w).Encode(Team{Name: "acme", Endpoint: "https://acme.s46.dev", Lane: "EU-OPO", Boxes: []string{"box-01.acme.s46.dev"}, DefaultModel: DefaultModel})
 		case "/v1/sessions":
 			requireBearer(t, r)
 			if r.URL.Query().Get("team") != "acme" {

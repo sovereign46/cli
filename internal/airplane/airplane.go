@@ -1,9 +1,7 @@
 package airplane
 
 import (
-	"archive/tar"
 	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,8 +14,9 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
+
+	"github.com/sovereign46/s46-cli/internal/strs"
 )
 
 const (
@@ -53,27 +52,6 @@ const (
 	gatewaySourceInstallTime = 5 * time.Minute
 	githubLatestURLFormat    = "https://api.github.com/repos/%s/releases/latest"
 )
-
-type Check struct {
-	Name     string `json:"name"`
-	OK       bool   `json:"ok"`
-	Message  string `json:"message"`
-	Required bool   `json:"required"`
-}
-
-type Report struct {
-	Mode          string  `json:"mode"`
-	Model         string  `json:"model"`
-	BackendModel  string  `json:"backendModel"`
-	GatewayURL    string  `json:"gatewayUrl"`
-	OllamaURL     string  `json:"ollamaUrl"`
-	Ready         bool    `json:"ready"`
-	Checks        []Check `json:"checks"`
-	MemoryGB      int64   `json:"memoryGb,omitempty"`
-	FreeDiskGB    int64   `json:"freeDiskGb,omitempty"`
-	OllamaPath    string  `json:"ollamaPath,omitempty"`
-	GatewayBinary string  `json:"gatewayBinary,omitempty"`
-}
 
 type LogFile struct {
 	Name string `json:"name"`
@@ -134,68 +112,8 @@ type Service struct {
 	ModelProbeTimeout time.Duration
 }
 
-func (s Service) Check(ctx context.Context) Report {
-	if truthy(s.env("S46_AIRPLANE_SKIP_SETUP_CHECKS")) {
-		return s.skippedReport()
-	}
-
-	report := Report{Mode: ModeAirplane, Model: LocalModelID, BackendModel: s.backendModel(), GatewayURL: s.gatewayURL(), OllamaURL: s.ollamaURL()}
-
-	osOK := runtime.GOOS == "darwin" || runtime.GOOS == "linux"
-	report.add(Check{Name: "os/arch", OK: osOK, Required: true, Message: runtime.GOOS + "/" + runtime.GOARCH})
-
-	memory := s.memoryBytes()
-	report.MemoryGB = gb(memory)
-	if memory <= 0 {
-		report.add(Check{Name: "memory", OK: false, Required: true, Message: "could not determine system memory"})
-	} else {
-		report.add(Check{Name: "memory", OK: memory >= MinMemoryBytes, Required: true, Message: fmt.Sprintf("%d GB detected; 32 GB minimum, 64 GB recommended", gb(memory))})
-	}
-
-	freeDisk := s.freeDiskBytes()
-	report.FreeDiskGB = gb(freeDisk)
-	if freeDisk <= 0 {
-		report.add(Check{Name: "disk", OK: false, Required: true, Message: "could not determine free disk"})
-	} else {
-		report.add(Check{Name: "disk", OK: freeDisk >= MinDiskBytes, Required: true, Message: fmt.Sprintf("%d GB free; about 30 GB recommended", gb(freeDisk))})
-	}
-
-	ollamaPath, ollamaOK := s.ollamaPath()
-	report.OllamaPath = ollamaPath
-	report.add(Check{Name: "ollama-installed", OK: ollamaOK, Required: true, Message: nonEmpty(ollamaPath, "ollama not found")})
-
-	ollamaRunning := s.runBoolCheck(ctx, s.checkTimeout(), s.ollamaRunning)
-	report.add(Check{Name: "ollama-running", OK: ollamaRunning, Required: true, Message: boolMessage(ollamaRunning, s.ollamaURL(), "Ollama is not responding")})
-
-	modelDownloaded := false
-	modelDownloadedMessage := "skipped: Ollama is not running"
-	if ollamaRunning {
-		modelDownloaded = s.runBoolCheck(ctx, s.checkTimeout(), s.modelDownloaded)
-		modelDownloadedMessage = boolMessage(modelDownloaded, s.backendModel(), "model is not downloaded")
-	}
-	report.add(Check{Name: "model-downloaded", OK: modelDownloaded, Required: true, Message: modelDownloadedMessage})
-
-	modelProbe := false
-	modelProbeMessage := "skipped: model is not downloaded"
-	if !ollamaRunning {
-		modelProbeMessage = "skipped: Ollama is not running"
-	} else if modelDownloaded {
-		modelProbeCtx, cancel := context.WithTimeout(ctx, s.modelProbeTimeout())
-		modelProbe, modelProbeMessage = s.modelProbeWithNotice(modelProbeCtx)
-		cancel()
-	}
-	report.add(Check{Name: "model-probe", OK: modelProbe, Required: true, Message: modelProbeMessage})
-
-	gatewayReady := s.runBoolCheck(ctx, s.checkTimeout(), s.gatewayReady)
-	gatewayPath, _ := s.gatewayBinary()
-	report.GatewayBinary = gatewayPath
-	report.add(Check{Name: "local-gateway", OK: gatewayReady, Required: true, Message: s.gatewayMessage(ctx, gatewayReady, gatewayPath)})
-	report.Ready = report.allRequiredOK()
-	return report
-}
-
 func (s Service) InstallOllama(ctx context.Context) error {
-	if truthy(s.env("S46_TEST_INSTALL_OLLAMA_OK")) {
+	if strs.Truthy(s.env("S46_TEST_INSTALL_OLLAMA_OK")) {
 		s.setEnv("S46_TEST_OLLAMA_PATH", "/opt/homebrew/bin/ollama")
 		return nil
 	}
@@ -206,7 +124,7 @@ func (s Service) InstallOllama(ctx context.Context) error {
 }
 
 func (s Service) PullModel(ctx context.Context) error {
-	if truthy(s.env("S46_TEST_PULL_MODEL_OK")) {
+	if strs.Truthy(s.env("S46_TEST_PULL_MODEL_OK")) {
 		s.setEnv("S46_TEST_MODEL_DOWNLOADED", "1")
 		s.setEnv("S46_TEST_MODEL_PROBE", "1")
 		return nil
@@ -222,13 +140,13 @@ func (s Service) PullModel(ctx context.Context) error {
 }
 
 func (s Service) StartOllama() error {
-	if truthy(s.env("S46_AIRPLANE_SKIP_SETUP_CHECKS")) {
+	if strs.Truthy(s.env("S46_AIRPLANE_SKIP_SETUP_CHECKS")) {
 		return nil
 	}
 	if s.ollamaRunning(context.Background()) {
 		return s.ensureOllamaContextLimit(context.Background())
 	}
-	if truthy(s.env("S46_TEST_START_OLLAMA_OK")) {
+	if strs.Truthy(s.env("S46_TEST_START_OLLAMA_OK")) {
 		s.setEnv("S46_TEST_OLLAMA_RUNNING", "1")
 		return nil
 	}
@@ -242,276 +160,6 @@ func (s Service) StartOllama() error {
 	cmd := exec.Command(path, "serve")
 	cmd.Env = s.ollamaEnv(AirplaneOllamaEnv(s.Env)...)
 	return s.startDetached(cmd, "ollama.log")
-}
-
-func (s Service) StartGateway() error {
-	if truthy(s.env("S46_AIRPLANE_SKIP_SETUP_CHECKS")) {
-		return nil
-	}
-	if s.gatewayReady(context.Background()) {
-		return nil
-	}
-	if truthy(s.env("S46_TEST_START_GATEWAY_OK")) {
-		s.setEnv("S46_TEST_GATEWAY_READY", "1")
-		return nil
-	}
-	if s.gatewayResponding(context.Background()) {
-		return fmt.Errorf("local S46 API at %s is running but is not airplane-ready; run `s46 airplane setup` to restart it in airplane mode", s.gatewayURL())
-	}
-	command, ok := s.gatewayCommand()
-	if !ok {
-		return fmt.Errorf("local S46 gateway is not running and no start command was found; run setup to install it or set S46_API_BINARY/S46_API_REPO")
-	}
-	cmd := exec.Command(command.Path, command.Args...)
-	cmd.Dir = command.Dir
-	env := append([]string{"S46_ENV=airplane", "S46_ADDR=127.0.0.1:8080", "S46_LOCAL_OLLAMA_URL=" + s.ollamaURL(), "S46_LOCAL_MODEL=" + s.backendModel()}, AirplaneGatewayEnv(s.Env)...)
-	cmd.Env = s.processEnv(env...)
-	return s.startDetached(cmd, "s46-api-airplane.log")
-}
-
-func (s Service) InstallGateway(ctx context.Context) error {
-	if truthy(s.env("S46_TEST_INSTALL_GATEWAY_OK")) {
-		path := s.managedGatewayBinaryPath()
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			return err
-		}
-		if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
-			return err
-		}
-		return nil
-	}
-	if !s.GatewayDownloadAvailable() {
-		return fmt.Errorf("gateway install is not available for %s/%s", runtime.GOOS, runtime.GOARCH)
-	}
-	if err := s.installGatewayRelease(ctx); err != nil {
-		if sourceErr := s.installGatewayFromSource(ctx); sourceErr != nil {
-			return fmt.Errorf("%w; source clone fallback failed: %v", err, sourceErr)
-		}
-	}
-	return nil
-}
-
-func (s Service) installGatewayRelease(ctx context.Context) error {
-	downloadURL, err := s.gatewayDownloadURL(ctx)
-	if err != nil {
-		return err
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
-	if err != nil {
-		return err
-	}
-	s.setGitHubHeaders(request)
-	response, err := s.httpClient(gatewayDownloadTimeout).Do(request)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("download gateway release failed: %s", response.Status)
-	}
-	return s.installGatewayArchive(response.Body)
-}
-
-func (s Service) installGatewayFromSource(ctx context.Context) error {
-	gitPath, err := exec.LookPath("git")
-	if err != nil {
-		return fmt.Errorf("git is not installed")
-	}
-	goPath, err := exec.LookPath("go")
-	if err != nil {
-		return fmt.Errorf("go is not installed")
-	}
-	sourceDir := s.managedGatewaySourceDir()
-	if err := os.MkdirAll(filepath.Dir(sourceDir), 0o755); err != nil {
-		return err
-	}
-	installCtx, cancel := context.WithTimeout(ctx, gatewaySourceInstallTime)
-	defer cancel()
-	if err := s.cloneGatewaySource(installCtx, gitPath, sourceDir); err != nil {
-		return err
-	}
-	return s.buildGatewaySource(installCtx, goPath, sourceDir)
-}
-
-func (s Service) cloneGatewaySource(ctx context.Context, gitPath string, sourceDir string) error {
-	cloneURLs := s.gatewayCloneURLs()
-	failures := []string{}
-	for _, cloneURL := range cloneURLs {
-		if err := os.RemoveAll(sourceDir); err != nil {
-			return err
-		}
-		if err := s.runGatewayInstallCommand(ctx, "", gitPath, "clone", "--depth", "1", cloneURL, sourceDir); err != nil {
-			failures = append(failures, fmt.Sprintf("%s: %v", cloneURL, err))
-			_ = os.RemoveAll(sourceDir)
-			continue
-		}
-		return nil
-	}
-	if len(failures) == 0 {
-		return fmt.Errorf("no gateway clone URLs configured")
-	}
-	return fmt.Errorf("git clone failed: %s", strings.Join(failures, "; "))
-}
-
-func (s Service) buildGatewaySource(ctx context.Context, goPath string, sourceDir string) error {
-	target := s.managedGatewayBinaryPath()
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return err
-	}
-	if err := s.runGatewayInstallCommand(ctx, sourceDir, goPath, "build", "-o", target, "./cmd/"+GatewayBinaryName); err != nil {
-		return fmt.Errorf("build cloned gateway: %w", err)
-	}
-	return nil
-}
-
-func (s Service) runGatewayInstallCommand(ctx context.Context, dir string, path string, args ...string) error {
-	cmd := exec.CommandContext(ctx, path, args...)
-	cmd.Dir = dir
-	cmd.Env = s.gatewayInstallEnv()
-	output, err := cmd.CombinedOutput()
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return ctxErr
-	}
-	if err != nil {
-		detail := strings.TrimSpace(string(output))
-		if detail != "" {
-			return fmt.Errorf("%w: %s", err, detail)
-		}
-		return err
-	}
-	return nil
-}
-
-func (s Service) gatewayInstallEnv() []string {
-	extra := []string{"GIT_TERMINAL_PROMPT=0"}
-	if strings.TrimSpace(envValue(s.Env, "GIT_SSH_COMMAND")) == "" && strings.TrimSpace(os.Getenv("GIT_SSH_COMMAND")) == "" {
-		extra = append(extra, "GIT_SSH_COMMAND=ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new")
-	}
-	return s.processEnv(extra...)
-}
-
-func (s Service) HomebrewAvailable() bool {
-	if path := strings.TrimSpace(s.env("S46_TEST_BREW_PATH")); path != "" {
-		return path != "missing"
-	}
-	_, err := exec.LookPath("brew")
-	return err == nil
-}
-
-func (s Service) GatewayDownloadAvailable() bool {
-	if value := strings.TrimSpace(s.env("S46_TEST_GATEWAY_DOWNLOAD_AVAILABLE")); value != "" {
-		return truthy(value)
-	}
-	if truthy(s.env("S46_OFFLINE")) {
-		return false
-	}
-	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
-		return false
-	}
-	return runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64"
-}
-
-func AirplaneOllamaSettings(env map[string]string) []OllamaEnvSetting {
-	return []OllamaEnvSetting{
-		{Key: "OLLAMA_CONTEXT_LENGTH", Value: strconv.Itoa(ContextWindow(env))},
-		{Key: "OLLAMA_KEEP_ALIVE", Value: KeepAlive(env)},
-		{Key: "OLLAMA_NUM_PARALLEL", Value: strconv.Itoa(NumParallel(env))},
-		{Key: "OLLAMA_MAX_LOADED_MODELS", Value: strconv.Itoa(MaxLoadedModels(env))},
-		{Key: "OLLAMA_FLASH_ATTENTION", Value: FlashAttention(env)},
-		{Key: "OLLAMA_KV_CACHE_TYPE", Value: KVCacheType(env)},
-	}
-}
-
-func AirplaneOllamaEnv(env map[string]string) []string {
-	settings := AirplaneOllamaSettings(env)
-	envList := make([]string, 0, len(settings))
-	for _, setting := range settings {
-		envList = append(envList, setting.Key+"="+setting.Value)
-	}
-	return envList
-}
-
-func joinSettings(settings []OllamaEnvSetting) string {
-	parts := make([]string, 0, len(settings))
-	for _, setting := range settings {
-		parts = append(parts, setting.Key+"="+setting.Value)
-	}
-	return strings.Join(parts, " ")
-}
-
-func AirplaneGatewayEnv(env map[string]string) []string {
-	return []string{
-		"S46_AIRPLANE_CONTEXT=" + strconv.Itoa(ContextWindow(env)),
-		"S46_AIRPLANE_MAX_TOKENS=" + strconv.Itoa(MaxTokens(env)),
-		"S46_AIRPLANE_KEEP_ALIVE=" + KeepAlive(env),
-		"S46_WRITE_TIMEOUT=" + GatewayWriteTimeout(env),
-	}
-}
-
-func ContextWindow(env map[string]string) int {
-	return positiveIntSetting(env, DefaultContextWindow, "S46_AIRPLANE_CONTEXT", "OLLAMA_CONTEXT_LENGTH")
-}
-
-func MaxTokens(env map[string]string) int {
-	return positiveIntSetting(env, DefaultMaxTokens, "S46_AIRPLANE_MAX_TOKENS")
-}
-
-func KeepAlive(env map[string]string) string {
-	return nonEmpty(envValue(env, "S46_AIRPLANE_KEEP_ALIVE"), envValue(env, "OLLAMA_KEEP_ALIVE"), DefaultKeepAlive)
-}
-
-func GatewayWriteTimeout(env map[string]string) string {
-	return nonEmpty(envValue(env, "S46_WRITE_TIMEOUT"), DefaultGatewayWriteTimeout)
-}
-
-func NumParallel(env map[string]string) int {
-	return positiveIntSetting(env, DefaultNumParallel, "S46_AIRPLANE_NUM_PARALLEL", "OLLAMA_NUM_PARALLEL")
-}
-
-func MaxLoadedModels(env map[string]string) int {
-	return positiveIntSetting(env, DefaultMaxLoadedModels, "S46_AIRPLANE_MAX_LOADED_MODELS", "OLLAMA_MAX_LOADED_MODELS")
-}
-
-func FlashAttention(env map[string]string) string {
-	return nonEmpty(envValue(env, "OLLAMA_FLASH_ATTENTION"), DefaultFlashAttention)
-}
-
-func KVCacheType(env map[string]string) string {
-	return nonEmpty(envValue(env, "OLLAMA_KV_CACHE_TYPE"), DefaultKVCacheType)
-}
-
-func positiveIntSetting(env map[string]string, fallback int, keys ...string) int {
-	for _, key := range keys {
-		value := strings.TrimSpace(envValue(env, key))
-		if value == "" {
-			continue
-		}
-		parsed, err := strconv.Atoi(value)
-		if err == nil && parsed > 0 {
-			return parsed
-		}
-	}
-	return fallback
-}
-
-func (s Service) GatewayInstallDescription() string {
-	return fmt.Sprintf("from GitHub release or git clone %s into %s", s.gatewayGitHubRepo(), s.gatewayInstallDir())
-}
-
-func (s Service) GatewayStartDescription() (string, bool) {
-	command, ok := s.gatewayCommand()
-	if !ok {
-		return "", false
-	}
-	return command.Description, true
-}
-
-func (s Service) GatewayReady(ctx context.Context) bool {
-	return s.gatewayReady(ctx)
-}
-
-func (s Service) GatewayResponding(ctx context.Context) bool {
-	return s.gatewayResponding(ctx)
 }
 
 func (s Service) LogFiles() []LogFile {
@@ -618,7 +266,7 @@ func filterSettingEnv(values map[string]string, settings []OllamaEnvSetting) map
 
 func (s Service) ConfigureMacOSOllamaLaunchd(ctx context.Context) error {
 	settings := AirplaneOllamaSettings(s.Env)
-	if truthy(s.env("S46_TEST_CONFIGURE_LAUNCHCTL_OK")) {
+	if strs.Truthy(s.env("S46_TEST_CONFIGURE_LAUNCHCTL_OK")) {
 		s.setEnv("S46_TEST_LAUNCHCTL_ENV", joinSettings(settings))
 		return nil
 	}
@@ -697,7 +345,7 @@ func (s Service) ollamaServeProcess(ctx context.Context) (ollamaProcess, bool) {
 		if kind == "none" || kind == "missing" {
 			return ollamaProcess{}, false
 		}
-		pid, _ := strconv.Atoi(nonEmpty(s.env("S46_TEST_OLLAMA_PROCESS_PID"), "123"))
+		pid, _ := strconv.Atoi(strs.FirstNonEmpty(s.env("S46_TEST_OLLAMA_PROCESS_PID"), "123"))
 		command := strings.TrimSpace(s.env("S46_TEST_OLLAMA_PROCESS_COMMAND"))
 		if command == "" {
 			command = testOllamaCommand(kind)
@@ -792,230 +440,9 @@ func parseEnvFields(raw string) map[string]string {
 	return values
 }
 
-type gatewayCommand struct {
-	Path        string
-	Args        []string
-	Dir         string
-	Description string
-}
-
-func (s Service) gatewayBinary() (string, bool) {
-	command, ok := s.gatewayCommand()
-	if !ok {
-		return "", false
-	}
-	return command.Description, true
-}
-
-func (s Service) gatewayCommand() (gatewayCommand, bool) {
-	if path := strings.TrimSpace(s.env("S46_API_BINARY")); path != "" {
-		if executableFile(path) {
-			return gatewayCommand{Path: path, Description: path}, true
-		}
-		return gatewayCommand{}, false
-	}
-	if path := strings.TrimSpace(s.env("S46_TEST_GATEWAY_BINARY")); path != "" {
-		if path == "missing" {
-			return gatewayCommand{}, false
-		}
-		return gatewayCommand{Path: path, Description: path}, true
-	}
-	if command, ok := s.gatewaySourceCommand(); ok {
-		return command, true
-	}
-	if path := s.managedGatewayBinaryPath(); executableFile(path) {
-		return gatewayCommand{Path: path, Description: path}, true
-	}
-	if path, err := exec.LookPath(GatewayBinaryName); err == nil {
-		return gatewayCommand{Path: path, Description: path}, true
-	}
-	return gatewayCommand{}, false
-}
-
-func (s Service) gatewaySourceCommand() (gatewayCommand, bool) {
-	candidate := strings.TrimSpace(s.env("S46_API_REPO"))
-	goPath, goErr := exec.LookPath("go")
-	if candidate == "" || goErr != nil {
-		return gatewayCommand{}, false
-	}
-	mainPath := filepath.Join(candidate, "cmd", GatewayBinaryName)
-	if info, err := os.Stat(mainPath); err == nil && info.IsDir() {
-		return gatewayCommand{Path: goPath, Args: []string{"run", "./cmd/" + GatewayBinaryName}, Dir: candidate, Description: "source repo " + candidate}, true
-	}
-	return gatewayCommand{}, false
-}
-
-type gatewayRelease struct {
-	TagName string         `json:"tag_name"`
-	Name    string         `json:"name"`
-	Assets  []gatewayAsset `json:"assets"`
-}
-
-type gatewayAsset struct {
-	Name               string `json:"name"`
-	BrowserDownloadURL string `json:"browser_download_url"`
-}
-
-func (s Service) gatewayDownloadURL(ctx context.Context) (string, error) {
-	if url := strings.TrimSpace(s.env("S46_API_GATEWAY_DOWNLOAD_URL")); url != "" {
-		return url, nil
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, s.gatewayLatestReleaseURL(), nil)
-	if err != nil {
-		return "", err
-	}
-	s.setGitHubHeaders(request)
-	response, err := s.httpClient(gatewayDownloadTimeout).Do(request)
-	if err != nil {
-		return "", err
-	}
-	defer response.Body.Close()
-	if response.StatusCode == http.StatusNotFound {
-		return "", fmt.Errorf("no gateway release found for %s", s.gatewayGitHubRepo())
-	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return "", fmt.Errorf("gateway release check failed: %s", response.Status)
-	}
-	var release gatewayRelease
-	if err := json.NewDecoder(response.Body).Decode(&release); err != nil {
-		return "", err
-	}
-	version := normalizeReleaseVersion(nonEmpty(release.TagName, release.Name))
-	asset := selectGatewayAsset(release.Assets, version)
-	if asset.BrowserDownloadURL == "" {
-		return "", fmt.Errorf("gateway release %s has no %s/%s archive", nonEmpty(release.TagName, release.Name, "latest"), runtime.GOOS, runtime.GOARCH)
-	}
-	return asset.BrowserDownloadURL, nil
-}
-
-func (s Service) gatewayLatestReleaseURL() string {
-	if url := strings.TrimSpace(s.env("S46_API_GATEWAY_LATEST_URL")); url != "" {
-		return url
-	}
-	return fmt.Sprintf(githubLatestURLFormat, s.gatewayGitHubRepo())
-}
-
-func (s Service) gatewayGitHubRepo() string {
-	return nonEmpty(s.env("S46_API_GATEWAY_REPO"), DefaultGatewayRepo)
-}
-
-func (s Service) gatewayCloneURLs() []string {
-	if cloneURL := strings.TrimSpace(s.env("S46_API_GATEWAY_CLONE_URL")); cloneURL != "" {
-		return []string{cloneURL}
-	}
-	repo := s.gatewayGitHubRepo()
-	return []string{
-		fmt.Sprintf("git@github.com:%s.git", repo),
-		fmt.Sprintf("https://github.com/%s.git", repo),
-	}
-}
-
-func selectGatewayAsset(assets []gatewayAsset, version string) gatewayAsset {
-	exact := fmt.Sprintf("%s_%s_%s_%s.tar.gz", GatewayBinaryName, version, runtime.GOOS, runtime.GOARCH)
-	for _, asset := range assets {
-		if asset.Name == exact {
-			return asset
-		}
-	}
-	osArch := fmt.Sprintf("_%s_%s", runtime.GOOS, runtime.GOARCH)
-	versionPart := "_" + version + "_"
-	for _, asset := range assets {
-		if strings.HasPrefix(asset.Name, GatewayBinaryName+"_") && strings.Contains(asset.Name, versionPart) && strings.Contains(asset.Name, osArch) && strings.HasSuffix(asset.Name, ".tar.gz") {
-			return asset
-		}
-	}
-	return gatewayAsset{}
-}
-
-func normalizeReleaseVersion(version string) string {
-	trimmed := strings.TrimSpace(version)
-	trimmed = strings.TrimPrefix(trimmed, "v")
-	if plus := strings.IndexByte(trimmed, '+'); plus >= 0 {
-		trimmed = trimmed[:plus]
-	}
-	return trimmed
-}
-
-func (s Service) installGatewayArchive(body io.Reader) error {
-	gzipReader, err := gzip.NewReader(body)
-	if err != nil {
-		return err
-	}
-	defer gzipReader.Close()
-	target := s.managedGatewayBinaryPath()
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return err
-	}
-	tmp := target + ".tmp"
-	tarReader := tar.NewReader(gzipReader)
-	for {
-		header, err := tarReader.Next()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return err
-		}
-		if header.Typeflag != tar.TypeReg && header.Typeflag != tar.TypeRegA {
-			continue
-		}
-		if filepath.Base(header.Name) != GatewayBinaryName {
-			continue
-		}
-		file, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755)
-		if err != nil {
-			return err
-		}
-		_, copyErr := io.Copy(file, tarReader)
-		closeErr := file.Close()
-		if copyErr != nil {
-			_ = os.Remove(tmp)
-			return copyErr
-		}
-		if closeErr != nil {
-			_ = os.Remove(tmp)
-			return closeErr
-		}
-		if err := os.Chmod(tmp, 0o755); err != nil {
-			_ = os.Remove(tmp)
-			return err
-		}
-		return os.Rename(tmp, target)
-	}
-	return fmt.Errorf("gateway archive did not contain %s", GatewayBinaryName)
-}
-
-func (s Service) setGitHubHeaders(request *http.Request) {
-	request.Header.Set("Accept", "application/vnd.github+json")
-	request.Header.Set("User-Agent", "s46-airplane")
-	if token := strings.TrimSpace(s.env("GITHUB_TOKEN")); token != "" {
-		request.Header.Set("Authorization", "Bearer "+token)
-	}
-}
-
-func (s Service) managedGatewayBinaryPath() string {
-	return filepath.Join(s.gatewayInstallDir(), "bin", GatewayBinaryName)
-}
-
-func (s Service) managedGatewaySourceDir() string {
-	return filepath.Join(s.gatewayInstallDir(), "source")
-}
-
-func (s Service) gatewayInstallDir() string {
-	if dir := strings.TrimSpace(s.env("S46_GATEWAY_DIR")); dir != "" {
-		return dir
-	}
-	return filepath.Join(dataDir(s.Env), "s46", "gateway", GatewayBinaryName)
-}
-
-func executableFile(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir() && info.Mode()&0o111 != 0
-}
-
 func (s Service) ollamaRunning(ctx context.Context) bool {
 	if value := strings.TrimSpace(s.env("S46_TEST_OLLAMA_RUNNING")); value != "" {
-		return truthy(value)
+		return strs.Truthy(value)
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(s.ollamaURL(), "/")+"/api/tags", nil)
 	if err != nil {
@@ -1031,7 +458,7 @@ func (s Service) ollamaRunning(ctx context.Context) bool {
 
 func (s Service) modelDownloaded(ctx context.Context) bool {
 	if value := strings.TrimSpace(s.env("S46_TEST_MODEL_DOWNLOADED")); value != "" {
-		return truthy(value)
+		return strs.Truthy(value)
 	}
 	for _, model := range s.installedOllamaModels(ctx) {
 		if model == s.backendModel() {
@@ -1045,28 +472,17 @@ func (s Service) installedOllamaModels(ctx context.Context) []string {
 	if raw := strings.TrimSpace(s.env("S46_TEST_OLLAMA_LIST")); raw != "" {
 		return splitList(raw)
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(s.ollamaURL(), "/")+"/api/tags", nil)
-	if err != nil {
-		return nil
-	}
-	response, err := s.httpClient().Do(request)
-	if err != nil {
-		return nil
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil
-	}
-	var payload struct {
+	type payload struct {
 		Models []struct {
 			Name string `json:"name"`
 		} `json:"models"`
 	}
-	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+	body, err := httpGetJSON[payload](ctx, s.httpClient(), strings.TrimRight(s.ollamaURL(), "/")+"/api/tags")
+	if err != nil {
 		return nil
 	}
-	models := make([]string, 0, len(payload.Models))
-	for _, model := range payload.Models {
+	models := make([]string, 0, len(body.Models))
+	for _, model := range body.Models {
 		if strings.TrimSpace(model.Name) != "" {
 			models = append(models, model.Name)
 		}
@@ -1085,19 +501,7 @@ func (s Service) loadedOllamaModels(ctx context.Context) []OllamaLoadedModel {
 		}
 		return nil
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(s.ollamaURL(), "/")+"/api/ps", nil)
-	if err != nil {
-		return nil
-	}
-	response, err := s.httpClient().Do(request)
-	if err != nil {
-		return nil
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil
-	}
-	var payload struct {
+	type payload struct {
 		Models []struct {
 			Name          string `json:"name"`
 			Model         string `json:"model"`
@@ -1105,11 +509,12 @@ func (s Service) loadedOllamaModels(ctx context.Context) []OllamaLoadedModel {
 			ExpiresAt     string `json:"expires_at"`
 		} `json:"models"`
 	}
-	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+	body, err := httpGetJSON[payload](ctx, s.httpClient(), strings.TrimRight(s.ollamaURL(), "/")+"/api/ps")
+	if err != nil {
 		return nil
 	}
-	models := make([]OllamaLoadedModel, 0, len(payload.Models))
-	for _, model := range payload.Models {
+	models := make([]OllamaLoadedModel, 0, len(body.Models))
+	for _, model := range body.Models {
 		models = append(models, OllamaLoadedModel{Name: model.Name, Model: model.Model, ContextLength: model.ContextLength, ExpiresAt: model.ExpiresAt})
 	}
 	return models
@@ -1153,30 +558,19 @@ func (s Service) loadedBackendModelContext(ctx context.Context) (int, bool) {
 		parsed, _ := strconv.Atoi(value)
 		return parsed, parsed > 0
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(s.ollamaURL(), "/")+"/api/ps", nil)
-	if err != nil {
-		return 0, false
-	}
-	response, err := s.httpClient().Do(request)
-	if err != nil {
-		return 0, false
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return 0, false
-	}
-	var payload struct {
+	type payload struct {
 		Models []struct {
 			Name          string `json:"name"`
 			Model         string `json:"model"`
 			ContextLength int    `json:"context_length"`
 		} `json:"models"`
 	}
-	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+	body, err := httpGetJSON[payload](ctx, s.httpClient(), strings.TrimRight(s.ollamaURL(), "/")+"/api/ps")
+	if err != nil {
 		return 0, false
 	}
 	backend := s.backendModel()
-	for _, model := range payload.Models {
+	for _, model := range body.Models {
 		if model.Name == backend || model.Model == backend {
 			return model.ContextLength, model.ContextLength > 0
 		}
@@ -1185,7 +579,7 @@ func (s Service) loadedBackendModelContext(ctx context.Context) (int, bool) {
 }
 
 func (s Service) stopLoadedBackendModel(ctx context.Context) error {
-	if truthy(s.env("S46_TEST_STOP_OLLAMA_MODEL_OK")) {
+	if strs.Truthy(s.env("S46_TEST_STOP_OLLAMA_MODEL_OK")) {
 		s.setEnv("S46_TEST_OLLAMA_LOADED_CONTEXT", strconv.Itoa(ContextWindow(s.Env)))
 		return nil
 	}
@@ -1242,7 +636,7 @@ func (s Service) writeModelProbeProgress(done <-chan struct{}, finished chan<- s
 
 func (s Service) modelProbe(ctx context.Context) (bool, string) {
 	if value := strings.TrimSpace(s.env("S46_TEST_MODEL_PROBE")); value != "" {
-		if truthy(value) {
+		if strs.Truthy(value) {
 			return true, LocalModelID + " responds"
 		}
 		if message := strings.TrimSpace(s.env("S46_TEST_MODEL_PROBE_MESSAGE")); message != "" {
@@ -1279,21 +673,9 @@ func (s Service) modelProbe(ctx context.Context) (bool, string) {
 
 func (s Service) gatewayReady(ctx context.Context) bool {
 	if value := strings.TrimSpace(s.env("S46_TEST_GATEWAY_READY")); value != "" {
-		return truthy(value)
+		return strs.Truthy(value)
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(s.gatewayURL(), "/")+"/v1/workers", nil)
-	if err != nil {
-		return false
-	}
-	response, err := s.httpClient().Do(request)
-	if err != nil {
-		return false
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return false
-	}
-	var payload struct {
+	type payload struct {
 		Workers []struct {
 			ID     string `json:"id"`
 			Mode   string `json:"mode"`
@@ -1304,10 +686,11 @@ func (s Service) gatewayReady(ctx context.Context) bool {
 			} `json:"models"`
 		} `json:"workers"`
 	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&payload); err != nil {
+	body, err := httpGetJSON[payload](ctx, s.httpClient(), strings.TrimRight(s.gatewayURL(), "/")+"/v1/workers")
+	if err != nil {
 		return false
 	}
-	for _, worker := range payload.Workers {
+	for _, worker := range body.Workers {
 		if worker.ID != "local-ollama" || worker.Mode != ModeAirplane || worker.State != "ready" {
 			continue
 		}
@@ -1322,7 +705,7 @@ func (s Service) gatewayReady(ctx context.Context) bool {
 
 func (s Service) gatewayResponding(ctx context.Context) bool {
 	if value := strings.TrimSpace(s.env("S46_TEST_GATEWAY_RESPONDING")); value != "" {
-		return truthy(value)
+		return strs.Truthy(value)
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(s.gatewayURL(), "/")+"/v1/models", nil)
 	if err != nil {
@@ -1334,81 +717,6 @@ func (s Service) gatewayResponding(ctx context.Context) bool {
 	}
 	defer response.Body.Close()
 	return response.StatusCode >= 200 && response.StatusCode < 300
-}
-
-func (s Service) memoryBytes() int64 {
-	if value := strings.TrimSpace(s.env("S46_TEST_MEMORY_BYTES")); value != "" {
-		parsed, _ := strconv.ParseInt(value, 10, 64)
-		return parsed
-	}
-	switch runtime.GOOS {
-	case "darwin":
-		out, err := exec.Command("sysctl", "-n", "hw.memsize").Output()
-		if err != nil {
-			return 0
-		}
-		parsed, _ := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
-		return parsed
-	case "linux":
-		raw, err := os.ReadFile("/proc/meminfo")
-		if err != nil {
-			return 0
-		}
-		for _, line := range strings.Split(string(raw), "\n") {
-			if strings.HasPrefix(line, "MemTotal:") {
-				fields := strings.Fields(line)
-				if len(fields) >= 2 {
-					kb, _ := strconv.ParseInt(fields[1], 10, 64)
-					return kb * 1024
-				}
-			}
-		}
-	}
-	return 0
-}
-
-func (s Service) freeDiskBytes() int64 {
-	if value := strings.TrimSpace(s.env("S46_TEST_FREE_DISK_BYTES")); value != "" {
-		parsed, _ := strconv.ParseInt(value, 10, 64)
-		return parsed
-	}
-	path := s.env("S46_AIRPLANE_DISK_PATH")
-	if path == "" {
-		path = "."
-	}
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		abs = path
-	}
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs(abs, &stat); err != nil {
-		return 0
-	}
-	return int64(stat.Bavail) * int64(stat.Bsize)
-}
-
-func (s Service) startDetached(cmd *exec.Cmd, logName string) error {
-	logPath := filepath.Join(cacheDir(s.Env), logName)
-	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
-		return err
-	}
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	defer logFile.Close()
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-	out := s.Stderr
-	if out == nil {
-		out = io.Discard
-	}
-	_, _ = fmt.Fprintf(out, "%s started %s (pid %d, log %s)\n", s.logPrefix(), filepath.Base(cmd.Path), cmd.Process.Pid, logPath)
-	return nil
 }
 
 func (s Service) runBoolCheck(ctx context.Context, timeout time.Duration, check func(context.Context) bool) bool {
@@ -1531,10 +839,10 @@ func (s Service) setEnv(key string, value string) {
 }
 
 func cacheDir(env map[string]string) string {
-	if value := strings.TrimSpace(envValue(env, "S46_LOG_DIR")); value != "" {
+	if value := strings.TrimSpace(strs.EnvValue(env, "S46_LOG_DIR")); value != "" {
 		return value
 	}
-	if value := strings.TrimSpace(envValue(env, "XDG_CACHE_HOME")); value != "" {
+	if value := strings.TrimSpace(strs.EnvValue(env, "XDG_CACHE_HOME")); value != "" {
 		return filepath.Join(value, "s46")
 	}
 	if home := homeDir(env); home != "" {
@@ -1544,7 +852,7 @@ func cacheDir(env map[string]string) string {
 }
 
 func dataDir(env map[string]string) string {
-	if value := strings.TrimSpace(envValue(env, "XDG_DATA_HOME")); value != "" {
+	if value := strings.TrimSpace(strs.EnvValue(env, "XDG_DATA_HOME")); value != "" {
 		return value
 	}
 	if home := homeDir(env); home != "" {
@@ -1554,20 +862,13 @@ func dataDir(env map[string]string) string {
 }
 
 func homeDir(env map[string]string) string {
-	if value := strings.TrimSpace(envValue(env, "HOME")); value != "" {
+	if value := strings.TrimSpace(strs.EnvValue(env, "HOME")); value != "" {
 		return value
 	}
 	if home, err := os.UserHomeDir(); err == nil {
 		return home
 	}
 	return ""
-}
-
-func envValue(env map[string]string, key string) string {
-	if env == nil {
-		return os.Getenv(key)
-	}
-	return env[key]
 }
 
 func (s Service) httpClient(timeout ...time.Duration) *http.Client {
@@ -1582,19 +883,15 @@ func (s Service) httpClient(timeout ...time.Duration) *http.Client {
 }
 
 func (s Service) logPrefix() string {
-	return nonEmpty(s.LogPrefix, Prefix)
+	return strs.FirstNonEmpty(s.LogPrefix, Prefix)
 }
 
 func (s Service) ollamaURL() string {
-	return nonEmpty(s.env("S46_LOCAL_OLLAMA_URL"), LocalOllamaURL)
-}
-
-func (s Service) gatewayURL() string {
-	return nonEmpty(s.env("S46_AIRPLANE_GATEWAY_URL"), LocalGatewayURL)
+	return strs.FirstNonEmpty(s.env("S46_LOCAL_OLLAMA_URL"), LocalOllamaURL)
 }
 
 func (s Service) backendModel() string {
-	return nonEmpty(s.env("S46_LOCAL_MODEL"), BackendModel)
+	return strs.FirstNonEmpty(s.env("S46_LOCAL_MODEL"), BackendModel)
 }
 
 func (s Service) env(key string) string {
@@ -1604,42 +901,11 @@ func (s Service) env(key string) string {
 	return s.Env[key]
 }
 
-func (s Service) gatewayMessage(ctx context.Context, ready bool, path string) string {
-	if ready {
-		return "airplane-ready at " + s.gatewayURL()
-	}
-	if s.gatewayResponding(ctx) {
-		return "responding at " + s.gatewayURL() + " but not airplane-ready"
-	}
-	if path != "" {
-		return "startable: " + path
-	}
-	return "not installed or running"
-}
-
 func boolMessage(ok bool, success string, failure string) string {
 	if ok {
 		return success
 	}
 	return failure
-}
-
-func nonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
-}
-
-func truthy(value string) bool {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "", "0", "false", "no", "off":
-		return false
-	default:
-		return true
-	}
 }
 
 func gb(bytes int64) int64 {

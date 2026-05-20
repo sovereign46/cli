@@ -114,9 +114,6 @@ func (c *HTTPClient) Team(ctx context.Context, name string, opts TeamOptions) (T
 	if opts.Lane != "" {
 		query.Set("lane", opts.Lane)
 	}
-	if opts.Mode != "" {
-		query.Set("mode", opts.Mode)
-	}
 	if opts.DefaultModel != "" {
 		query.Set("defaultModel", opts.DefaultModel)
 	}

@@ -4,6 +4,11 @@ import (
 	"github.com/sovereign46/s46-cli/internal/api"
 )
 
+const (
+	ModeCloud    = "cloud"
+	ModeAirplane = "airplane"
+)
+
 type Store struct {
 	Env        map[string]string
 	ConfigPath string
@@ -17,7 +22,6 @@ type Config struct {
 }
 
 type TeamConfig struct {
-	SchemaVersion   int              `json:"schemaVersion"`
 	Endpoint        string           `json:"endpoint"`
 	Lane            string           `json:"lane"`
 	Mode            string           `json:"mode"`
@@ -77,6 +81,18 @@ func DefaultConfig() Config {
 	return Config{Teams: map[string]TeamConfig{}}
 }
 
+func (c Config) ActiveMode() string {
+	if c.Mode != "" {
+		return c.Mode
+	}
+	if c.ActiveTeam != "" {
+		if team, ok := c.Teams[c.ActiveTeam]; ok && team.Mode != "" {
+			return team.Mode
+		}
+	}
+	return ModeCloud
+}
+
 func DefaultState() State {
 	return State{Sessions: map[string]api.Session{}, Shares: map[string]Share{}}
 }
@@ -123,15 +139,14 @@ func (s *Store) SaveState(state State) error {
 	return WriteJSONAtomic(s.StatePath, state, 0o600)
 }
 
-func TeamConfigFromAPI(team api.Team, harness string, model string) TeamConfig {
+func TeamConfigFromAPI(team api.Team, harness string, model string, mode string) TeamConfig {
 	if model == "" {
 		model = team.DefaultModel
 	}
 	return TeamConfig{
-		SchemaVersion:  1,
 		Endpoint:       team.Endpoint,
 		Lane:           team.Lane,
-		Mode:           team.Mode,
+		Mode:           mode,
 		DefaultHarness: harness,
 		DefaultModel:   model,
 		Boxes:          team.Boxes,
@@ -145,7 +160,6 @@ func (tc TeamConfig) API(name string) api.Team {
 		Name:         name,
 		Endpoint:     tc.Endpoint,
 		Lane:         tc.Lane,
-		Mode:         tc.Mode,
 		Boxes:        tc.Boxes,
 		DefaultModel: tc.DefaultModel,
 		Models:       tc.Models,

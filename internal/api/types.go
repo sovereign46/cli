@@ -15,19 +15,43 @@ var DefaultModels = []string{
 	"s46/mistral-large",
 }
 
-type Client interface {
+// DeviceAuthAPI covers magic-link / device-auth flows.
+type DeviceAuthAPI interface {
 	StartDeviceLogin(ctx context.Context, req DeviceLoginRequest) (DeviceLogin, error)
 	PollDeviceLogin(ctx context.Context, deviceCode string) (TokenSet, error)
 	RefreshToken(ctx context.Context, refreshToken string, account string) (TokenSet, error)
+}
+
+// AccountAPI covers per-user account/device lookups.
+type AccountAPI interface {
 	Me(ctx context.Context, accessToken string) (User, error)
 	Devices(ctx context.Context, accessToken string) ([]Device, error)
 	DeleteDevice(ctx context.Context, deviceID string, accessToken string) error
+}
+
+// TeamAPI returns workspace/team metadata.
+type TeamAPI interface {
 	Team(ctx context.Context, name string, opts TeamOptions) (Team, error)
+}
+
+// SessionAPI covers lifecycle operations on coding-agent sessions.
+type SessionAPI interface {
 	Sessions(ctx context.Context, team Team, accessToken string) ([]Session, error)
 	Detach(ctx context.Context, req DetachRequest) (Session, error)
 	Resume(ctx context.Context, req ResumeRequest) (Session, error)
 	Attach(ctx context.Context, req AttachRequest) (AttachResult, error)
 	Land(ctx context.Context, req LandRequest) (LandResult, error)
+}
+
+// Client is the umbrella API used by application services that span
+// multiple subdomains. New code should prefer the narrowest interface
+// it actually needs (DeviceAuthAPI, AccountAPI, TeamAPI, SessionAPI)
+// so tests can pass tighter fakes.
+type Client interface {
+	DeviceAuthAPI
+	AccountAPI
+	TeamAPI
+	SessionAPI
 }
 
 type DeviceLoginRequest struct {
@@ -68,7 +92,6 @@ type User struct {
 type TeamOptions struct {
 	Endpoint     string
 	Lane         string
-	Mode         string
 	DefaultModel string
 	AccessToken  string
 }
@@ -77,7 +100,6 @@ type Team struct {
 	Name         string   `json:"name"`
 	Endpoint     string   `json:"endpoint"`
 	Lane         string   `json:"lane"`
-	Mode         string   `json:"mode"`
 	Boxes        []string `json:"boxes"`
 	DefaultModel string   `json:"defaultModel"`
 	Models       []string `json:"models"`

@@ -89,8 +89,26 @@ func (a Adapter) PlanDisconnect(ctx context.Context, req harness.DisconnectReque
 	}, nil
 }
 
-func (a Adapter) ApplyConnect(ctx context.Context, plan harness.Plan) (harness.AppliedPlan, error) {
+func (a Adapter) Apply(ctx context.Context, plan harness.Plan) (harness.AppliedPlan, error) {
 	return harness.ApplyPlan(nil, plan)
+}
+
+func (a Adapter) Status(ctx context.Context, req harness.StatusRequest) []harness.StatusCheck {
+	path := filepath.Join(config.HomeDir(req.Env), ".codex", "config.toml")
+	raw, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return []harness.StatusCheck{{Name: "codex-config", OK: false, Message: fmt.Sprintf("not configured; run `s46 connect %s --harness=codex`", req.TeamName)}}
+	}
+	if err != nil {
+		return []harness.StatusCheck{{Name: "codex-config", OK: false, Message: err.Error()}}
+	}
+	text := string(raw)
+	return []harness.StatusCheck{
+		{Name: "codex-provider", OK: strings.Contains(text, "[model_providers.s46]"), Message: path},
+		{Name: "codex-base-url", OK: strings.Contains(text, fmt.Sprintf("base_url = %q", req.Endpoint+"/codex")), Message: req.Endpoint + "/codex"},
+		{Name: "codex-token-helper", OK: strings.Contains(text, `token_helper = "s46 token --refresh"`), Message: "s46 token --refresh"},
+		{Name: "codex-profile", OK: strings.Contains(text, "[profiles.s46]"), Message: "profile s46"},
+	}
 }
 
 func codexBlock(req harness.ConnectRequest) string {

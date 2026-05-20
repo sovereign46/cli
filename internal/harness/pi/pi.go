@@ -122,8 +122,31 @@ func (a Adapter) PlanDisconnect(ctx context.Context, req harness.DisconnectReque
 	}, nil
 }
 
-func (a Adapter) ApplyConnect(ctx context.Context, plan harness.Plan) (harness.AppliedPlan, error) {
+func (a Adapter) Apply(ctx context.Context, plan harness.Plan) (harness.AppliedPlan, error) {
 	return harness.ApplyPlan(nil, plan)
+}
+
+func (a Adapter) Status(ctx context.Context, req harness.StatusRequest) []harness.StatusCheck {
+	path := filepath.Join(config.HomeDir(req.Env), ".pi", "agent", "models.json")
+	raw, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return []harness.StatusCheck{{Name: "pi-config", OK: false, Message: fmt.Sprintf("not configured; run `s46 connect %s --harness=pi`", req.TeamName)}}
+	}
+	if err != nil {
+		return []harness.StatusCheck{{Name: "pi-config", OK: false, Message: err.Error()}}
+	}
+	models := map[string]any{}
+	if err := json.Unmarshal(raw, &models); err != nil {
+		return []harness.StatusCheck{{Name: "pi-config", OK: false, Message: err.Error()}}
+	}
+	providers, _ := models["providers"].(map[string]any)
+	s46, _ := providers["s46"].(map[string]any)
+	return []harness.StatusCheck{
+		{Name: "pi-provider", OK: s46 != nil, Message: path},
+		{Name: "pi-base-url", OK: s46["baseUrl"] == req.Endpoint+"/v1", Message: fmt.Sprint(s46["baseUrl"])},
+		{Name: "pi-token-helper", OK: s46["apiKey"] == "!s46 token --refresh", Message: fmt.Sprint(s46["apiKey"])},
+		{Name: "pi-auth-header", OK: s46["authHeader"] == true, Message: fmt.Sprint(s46["authHeader"])},
+	}
 }
 
 func piModels(ids []string, mode string, env map[string]string) []map[string]any {

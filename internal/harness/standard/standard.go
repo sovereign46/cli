@@ -40,6 +40,10 @@ func (a Adapter) PlanDisconnect(ctx context.Context, req harness.DisconnectReque
 	}, nil
 }
 
-func (a Adapter) ApplyConnect(ctx context.Context, plan harness.Plan) (harness.AppliedPlan, error) {
+func (a Adapter) Apply(ctx context.Context, plan harness.Plan) (harness.AppliedPlan, error) {
 	return harness.AppliedPlan{Plan: plan}, nil
+}
+
+func (a Adapter) Status(ctx context.Context, req harness.StatusRequest) []harness.StatusCheck {
+	return []harness.StatusCheck{{Name: "standard", OK: true, Message: "no third-party harness config required"}}
 }

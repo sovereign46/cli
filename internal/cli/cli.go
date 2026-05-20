@@ -3,7 +3,6 @@ package cli
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -31,6 +30,7 @@ import (
 	"github.com/sovereign46/s46-cli/internal/keyring"
 	"github.com/sovereign46/s46-cli/internal/output"
 	sessioncmd "github.com/sovereign46/s46-cli/internal/session"
+	"github.com/sovereign46/s46-cli/internal/strs"
 	"github.com/sovereign46/s46-cli/internal/updater"
 	"github.com/sovereign46/s46-cli/internal/version"
 )
@@ -142,7 +142,7 @@ func airplaneHelpActive(env map[string]string, configPath string) bool {
 		env = ProcessEnv()
 	}
 	cfg, err := config.NewStore(env, configPath).LoadConfig()
-	return err == nil && activeMode(cfg) == airplane.ModeAirplane
+	return err == nil && cfg.ActiveMode() == config.ModeAirplane
 }
 
 func airplaneHelpNotice() string {
@@ -184,7 +184,7 @@ func checkForStartupUpdate(ctx context.Context, runtime Runtime, opts *options, 
 }
 
 func skipStartupUpdateCheck(cmd *cobra.Command, env map[string]string) bool {
-	if truthy(env["S46_SKIP_STARTUP_UPDATE_CHECK"]) || updater.IsCheckDisabled(env) {
+	if strs.Truthy(env["S46_SKIP_STARTUP_UPDATE_CHECK"]) || updater.IsCheckDisabled(env) {
 		return true
 	}
 	path := cmd.CommandPath()
@@ -208,7 +208,7 @@ func activeOutputPrefix(store *config.Store) string {
 	if err != nil {
 		return "[s46]"
 	}
-	if activeMode(cfg) == airplane.ModeAirplane {
+	if cfg.ActiveMode() == config.ModeAirplane {
 		return airplane.Prefix
 	}
 	return "[s46]"
@@ -219,22 +219,10 @@ func apiClientForMode(env map[string]string, store *config.Store) api.Client {
 		return api.NewClientFromEnv(env)
 	}
 	cfg, err := store.LoadConfig()
-	if err == nil && activeMode(cfg) == airplane.ModeAirplane {
+	if err == nil && cfg.ActiveMode() == config.ModeAirplane {
 		return api.NewHTTPClient(airplane.LocalGatewayURL)
 	}
 	return api.NewClientFromEnv(env)
-}
-
-func activeMode(cfg config.Config) string {
-	if cfg.Mode != "" {
-		return cfg.Mode
-	}
-	if cfg.ActiveTeam != "" {
-		if team := cfg.Teams[cfg.ActiveTeam]; team.Mode == airplane.ModeAirplane {
-			return airplane.ModeAirplane
-		}
-	}
-	return airplane.ModeCloud
 }
 
 func newApp(runtime Runtime, opts *options) (*app, error) {
@@ -286,7 +274,7 @@ func loginCommand(runtime Runtime, opts *options) *cobra.Command {
 			if err := app.requireCloudFeature("login"); err != nil {
 				return err
 			}
-			service := auth.Service{API: app.api, Config: app.config, Keyring: app.keyring}
+			service := app.authService()
 			req := auth.LoginRequest{Email: email, Team: team, DeviceID: deviceID, DeviceName: deviceName}
 			interactive := !opts.json && !loginFlagChanged(cmd)
 			alreadyAuthenticated := false
@@ -358,8 +346,8 @@ func promptLoginRequest(app *app, req auth.LoginRequest) (auth.LoginRequest, err
 	if err != nil {
 		return auth.LoginRequest{}, err
 	}
-	defaultID := firstNonEmpty(app.runtime.Env["S46_DEVICE_ID"], state.CurrentDeviceID, app.runtime.Env["HOSTNAME"], hostname(), "default-device")
-	defaultName := firstNonEmpty(app.runtime.Env["S46_DEVICE_NAME"], state.CurrentDeviceName, app.runtime.Env["HOSTNAME"], hostname(), defaultID)
+	defaultID := strs.FirstNonEmpty(app.runtime.Env["S46_DEVICE_ID"], state.CurrentDeviceID, app.runtime.Env["HOSTNAME"], hostname(), "default-device")
+	defaultName := strs.FirstNonEmpty(app.runtime.Env["S46_DEVICE_NAME"], state.CurrentDeviceName, app.runtime.Env["HOSTNAME"], hostname(), defaultID)
 	reader := app.stdinReader()
 	if _, err := fmt.Fprintln(out, "[s46] interactive login: waiting for input (use --user/--device-id for non-interactive runs)"); err != nil {
 		return auth.LoginRequest{}, err
@@ -468,7 +456,7 @@ func logoutCommand(runtime Runtime, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			service := auth.Service{API: app.api, Config: app.config, Keyring: app.keyring}
+			service := app.authService()
 			var user string
 			if err := app.withLock(cmd.Context(), func() error {
 				var err error
@@ -498,7 +486,7 @@ func whoamiCommand(runtime Runtime, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			service := auth.Service{API: app.api, Config: app.config, Keyring: app.keyring}
+			service := app.authService()
 			user, err := service.Whoami(cmd.Context())
 			if err != nil {
 				return err
@@ -522,7 +510,7 @@ func tokenCommand(runtime Runtime, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			service := auth.Service{API: app.api, Config: app.config, Keyring: app.keyring}
+			service := app.authService()
 			token, err := service.Token(cmd.Context(), refresh)
 			if err != nil {
 				return err
@@ -548,7 +536,7 @@ func devicesCommand(runtime Runtime, opts *options) *cobra.Command {
 			if err := app.requireCloudFeature("devices"); err != nil {
 				return err
 			}
-			service := auth.Service{API: app.api, Config: app.config, Keyring: app.keyring}
+			service := app.authService()
 			devices, err := service.Devices(cmd.Context())
 			if err != nil {
 				return err
@@ -577,7 +565,7 @@ func deleteDeviceCommand(runtime Runtime, opts *options) *cobra.Command {
 			if err := app.requireCloudFeature("device revocation"); err != nil {
 				return err
 			}
-			service := auth.Service{API: app.api, Config: app.config, Keyring: app.keyring}
+			service := app.authService()
 			var revokedCurrent bool
 			if err := app.withLock(cmd.Context(), func() error {
 				var err error
@@ -807,7 +795,7 @@ func promptConnectRequest(app *app, req connectRequest) (connectRequest, error) 
 	if err != nil {
 		return connectRequest{}, err
 	}
-	req.Scope, err = promptWithDefault(reader, out, "Scope (user, project)", firstNonEmpty(req.Scope, "user"))
+	req.Scope, err = promptWithDefault(reader, out, "Scope (user, project)", strs.FirstNonEmpty(req.Scope, "user"))
 	if err != nil {
 		return connectRequest{}, err
 	}
@@ -816,7 +804,7 @@ func promptConnectRequest(app *app, req connectRequest) (connectRequest, error) 
 
 func promptMissingHarness(app *app, req connectRequest) (string, error) {
 	if app.runtime.Stdin == nil {
-		return "", fmt.Errorf("interactive connect requires stdin; pass --harness <name>\n[s46] options: %s", app.harness.NamesString())
+		return "", fmt.Errorf("interactive connect requires stdin; pass --harness <name>\noptions: %s", app.harness.NamesString())
 	}
 	out := app.runtime.Stdout
 	if out == nil {
@@ -896,26 +884,27 @@ func runConnect(ctx context.Context, app *app, req connectRequest) error {
 	if err != nil {
 		return err
 	}
-	if req.TeamName == "" && (activeMode(cfg) == airplane.ModeAirplane || req.Mode == airplane.ModeAirplane) {
-		req.TeamName = firstNonEmpty(cfg.ActiveTeam, localAirplaneTeamName)
+	if req.TeamName == "" && (cfg.ActiveMode() == config.ModeAirplane || req.Mode == config.ModeAirplane) {
+		req.TeamName = strs.FirstNonEmpty(cfg.ActiveTeam, localAirplaneTeamName)
 	}
 	if req.TeamName == "" {
 		return fmt.Errorf("team is required; pass `s46 connect <team>` or run bare `s46 connect` interactively")
 	}
 	existing := cfg.Teams[req.TeamName]
-	team, err := connectTeam(ctx, app, cfg, existing, req)
+	targetMode := resolveConnectMode(cfg, existing, req)
+	team, err := connectTeam(ctx, app, targetMode, existing, req)
 	if err != nil {
 		return err
 	}
-	selectedModel := firstNonEmpty(req.Model, team.DefaultModel, api.DefaultModel)
-	plan, err := adapter.PlanConnect(ctx, harness.ConnectRequest{Env: app.runtime.Env, Team: team, Model: selectedModel, Mode: team.Mode, Scope: req.Scope, DryRun: app.options.dryRun})
+	selectedModel := strs.FirstNonEmpty(req.Model, team.DefaultModel, api.DefaultModel)
+	plan, err := adapter.PlanConnect(ctx, harness.ConnectRequest{Env: app.runtime.Env, Team: team, Model: selectedModel, Mode: targetMode, Scope: req.Scope, DryRun: app.options.dryRun})
 	if err != nil {
 		return err
 	}
 	result := map[string]any{
 		"team":       team.Name,
 		"lane":       team.Lane,
-		"mode":       team.Mode,
+		"mode":       targetMode,
 		"harness":    harnessName,
 		"model":      selectedModel,
 		"endpoint":   team.Endpoint,
@@ -926,39 +915,66 @@ func runConnect(ctx context.Context, app *app, req connectRequest) error {
 	if app.options.dryRun {
 		return renderConnectDryRun(app, team, plan, result)
 	}
-	applied, err := adapter.ApplyConnect(ctx, plan)
-	if err != nil {
-		return err
-	}
+	cfgBefore := cfg
 	if cfg.Teams == nil {
 		cfg.Teams = map[string]config.TeamConfig{}
 	}
 	cfg.ActiveTeam = team.Name
-	if team.Mode == airplane.ModeAirplane {
-		cfg.Mode = airplane.ModeAirplane
+	if targetMode == config.ModeAirplane {
+		cfg.Mode = config.ModeAirplane
 	}
-	teamConfig := config.TeamConfigFromAPI(team, harnessName, selectedModel)
-	if team.Mode == airplane.ModeAirplane && existing.APISnapshot.Endpoint != "" && !isLocalEndpoint(existing.APISnapshot.Endpoint) {
+	teamConfig := config.TeamConfigFromAPI(team, harnessName, selectedModel, targetMode)
+	if targetMode == config.ModeAirplane && existing.APISnapshot.Endpoint != "" && !isLocalEndpoint(existing.APISnapshot.Endpoint) {
 		teamConfig.APISnapshot = existing.APISnapshot
 	}
 	cfg.Teams[team.Name] = teamConfig
 	if err := app.config.SaveConfig(cfg); err != nil {
 		return err
 	}
+	applied, err := adapter.Apply(ctx, plan)
+	if err != nil {
+		// Roll back: first restore the harness files we touched, then
+		// restore the prior s46 config. We surface the original cause
+		// while annotating any rollback failures so the user can see
+		// the leftover state instead of silent half-finished writes.
+		rollbackErr := harness.RollbackPlan(applied)
+		if saveErr := app.config.SaveConfig(cfgBefore); saveErr != nil {
+			if rollbackErr != nil {
+				return fmt.Errorf("connect failed: %w; rollback errors: %v; config restore: %v", err, rollbackErr, saveErr)
+			}
+			return fmt.Errorf("connect failed: %w; config restore: %v", err, saveErr)
+		}
+		if rollbackErr != nil {
+			return fmt.Errorf("connect failed: %w; rollback: %v", err, rollbackErr)
+		}
+		return fmt.Errorf("connect failed: %w", err)
+	}
 	result["files"] = applied.Files
 	return renderConnectApplied(app, team, plan, applied, result)
 }
 
-func connectTeam(ctx context.Context, app *app, cfg config.Config, existing config.TeamConfig, req connectRequest) (api.Team, error) {
-	if activeMode(cfg) == airplane.ModeAirplane || req.Mode == airplane.ModeAirplane || isLocalEndpoint(req.Endpoint) {
+func resolveConnectMode(cfg config.Config, existing config.TeamConfig, req connectRequest) string {
+	if req.Mode == config.ModeAirplane || isLocalEndpoint(req.Endpoint) {
+		return config.ModeAirplane
+	}
+	if req.Mode == config.ModeCloud {
+		return config.ModeCloud
+	}
+	if cfg.ActiveMode() == config.ModeAirplane {
+		return config.ModeAirplane
+	}
+	return strs.FirstNonEmpty(existing.Mode, config.ModeCloud)
+}
+
+func connectTeam(ctx context.Context, app *app, mode string, existing config.TeamConfig, req connectRequest) (api.Team, error) {
+	if mode == config.ModeAirplane {
 		return localAirplaneTeam(req.TeamName, existing, req), nil
 	}
 	accessToken := app.accessToken(ctx)
 	return app.api.Team(ctx, req.TeamName, api.TeamOptions{
-		Endpoint:     firstNonEmpty(req.Endpoint, existing.Endpoint),
-		Lane:         firstNonEmpty(req.Lane, existing.Lane),
-		Mode:         firstNonEmpty(req.Mode, existing.Mode),
-		DefaultModel: firstNonEmpty(req.Model, existing.DefaultModel, api.DefaultModel),
+		Endpoint:     strs.FirstNonEmpty(req.Endpoint, existing.Endpoint),
+		Lane:         strs.FirstNonEmpty(req.Lane, existing.Lane),
+		DefaultModel: strs.FirstNonEmpty(req.Model, existing.DefaultModel, api.DefaultModel),
 		AccessToken:  accessToken,
 	})
 }
@@ -1090,7 +1106,7 @@ func runDisconnect(ctx context.Context, app *app, teamName string, harnessName s
 		lines = append(lines, "", "[s46] dry-run: no files written")
 		return app.renderer.Lines(lines...)
 	}
-	applied, err := adapter.ApplyConnect(ctx, plan)
+	applied, err := adapter.Apply(ctx, plan)
 	if err != nil {
 		return err
 	}
@@ -1157,9 +1173,9 @@ func teamsUseCommand(runtime Runtime, opts *options) *cobra.Command {
 				return nil
 			}
 			if len(args) == 0 {
-				return fmt.Errorf("missing team\n[s46] expected: s46 teams use <team>")
+				return fmt.Errorf("missing team\nexpected: s46 teams use <team>")
 			}
-			return fmt.Errorf("too many arguments\n[s46] expected: s46 teams use <team>")
+			return fmt.Errorf("too many arguments\nexpected: s46 teams use <team>")
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := newApp(runtime, opts)
@@ -1212,7 +1228,7 @@ func teamListEntries(cfg config.Config) []teamListEntry {
 			Active:   name == cfg.ActiveTeam,
 			Mode:     team.Mode,
 			Lane:     team.Lane,
-			Harness:  firstNonEmpty(team.DefaultHarness, harness.DefaultName),
+			Harness:  strs.FirstNonEmpty(team.DefaultHarness, harness.DefaultName),
 			Model:    team.DefaultModel,
 			Endpoint: team.Endpoint,
 		})
@@ -1263,7 +1279,7 @@ func statusChecks(ctx context.Context, app *app, teamName string, teamConfig con
 	checks := []statusCheck{
 		{Name: "tenant", OK: tenantEndpointOK(app.runtime.Env, teamName, teamConfig.Endpoint), Message: teamConfig.Endpoint},
 	}
-	harnessName := firstNonEmpty(teamConfig.DefaultHarness, harness.DefaultName)
+	harnessName := strs.FirstNonEmpty(teamConfig.DefaultHarness, harness.DefaultName)
 	teamConfig.DefaultHarness = harnessName
 	adapter, err := app.harness.Get(harnessName)
 	if err != nil {
@@ -1275,8 +1291,8 @@ func statusChecks(ctx context.Context, app *app, teamName string, teamConfig con
 		checks = append(checks, statusCheck{Name: "harness", OK: false, Message: err.Error()})
 		return checks
 	}
-	checks = append(checks, statusCheck{Name: "harness", OK: detection.Installed || harnessName == "standard", Message: firstNonEmpty(detection.Path, harnessName)})
-	checks = append(checks, statusHarnessConfig(app, teamName, teamConfig)...)
+	checks = append(checks, statusCheck{Name: "harness", OK: detection.Installed || harnessName == "standard", Message: strs.FirstNonEmpty(detection.Path, harnessName)})
+	checks = append(checks, statusHarnessConfig(ctx, app, teamName, teamConfig)...)
 	return checks
 }
 
@@ -1290,7 +1306,7 @@ func tenantEndpointOK(env map[string]string, teamName string, endpoint string) b
 	if origin, ok := api.LocalDevelopmentOrigin(env["S46_API_BASE_URL"]); ok && endpoint == origin {
 		return true
 	}
-	if truthy(env["S46_DEV_SHELL"]) {
+	if strs.Truthy(env["S46_DEV_SHELL"]) {
 		baseURL := env["S46_DEV_BASE_URL"]
 		if baseURL == "" {
 			baseURL = "http://127.0.0.1:8080"
@@ -1302,90 +1318,23 @@ func tenantEndpointOK(env map[string]string, teamName string, endpoint string) b
 	return false
 }
 
-func truthy(value string) bool {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "", "0", "false", "no", "off":
-		return false
-	default:
-		return true
-	}
-}
-
-func statusHarnessConfig(app *app, teamName string, teamConfig config.TeamConfig) []statusCheck {
-	switch teamConfig.DefaultHarness {
-	case "claude-code":
-		return statusClaude(app.runtime.Env, teamName, teamConfig)
-	case "codex":
-		return statusCodex(app.runtime.Env, teamName, teamConfig)
-	case "pi":
-		return statusPi(app.runtime.Env, teamName, teamConfig)
-	case "standard":
-		return []statusCheck{{Name: "standard", OK: true, Message: "no third-party harness config required"}}
-	default:
+func statusHarnessConfig(ctx context.Context, app *app, teamName string, teamConfig config.TeamConfig) []statusCheck {
+	adapter, err := app.harness.Get(teamConfig.DefaultHarness)
+	if err != nil {
 		return []statusCheck{{Name: "harness-config", OK: false, Message: "unknown harness " + teamConfig.DefaultHarness}}
 	}
-}
-
-func statusClaude(env map[string]string, teamName string, teamConfig config.TeamConfig) []statusCheck {
-	path := filepath.Join(config.HomeDir(env), ".claude", "settings.json")
-	raw, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return []statusCheck{{Name: "claude-config", OK: false, Message: fmt.Sprintf("not configured; run `s46 connect %s --harness=claude-code`", teamName)}}
+	req := harness.StatusRequest{
+		Env:          app.runtime.Env,
+		TeamName:     teamName,
+		Endpoint:     teamConfig.Endpoint,
+		DefaultModel: teamConfig.DefaultModel,
 	}
-	if err != nil {
-		return []statusCheck{{Name: "claude-config", OK: false, Message: err.Error()}}
+	out := adapter.Status(ctx, req)
+	checks := make([]statusCheck, len(out))
+	for i, c := range out {
+		checks[i] = statusCheck{Name: c.Name, OK: c.OK, Message: c.Message}
 	}
-	settings := map[string]any{}
-	if err := json.Unmarshal(raw, &settings); err != nil {
-		return []statusCheck{{Name: "claude-config", OK: false, Message: err.Error()}}
-	}
-	envMap, _ := settings["env"].(map[string]any)
-	return []statusCheck{
-		{Name: "claude-token-helper", OK: settings["apiKeyHelper"] == "s46 token --refresh", Message: fmt.Sprint(settings["apiKeyHelper"])},
-		{Name: "claude-base-url", OK: envMap["ANTHROPIC_BASE_URL"] == teamConfig.Endpoint+"/anthropic", Message: fmt.Sprint(envMap["ANTHROPIC_BASE_URL"])},
-		{Name: "claude-model", OK: settings["model"] == teamConfig.DefaultModel && envMap["ANTHROPIC_MODEL"] == teamConfig.DefaultModel && envMap["ANTHROPIC_DEFAULT_SONNET_MODEL"] == teamConfig.DefaultModel, Message: fmt.Sprint(settings["model"])},
-	}
-}
-
-func statusCodex(env map[string]string, teamName string, teamConfig config.TeamConfig) []statusCheck {
-	path := filepath.Join(config.HomeDir(env), ".codex", "config.toml")
-	raw, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return []statusCheck{{Name: "codex-config", OK: false, Message: fmt.Sprintf("not configured; run `s46 connect %s --harness=codex`", teamName)}}
-	}
-	if err != nil {
-		return []statusCheck{{Name: "codex-config", OK: false, Message: err.Error()}}
-	}
-	text := string(raw)
-	return []statusCheck{
-		{Name: "codex-provider", OK: strings.Contains(text, "[model_providers.s46]"), Message: path},
-		{Name: "codex-base-url", OK: strings.Contains(text, fmt.Sprintf("base_url = %q", teamConfig.Endpoint+"/codex")), Message: teamConfig.Endpoint + "/codex"},
-		{Name: "codex-token-helper", OK: strings.Contains(text, `token_helper = "s46 token --refresh"`), Message: "s46 token --refresh"},
-		{Name: "codex-profile", OK: strings.Contains(text, "[profiles.s46]"), Message: "profile s46"},
-	}
-}
-
-func statusPi(env map[string]string, teamName string, teamConfig config.TeamConfig) []statusCheck {
-	path := filepath.Join(config.HomeDir(env), ".pi", "agent", "models.json")
-	raw, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return []statusCheck{{Name: "pi-config", OK: false, Message: fmt.Sprintf("not configured; run `s46 connect %s --harness=pi`", teamName)}}
-	}
-	if err != nil {
-		return []statusCheck{{Name: "pi-config", OK: false, Message: err.Error()}}
-	}
-	models := map[string]any{}
-	if err := json.Unmarshal(raw, &models); err != nil {
-		return []statusCheck{{Name: "pi-config", OK: false, Message: err.Error()}}
-	}
-	providers, _ := models["providers"].(map[string]any)
-	s46, _ := providers["s46"].(map[string]any)
-	return []statusCheck{
-		{Name: "pi-provider", OK: s46 != nil, Message: path},
-		{Name: "pi-base-url", OK: s46["baseUrl"] == teamConfig.Endpoint+"/v1", Message: fmt.Sprint(s46["baseUrl"])},
-		{Name: "pi-token-helper", OK: s46["apiKey"] == "!s46 token --refresh", Message: fmt.Sprint(s46["apiKey"])},
-		{Name: "pi-auth-header", OK: s46["authHeader"] == true, Message: fmt.Sprint(s46["authHeader"])},
-	}
+	return checks
 }
 
 type localServerStatus struct {
@@ -1441,7 +1390,6 @@ func statusCommand(runtime Runtime, opts *options) *cobra.Command {
 				"checks":        checks,
 				"localServers":  localServers,
 				"ollama":        ollamaRuntime,
-				"mock":          true,
 			}
 			if opts.json {
 				if err := app.renderer.WriteJSON(result); err != nil {
@@ -1452,33 +1400,12 @@ func statusCommand(runtime Runtime, opts *options) *cobra.Command {
 				}
 				return nil
 			}
-			lines := []string{
-				fmt.Sprintf("[s46] auth:    %s", authStatus(state)),
-				fmt.Sprintf("[s46] config:  %s", config.DisplayPath(app.config.ConfigPath, runtime.Env)),
-			}
-			if team != nil {
-				lines = append(lines,
-					fmt.Sprintf("[s46] team:    %s", cfg.ActiveTeam),
-					fmt.Sprintf("[s46] lane:    %s", team.Lane),
-					fmt.Sprintf("[s46] mode:    %s", team.Mode),
-					fmt.Sprintf("[s46] harness: %s", firstNonEmpty(team.DefaultHarness, harness.DefaultName)),
-					fmt.Sprintf("[s46] model:   %s", team.DefaultModel),
-					fmt.Sprintf("[s46] api:     %s", team.Endpoint),
-				)
-				for _, server := range localServers {
-					lines = append(lines, renderLocalServerStatus(server))
-				}
-				lines = append(lines, renderOllamaRuntime(ollamaRuntime)...)
-				lines = append(lines, renderStatusChecks(checks)...)
+			var lines []string
+			if opts.verbose {
+				lines = renderStatusVerbose(app, cfg, state, team, localServers, ollamaRuntime, checks)
 			} else {
-				lines = append(lines, "[s46] team:    none")
-				for _, server := range localServers {
-					lines = append(lines, renderLocalServerStatus(server))
-				}
-				lines = append(lines, renderOllamaRuntime(ollamaRuntime)...)
-				lines = append(lines, renderStatusChecks(checks)...)
+				lines = renderStatusConcise(app, cfg, state, team, localServers, ollamaRuntime, checks)
 			}
-			lines = append(lines, fmt.Sprintf("[s46] sessions:%2d", len(state.Sessions)))
 			if err := app.renderer.Lines(lines...); err != nil {
 				return err
 			}
@@ -1488,6 +1415,103 @@ func statusCommand(runtime Runtime, opts *options) *cobra.Command {
 			return nil
 		},
 	}
+}
+
+func renderStatusConcise(app *app, cfg config.Config, state config.State, team *config.TeamConfig, localServers []localServerStatus, ollamaRuntime airplane.OllamaRuntime, checks []statusCheck) []string {
+	lines := []string{fmt.Sprintf("[s46] auth:    %s", authStatus(state))}
+	if team == nil {
+		lines = append(lines, "[s46] team:    none")
+	} else {
+		harnessName := strs.FirstNonEmpty(team.DefaultHarness, harness.DefaultName)
+		lines = append(lines,
+			fmt.Sprintf("[s46] team:    %s · %s · %s", cfg.ActiveTeam, team.Lane, team.Mode),
+			fmt.Sprintf("[s46] harness: %s · %s", harnessName, team.DefaultModel),
+			fmt.Sprintf("[s46] api:     %s", team.Endpoint),
+		)
+	}
+	lines = append(lines, renderOllamaRuntimeConcise(ollamaRuntime))
+	for _, server := range localServers {
+		if server.Name == "ollama" {
+			continue // Ollama runtime line above already reports this.
+		}
+		lines = append(lines, renderLocalServerStatusConcise(server))
+	}
+	lines = append(lines, renderStatusChecksConcise(checks))
+	if statusChecksFailed(checks) {
+		lines = append(lines, "[s46] re-run with --verbose for details")
+	}
+	lines = append(lines, fmt.Sprintf("[s46] sessions:%2d", len(state.Sessions)))
+	return lines
+}
+
+func renderStatusVerbose(app *app, cfg config.Config, state config.State, team *config.TeamConfig, localServers []localServerStatus, ollamaRuntime airplane.OllamaRuntime, checks []statusCheck) []string {
+	lines := []string{
+		fmt.Sprintf("[s46] auth:    %s", authStatus(state)),
+		fmt.Sprintf("[s46] config:  %s", config.DisplayPath(app.config.ConfigPath, app.runtime.Env)),
+	}
+	if team != nil {
+		lines = append(lines,
+			fmt.Sprintf("[s46] team:    %s", cfg.ActiveTeam),
+			fmt.Sprintf("[s46] lane:    %s", team.Lane),
+			fmt.Sprintf("[s46] mode:    %s", team.Mode),
+			fmt.Sprintf("[s46] harness: %s", strs.FirstNonEmpty(team.DefaultHarness, harness.DefaultName)),
+			fmt.Sprintf("[s46] model:   %s", team.DefaultModel),
+			fmt.Sprintf("[s46] api:     %s", team.Endpoint),
+		)
+	} else {
+		lines = append(lines, "[s46] team:    none")
+	}
+	for _, server := range localServers {
+		lines = append(lines, renderLocalServerStatus(server))
+	}
+	lines = append(lines, renderOllamaRuntime(ollamaRuntime)...)
+	lines = append(lines, renderStatusChecks(checks)...)
+	lines = append(lines, fmt.Sprintf("[s46] sessions:%2d", len(state.Sessions)))
+	return lines
+}
+
+func renderStatusChecksConcise(checks []statusCheck) string {
+	if len(checks) == 0 {
+		return "[s46] checks:  none"
+	}
+	pass := 0
+	var firstFail string
+	for _, check := range checks {
+		if check.OK {
+			pass++
+		} else if firstFail == "" {
+			firstFail = check.Name
+		}
+	}
+	if pass == len(checks) {
+		return fmt.Sprintf("[s46] checks:  %d/%d ok", pass, len(checks))
+	}
+	return fmt.Sprintf("[s46] checks:  %d/%d ok (first fail: %s)", pass, len(checks), firstFail)
+}
+
+func renderLocalServerStatusConcise(status localServerStatus) string {
+	label := status.Name + ":"
+	switch status.Status {
+	case "listening":
+		if status.PID != "" {
+			return fmt.Sprintf("[s46] %-9sok · pid %s", label, status.PID)
+		}
+		return fmt.Sprintf("[s46] %-9sok", label)
+	case "not_listening":
+		return fmt.Sprintf("[s46] %-9snot running", label)
+	default:
+		return fmt.Sprintf("[s46] %-9s%s", label, strs.FirstNonEmpty(status.Message, "unknown"))
+	}
+}
+
+func renderOllamaRuntimeConcise(runtimeReport airplane.OllamaRuntime) string {
+	if !runtimeReport.Running {
+		return "[s46] ollama:  not running"
+	}
+	if runtimeReport.NeedsLaunchctlUpdate() || runtimeReport.NeedsProcessRestart() {
+		return "[s46] ollama:  running (settings drift; re-run with --verbose)"
+	}
+	return "[s46] ollama:  ok"
 }
 
 func renderStatusChecks(checks []statusCheck) []string {
@@ -1516,7 +1540,7 @@ func statusChecksFailed(checks []statusCheck) bool {
 
 func statusLocalServers(env map[string]string, team *config.TeamConfig) []localServerStatus {
 	servers := []localServerStatus{}
-	ollamaURL := firstNonEmpty(env["S46_LOCAL_OLLAMA_URL"], airplane.LocalOllamaURL)
+	ollamaURL := strs.FirstNonEmpty(env["S46_LOCAL_OLLAMA_URL"], airplane.LocalOllamaURL)
 	if isLocalURL(ollamaURL) {
 		servers = append(servers, describeLocalServer(env, "ollama", ollamaURL))
 	}
@@ -1587,7 +1611,7 @@ func renderLocalServerStatus(status localServerStatus) string {
 	}
 	switch status.Status {
 	case "listening":
-		process := firstNonEmpty(status.Process, "unknown")
+		process := strs.FirstNonEmpty(status.Process, "unknown")
 		if status.PID != "" {
 			parts = append(parts, fmt.Sprintf("pid %s (%s)", status.PID, process))
 		} else {
@@ -1596,7 +1620,7 @@ func renderLocalServerStatus(status localServerStatus) string {
 	case "not_listening":
 		parts = append(parts, "not listening")
 	default:
-		parts = append(parts, firstNonEmpty(status.Message, "process unknown"))
+		parts = append(parts, strs.FirstNonEmpty(status.Message, "process unknown"))
 	}
 	return fmt.Sprintf("[s46] local %-7s %s", status.Name+":", strings.Join(parts, " · "))
 }
@@ -1692,7 +1716,7 @@ func sessionsCommand(runtime Runtime, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			service := sessioncmd.Service{API: app.api, Config: app.config, Keyring: app.keyring}
+			service := app.sessionService()
 			sessions, err := service.List(cmd.Context())
 			if err != nil {
 				return err
@@ -1702,7 +1726,7 @@ func sessionsCommand(runtime Runtime, opts *options) *cobra.Command {
 			}
 			rows := make([][]string, 0, len(sessions))
 			for _, session := range sessions {
-				rows = append(rows, []string{session.ID, session.State, session.Harness, session.Location, firstNonEmpty(session.Age, "0m"), firstNonEmpty(session.Spent, "€0.00")})
+				rows = append(rows, []string{session.ID, session.State, session.Harness, session.Location, strs.FirstNonEmpty(session.Age, "0m"), strs.FirstNonEmpty(session.Spent, "€0.00")})
 			}
 			return app.renderer.Lines(output.Table([]string{"NAME", "STATE", "HARNESS", "LOCATION", "AGE", "SPENT"}, rows)...)
 		},
@@ -1714,7 +1738,7 @@ func detachCommand(runtime Runtime, opts *options) *cobra.Command {
 	var box string
 	cmd := &cobra.Command{
 		Use:   "detach <session>",
-		Short: "mock-detach a session to an S46 box",
+		Short: "detach a session to an S46 box",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := newApp(runtime, opts)
@@ -1724,7 +1748,7 @@ func detachCommand(runtime Runtime, opts *options) *cobra.Command {
 			if err := app.requireCloudFeature("detach"); err != nil {
 				return err
 			}
-			service := sessioncmd.Service{API: app.api, Config: app.config, Keyring: app.keyring}
+			service := app.sessionService()
 			var result api.Session
 			if err := app.withLock(cmd.Context(), func() error {
 				var err error
@@ -1758,7 +1782,7 @@ func detachCommand(runtime Runtime, opts *options) *cobra.Command {
 func resumeCommand(runtime Runtime, opts *options) *cobra.Command {
 	return &cobra.Command{
 		Use:   "resume <session>",
-		Short: "mock-resume a session locally",
+		Short: "resume a session locally",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := newApp(runtime, opts)
@@ -1768,7 +1792,7 @@ func resumeCommand(runtime Runtime, opts *options) *cobra.Command {
 			if err := app.requireCloudFeature("resume"); err != nil {
 				return err
 			}
-			service := sessioncmd.Service{API: app.api, Config: app.config, Keyring: app.keyring}
+			service := app.sessionService()
 			var result api.Session
 			var previous string
 			if err := app.withLock(cmd.Context(), func() error {
@@ -1787,7 +1811,7 @@ func resumeCommand(runtime Runtime, opts *options) *cobra.Command {
 			}
 			return app.renderer.Lines(
 				fmt.Sprintf("%s %s on localhost", prefix, args[0]),
-				fmt.Sprintf("# Under the hood: mocked pull from %s and reattach local harness state.", previous),
+				fmt.Sprintf("# Under the hood: pulled local harness state from %s.", previous),
 			)
 		},
 	}
@@ -1796,7 +1820,7 @@ func resumeCommand(runtime Runtime, opts *options) *cobra.Command {
 func shareCommand(runtime Runtime, opts *options) *cobra.Command {
 	return &cobra.Command{
 		Use:   "share <session>",
-		Short: "mock Pi-style HTML share via secret gist",
+		Short: "share a session as a Pi-style HTML page via secret gist",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := newApp(runtime, opts)
@@ -1806,7 +1830,7 @@ func shareCommand(runtime Runtime, opts *options) *cobra.Command {
 			if err := app.requireCloudFeature("share"); err != nil {
 				return err
 			}
-			service := sessioncmd.Service{API: app.api, Config: app.config, Keyring: app.keyring}
+			service := app.sessionService()
 			var result sessioncmd.ShareResult
 			if err := app.withLock(cmd.Context(), func() error {
 				var err error
@@ -1853,7 +1877,7 @@ func sessionCommand(runtime Runtime, opts *options) *cobra.Command {
 			if err := app.requireCloudFeature("session land"); err != nil {
 				return err
 			}
-			service := sessioncmd.Service{API: app.api, Config: app.config, Keyring: app.keyring}
+			service := app.sessionService()
 			sessionID := ""
 			if len(args) == 1 {
 				sessionID = args[0]
@@ -1925,9 +1949,9 @@ func runMode(ctx context.Context, app *app, requested string) error {
 	switch requested {
 	case "":
 		return renderModeStatus(app)
-	case airplane.ModeAirplane:
+	case config.ModeAirplane:
 		return airplaneModeOn(ctx, app)
-	case airplane.ModeCloud:
+	case config.ModeCloud:
 		return airplaneModeOff(ctx, app)
 	default:
 		return fmt.Errorf("unknown mode %q; expected cloud or airplane", requested)
@@ -1939,11 +1963,11 @@ func renderModeStatus(app *app) error {
 	if err != nil {
 		return err
 	}
-	mode := activeMode(cfg)
+	mode := cfg.ActiveMode()
 	teamName := cfg.ActiveTeam
 	teamConfig := cfg.Teams[teamName]
 	result := map[string]any{"mode": mode, "team": teamName, "endpoint": teamConfig.Endpoint, "model": teamConfig.DefaultModel}
-	if mode == airplane.ModeAirplane {
+	if mode == config.ModeAirplane {
 		result["gatewayUrl"] = airplane.LocalGatewayURL
 		result["backendModel"] = airplane.BackendModel
 	}
@@ -1960,7 +1984,7 @@ func renderModeStatus(app *app) error {
 			fmt.Sprintf("[s46] model: %s", teamConfig.DefaultModel),
 		)
 	}
-	if mode == airplane.ModeAirplane {
+	if mode == config.ModeAirplane {
 		lines = append(lines, fmt.Sprintf("[s46] local backend: %s", airplane.BackendModel))
 	}
 	return app.renderer.Lines(lines...)
@@ -2058,9 +2082,9 @@ func testAirplaneLogPath(env map[string]string, name string) string {
 func airplaneLogPort(env map[string]string, name string) string {
 	switch name {
 	case "ollama":
-		return portFromURL(firstNonEmpty(envValue(env, "S46_LOCAL_OLLAMA_URL"), airplane.LocalOllamaURL))
+		return portFromURL(strs.FirstNonEmpty(strs.EnvValue(env, "S46_LOCAL_OLLAMA_URL"), airplane.LocalOllamaURL))
 	case "gateway":
-		return portFromURL(firstNonEmpty(envValue(env, "S46_AIRPLANE_GATEWAY_URL"), airplane.LocalGatewayURL))
+		return portFromURL(strs.FirstNonEmpty(strs.EnvValue(env, "S46_AIRPLANE_GATEWAY_URL"), airplane.LocalGatewayURL))
 	default:
 		return ""
 	}
@@ -2075,13 +2099,6 @@ func portFromURL(rawURL string) string {
 		return port
 	}
 	return defaultPort(parsed.Scheme)
-}
-
-func envValue(env map[string]string, key string) string {
-	if env == nil {
-		return os.Getenv(key)
-	}
-	return env[key]
 }
 
 func listeningProcessIDs(port string) []string {
@@ -2457,7 +2474,7 @@ func offerOllamaLaunchctlConfig(ctx context.Context, app *app, service airplane.
 }
 
 func ensureOllamaRuntimeSettings(ctx context.Context, app *app, service airplane.Service) error {
-	if truthy(app.runtime.Env["S46_AIRPLANE_SKIP_SETUP_CHECKS"]) {
+	if strs.Truthy(app.runtime.Env["S46_AIRPLANE_SKIP_SETUP_CHECKS"]) {
 		return nil
 	}
 	runtimeReport := service.OllamaRuntime(ctx)
@@ -2552,7 +2569,7 @@ func renderAirplaneGatewayProcess(listener listeningProcessStatus) string {
 	case "not_listening":
 		return "[s46] Process: no listener found on the gateway port"
 	default:
-		return "[s46] Process: " + firstNonEmpty(listener.Message, "unknown")
+		return "[s46] Process: " + strs.FirstNonEmpty(listener.Message, "unknown")
 	}
 }
 
@@ -2590,7 +2607,7 @@ func isS46APIProcess(command string) bool {
 
 func stopListeningProcess(env map[string]string, gatewayURL string, pid string, timeout time.Duration) error {
 	port := localServerPort(gatewayURL)
-	if truthy(env["S46_TEST_STOP_GATEWAY_OK"]) {
+	if strs.Truthy(env["S46_TEST_STOP_GATEWAY_OK"]) {
 		env["S46_TEST_GATEWAY_RESPONDING"] = "0"
 		if port != "" {
 			env["S46_TEST_LISTENER_"+port] = "missing"
@@ -2681,7 +2698,7 @@ func offerAirplaneModeOnAfterSetup(ctx context.Context, app *app, report airplan
 	if err != nil {
 		return err
 	}
-	if activeMode(cfg) == airplane.ModeAirplane {
+	if cfg.ActiveMode() == config.ModeAirplane {
 		return nil
 	}
 	if app.runtime.Stdin == nil {
@@ -2707,7 +2724,7 @@ func offerAirplaneModeOnAfterSetup(ctx context.Context, app *app, report airplan
 }
 
 func airplaneRuntimeNeedsRestart(ctx context.Context, app *app, service airplane.Service) bool {
-	if truthy(app.runtime.Env["S46_AIRPLANE_SKIP_SETUP_CHECKS"]) {
+	if strs.Truthy(app.runtime.Env["S46_AIRPLANE_SKIP_SETUP_CHECKS"]) {
 		return false
 	}
 	runtimeReport := service.OllamaRuntime(ctx)
@@ -2771,7 +2788,7 @@ func renderOllamaRuntime(runtimeReport airplane.OllamaRuntime) []string {
 			if model.ExpiresAt != "" {
 				until = " · expires " + model.ExpiresAt
 			}
-			lines = append(lines, fmt.Sprintf("[s46] ollama ps: %s · %s%s", firstNonEmpty(model.Name, model.Model), contextText, until))
+			lines = append(lines, fmt.Sprintf("[s46] ollama ps: %s · %s%s", strs.FirstNonEmpty(model.Name, model.Model), contextText, until))
 		}
 	}
 	lines = append(lines, renderOllamaSettings(runtimeReport)...)
@@ -2848,10 +2865,10 @@ func airplaneModeOn(ctx context.Context, app *app) error {
 }
 
 func enableAirplaneMode(ctx context.Context, app *app, service airplane.Service, cfg config.Config, teamName string, teamConfig config.TeamConfig, report airplane.Report) error {
-	wasAirplane := activeMode(cfg) == airplane.ModeAirplane || teamConfig.Mode == airplane.ModeAirplane || isLocalEndpoint(teamConfig.Endpoint)
+	wasAirplane := cfg.ActiveMode() == config.ModeAirplane || teamConfig.Mode == config.ModeAirplane || isLocalEndpoint(teamConfig.Endpoint)
 	if app.options.dryRun {
 		if app.options.json {
-			return app.renderer.WriteJSON(map[string]any{"mode": airplane.ModeAirplane, "team": teamName, "endpoint": airplane.LocalGatewayURL, "model": airplane.LocalModelID, "dryRun": true})
+			return app.renderer.WriteJSON(map[string]any{"mode": config.ModeAirplane, "team": teamName, "endpoint": airplane.LocalGatewayURL, "model": airplane.LocalModelID, "dryRun": true})
 		}
 		return app.renderer.Lines(fmt.Sprintf("[s46] dry-run: would set airplane mode for %s", teamName))
 	}
@@ -2904,20 +2921,20 @@ func enableAirplaneMode(ctx context.Context, app *app, service airplane.Service,
 	if err := service.StartOllama(); err != nil {
 		return fmt.Errorf("could not start Ollama: %w", err)
 	}
-	if !service.OllamaRunning(ctx) && !truthy(app.runtime.Env["S46_AIRPLANE_SKIP_SETUP_CHECKS"]) {
+	if !service.OllamaRunning(ctx) && !strs.Truthy(app.runtime.Env["S46_AIRPLANE_SKIP_SETUP_CHECKS"]) {
 		return fmt.Errorf("Ollama did not become ready; run `s46 airplane setup`")
 	}
 	if err := service.StartGateway(); err != nil {
 		return fmt.Errorf("could not start local S46 gateway: %w", err)
 	}
-	if !truthy(app.runtime.Env["S46_AIRPLANE_SKIP_SETUP_CHECKS"]) && !waitForGatewayReady(ctx, service, 30*time.Second) {
+	if !strs.Truthy(app.runtime.Env["S46_AIRPLANE_SKIP_SETUP_CHECKS"]) && !waitForGatewayReady(ctx, service, 30*time.Second) {
 		return fmt.Errorf("local S46 gateway did not become ready; check ~/.cache/s46/s46-api-airplane.log or rerun `s46 airplane setup`")
 	}
 	if teamConfig.APISnapshot.Endpoint == "" || isLocalEndpoint(teamConfig.APISnapshot.Endpoint) {
 		teamConfig.APISnapshot = hostedTeamSnapshot(teamName, teamConfig)
 	}
 	teamConfig.Endpoint = airplane.LocalGatewayURL
-	teamConfig.Mode = airplane.ModeAirplane
+	teamConfig.Mode = config.ModeAirplane
 	teamConfig.DefaultModel = airplane.LocalModelID
 	teamConfig.Models = []string{airplane.LocalModelID}
 	if teamConfig.DefaultHarness == "" {
@@ -2928,24 +2945,24 @@ func enableAirplaneMode(ctx context.Context, app *app, service airplane.Service,
 		return err
 	}
 	if !wasAirplane && teamConfig.HarnessSnapshot == nil {
-		teamConfig.HarnessSnapshot = snapshotHarnessPlan(plan)
+		teamConfig.HarnessSnapshot = harness.SnapshotPlan(plan)
 	}
 	if cfg.Teams == nil {
 		cfg.Teams = map[string]config.TeamConfig{}
 	}
 	cfg.ActiveTeam = teamName
-	cfg.Mode = airplane.ModeAirplane
+	cfg.Mode = config.ModeAirplane
 	cfg.Teams[teamName] = teamConfig
 	if !app.options.dryRun {
 		if err := app.config.SaveConfig(cfg); err != nil {
 			return err
 		}
-		if _, err := adapter.ApplyConnect(ctx, plan); err != nil {
+		if _, err := adapter.Apply(ctx, plan); err != nil {
 			return err
 		}
 	}
 	if app.options.json {
-		return app.renderer.WriteJSON(map[string]any{"mode": airplane.ModeAirplane, "team": teamName, "endpoint": teamConfig.Endpoint, "model": teamConfig.DefaultModel, "dryRun": app.options.dryRun})
+		return app.renderer.WriteJSON(map[string]any{"mode": config.ModeAirplane, "team": teamName, "endpoint": teamConfig.Endpoint, "model": teamConfig.DefaultModel, "dryRun": app.options.dryRun})
 	}
 	app.renderer.Prefix = airplane.Prefix
 	return app.renderer.Lines(
@@ -2964,11 +2981,11 @@ func airplaneModeOff(ctx context.Context, app *app) error {
 	snapshot := teamConfig.HarnessSnapshot
 	restored := restoreCloudTeamConfig(teamName, teamConfig)
 	restored.HarnessSnapshot = nil
-	cfg.Mode = airplane.ModeCloud
+	cfg.Mode = config.ModeCloud
 	cfg.Teams[teamName] = restored
 	if !app.options.dryRun {
 		if snapshot != nil {
-			if err := restoreHarnessSnapshot(app.runtime.Env, *snapshot); err != nil {
+			if err := harness.RestoreSnapshot(app.runtime.Env, *snapshot); err != nil {
 				return err
 			}
 		} else if err := applyHarnessConfig(ctx, app, teamName, restored); err != nil {
@@ -2980,7 +2997,7 @@ func airplaneModeOff(ctx context.Context, app *app) error {
 	}
 	app.renderer.Prefix = "[s46]"
 	if app.options.json {
-		return app.renderer.WriteJSON(map[string]any{"mode": airplane.ModeCloud, "team": teamName, "endpoint": restored.Endpoint, "model": restored.DefaultModel, "dryRun": app.options.dryRun})
+		return app.renderer.WriteJSON(map[string]any{"mode": config.ModeCloud, "team": teamName, "endpoint": restored.Endpoint, "model": restored.DefaultModel, "dryRun": app.options.dryRun})
 	}
 	if app.options.dryRun {
 		return app.renderer.Lines(fmt.Sprintf("[s46] dry-run: would set cloud mode for %s", teamName))
@@ -3017,23 +3034,22 @@ func airplaneModeTargetConfig(app *app) (config.Config, string, config.TeamConfi
 	if cfg.Teams == nil {
 		cfg.Teams = map[string]config.TeamConfig{}
 	}
-	teamName := firstNonEmpty(cfg.ActiveTeam, localAirplaneTeamName)
+	teamName := strs.FirstNonEmpty(cfg.ActiveTeam, localAirplaneTeamName)
 	teamConfig := cfg.Teams[teamName]
 	if teamConfig.Endpoint == "" {
-		teamConfig = config.TeamConfigFromAPI(localAirplaneTeam(teamName, config.TeamConfig{}, connectRequest{}), harness.DefaultName, airplane.LocalModelID)
+		teamConfig = config.TeamConfigFromAPI(localAirplaneTeam(teamName, config.TeamConfig{}, connectRequest{}), harness.DefaultName, airplane.LocalModelID, config.ModeAirplane)
 	}
 	return cfg, teamName, teamConfig, nil
 }
 
 func localAirplaneTeam(teamName string, existing config.TeamConfig, req connectRequest) api.Team {
-	teamName = firstNonEmpty(teamName, localAirplaneTeamName)
+	teamName = strs.FirstNonEmpty(teamName, localAirplaneTeamName)
 	return api.Team{
 		Name:         teamName,
-		Endpoint:     firstNonEmpty(req.Endpoint, airplane.LocalGatewayURL),
-		Lane:         firstNonEmpty(req.Lane, existing.Lane, "local"),
-		Mode:         airplane.ModeAirplane,
+		Endpoint:     strs.FirstNonEmpty(req.Endpoint, airplane.LocalGatewayURL),
+		Lane:         strs.FirstNonEmpty(req.Lane, existing.Lane, "local"),
 		Boxes:        []string{"localhost"},
-		DefaultModel: firstNonEmpty(req.Model, airplane.LocalModelID),
+		DefaultModel: strs.FirstNonEmpty(req.Model, airplane.LocalModelID),
 		Models:       []string{airplane.LocalModelID},
 	}
 }
@@ -3049,9 +3065,6 @@ func hostedTeamSnapshot(teamName string, teamConfig config.TeamConfig) api.Team 
 	if snapshot.Lane == "" {
 		snapshot.Lane = teamConfig.Lane
 	}
-	if snapshot.Mode == "" || snapshot.Mode == airplane.ModeAirplane {
-		snapshot.Mode = airplane.ModeCloud
-	}
 	if snapshot.DefaultModel == "" || snapshot.DefaultModel == airplane.LocalModelID {
 		snapshot.DefaultModel = api.DefaultModel
 	}
@@ -3064,9 +3077,9 @@ func hostedTeamSnapshot(teamName string, teamConfig config.TeamConfig) api.Team 
 func restoreCloudTeamConfig(teamName string, teamConfig config.TeamConfig) config.TeamConfig {
 	snapshot := hostedTeamSnapshot(teamName, teamConfig)
 	teamConfig.Endpoint = snapshot.Endpoint
-	teamConfig.Lane = firstNonEmpty(snapshot.Lane, teamConfig.Lane)
-	teamConfig.Mode = airplane.ModeCloud
-	teamConfig.DefaultModel = firstNonEmpty(snapshot.DefaultModel, api.DefaultModel)
+	teamConfig.Lane = strs.FirstNonEmpty(snapshot.Lane, teamConfig.Lane)
+	teamConfig.Mode = config.ModeCloud
+	teamConfig.DefaultModel = strs.FirstNonEmpty(snapshot.DefaultModel, api.DefaultModel)
 	teamConfig.Boxes = snapshot.Boxes
 	teamConfig.Models = snapshot.Models
 	teamConfig.APISnapshot = snapshot
@@ -3081,12 +3094,12 @@ func applyHarnessConfig(ctx context.Context, app *app, teamName string, teamConf
 	if app.options.dryRun {
 		return nil
 	}
-	_, err = adapter.ApplyConnect(ctx, plan)
+	_, err = adapter.Apply(ctx, plan)
 	return err
 }
 
 func planHarnessConfig(ctx context.Context, app *app, teamName string, teamConfig config.TeamConfig) (harness.Adapter, harness.Plan, error) {
-	adapter, err := app.harness.Get(firstNonEmpty(teamConfig.DefaultHarness, harness.DefaultName))
+	adapter, err := app.harness.Get(strs.FirstNonEmpty(teamConfig.DefaultHarness, harness.DefaultName))
 	if err != nil {
 		return nil, harness.Plan{}, err
 	}
@@ -3096,54 +3109,6 @@ func planHarnessConfig(ctx context.Context, app *app, teamName string, teamConfi
 		return nil, harness.Plan{}, err
 	}
 	return adapter, plan, nil
-}
-
-func snapshotHarnessPlan(plan harness.Plan) *config.HarnessSnapshot {
-	if len(plan.Files) == 0 {
-		return nil
-	}
-	snapshot := &config.HarnessSnapshot{Harness: plan.Harness, Files: make([]config.HarnessFileSnapshot, 0, len(plan.Files))}
-	for _, file := range plan.Files {
-		mode := file.Mode
-		existed := false
-		if info, err := os.Stat(file.Path); err == nil {
-			existed = true
-			mode = info.Mode().Perm()
-		}
-		if mode == 0 {
-			mode = 0o600
-		}
-		snapshot.Files = append(snapshot.Files, config.HarnessFileSnapshot{
-			Path:        file.Path,
-			DisplayPath: file.DisplayPath,
-			Existed:     existed,
-			Content:     string(file.OldContent),
-			Mode:        uint32(mode),
-		})
-	}
-	return snapshot
-}
-
-func restoreHarnessSnapshot(env map[string]string, snapshot config.HarnessSnapshot) error {
-	for _, file := range snapshot.Files {
-		if _, err := config.BackupIfExists(file.Path); err != nil {
-			return err
-		}
-		if !file.Existed {
-			if err := os.Remove(file.Path); err != nil && !os.IsNotExist(err) {
-				return err
-			}
-			continue
-		}
-		mode := os.FileMode(file.Mode)
-		if mode == 0 {
-			mode = 0o600
-		}
-		if err := config.WriteFileAtomic(file.Path, []byte(file.Content), mode); err != nil {
-			return fmt.Errorf("restore %s: %w", config.DisplayPath(file.Path, env), err)
-		}
-	}
-	return nil
 }
 
 func promptYesNo(app *app, prompt string, fallback bool) (bool, error) {
@@ -3204,7 +3169,7 @@ func runCommand(runtime Runtime, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			service := sessioncmd.Service{API: app.api, Config: app.config, Keyring: app.keyring}
+			service := app.sessionService()
 			var result sessioncmd.RunResult
 			if err := app.withLock(cmd.Context(), func() error {
 				var err error
@@ -3240,26 +3205,30 @@ func authStatus(state config.State) string {
 	return "not authenticated"
 }
 
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if value != "" {
-			return value
-		}
-	}
-	return ""
-}
-
 func (a *app) accessToken(ctx context.Context) string {
 	cfg, err := a.config.LoadConfig()
-	if err == nil && activeMode(cfg) == airplane.ModeAirplane {
+	if err == nil && cfg.ActiveMode() == config.ModeAirplane {
 		return ""
 	}
-	service := auth.Service{API: a.api, Config: a.config, Keyring: a.keyring}
-	token, err := service.Token(ctx, false)
+	token, err := a.authService().Token(ctx, false)
 	if err != nil {
 		return ""
 	}
 	return token
+}
+
+// authService wires the standard {API, Config, Keyring} triple into
+// auth.Service. It is intentionally a method, not cached on app, so each
+// caller gets a fresh value (auth.Service is a small struct).
+func (a *app) authService() auth.Service {
+	return auth.Service{API: a.api, Config: a.config, Keyring: a.keyring}
+}
+
+// sessionService wires session.Service with the same triple plus an
+// auth-token provider so session can fetch bearers without reaching
+// into the keyring directly.
+func (a *app) sessionService() sessioncmd.Service {
+	return sessioncmd.Service{API: a.api, Auth: a.authService(), Config: a.config, Keyring: a.keyring}
 }
 
 func (a *app) requireCloudFeature(feature string) error {
@@ -3267,7 +3236,7 @@ func (a *app) requireCloudFeature(feature string) error {
 	if err != nil {
 		return err
 	}
-	if activeMode(cfg) != airplane.ModeAirplane {
+	if cfg.ActiveMode() != config.ModeAirplane {
 		return nil
 	}
 	return fmt.Errorf("%s requires cloud connectivity; go online and switch to cloud mode to use it. Airplane mode supports local coding only", feature)

@@ -1,16 +1,8 @@
 [s46] auth:    dscape@acme.s46.dev
-[s46] config:  ~/.config/s46/config.json
-[s46] team:    acme
-[s46] lane:    EU-OPO
-[s46] mode:    cloud
-[s46] harness: standard
-[s46] model:   s46/kimi-k2.6
+[s46] team:    acme · EU-OPO · cloud
+[s46] harness: standard · s46/kimi-k2.6
 [s46] api:     https://acme.s46.dev
-[s46] local ollama: http://127.0.0.1:11434 · port 11434 · not listening
-[s46] local api:    http://127.0.0.1:8080 · port 8080 · not listening
-[s46] Ollama server: not running
-[s46] checks:
-[s46]   [ok] tenant: https://acme.s46.dev
-[s46]   [ok] harness: standard
-[s46]   [ok] standard: no third-party harness config required
+[s46] ollama:  not running
+[s46] api:     not running
+[s46] checks:  3/3 ok
 [s46] sessions: 0

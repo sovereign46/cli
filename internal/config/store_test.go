@@ -52,3 +52,26 @@ func TestDisplayPath(t *testing.T) {
 		t.Fatalf("DisplayPath = %q", got)
 	}
 }
+
+func TestConfigActiveMode(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{"empty falls through to cloud", Config{}, ModeCloud},
+		{"top-level airplane wins", Config{Mode: ModeAirplane, ActiveTeam: "acme", Teams: map[string]TeamConfig{"acme": {Mode: ModeCloud}}}, ModeAirplane},
+		{"top-level cloud wins over team airplane", Config{Mode: ModeCloud, ActiveTeam: "acme", Teams: map[string]TeamConfig{"acme": {Mode: ModeAirplane}}}, ModeCloud},
+		{"team airplane when top empty", Config{ActiveTeam: "acme", Teams: map[string]TeamConfig{"acme": {Mode: ModeAirplane}}}, ModeAirplane},
+		{"team without mode falls through", Config{ActiveTeam: "acme", Teams: map[string]TeamConfig{"acme": {}}}, ModeCloud},
+		{"active team missing from teams map", Config{ActiveTeam: "missing"}, ModeCloud},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.cfg.ActiveMode(); got != tc.want {
+				t.Errorf("ActiveMode() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

@@ -8,6 +8,7 @@ import (
 
 	"github.com/sovereign46/s46-cli/internal/airplane"
 	"github.com/sovereign46/s46-cli/internal/api"
+	"github.com/sovereign46/s46-cli/internal/strs"
 )
 
 type offlineSuggestionClient struct {
@@ -86,12 +87,12 @@ func (c offlineSuggestionClient) wrap(ctx context.Context, err error) error {
 		return err
 	}
 	if baseURL := c.localAPIBaseURL(); baseURL != "" {
-		return fmt.Errorf("%s\n[s46] underlying error: %w", localAPIUnavailableSuggestion(c.env, baseURL), err)
+		return fmt.Errorf("%s\nunderlying error: %w", localAPIUnavailableSuggestion(c.env, baseURL), err)
 	}
 	if !cloudCall(c.env) {
 		return err
 	}
-	return fmt.Errorf("%s\n[s46] underlying error: %w", offlineSuggestion(ctx, c.env), err)
+	return fmt.Errorf("%s\nunderlying error: %w", offlineSuggestion(ctx, c.env), err)
 }
 
 func (c offlineSuggestionClient) localAPIBaseURL() string {
@@ -105,7 +106,7 @@ func (c offlineSuggestionClient) localAPIBaseURL() string {
 			return baseURL
 		}
 	}
-	if truthy(c.env["S46_DEV_SHELL"]) {
+	if strs.Truthy(c.env["S46_DEV_SHELL"]) {
 		return api.DefaultDevelopmentBaseURL
 	}
 	return ""
@@ -137,7 +138,7 @@ func cloudCall(env map[string]string) bool {
 	if env == nil {
 		return true
 	}
-	if env["S46_API_MODE"] == "mock" || truthy(env["S46_DEV_SHELL"]) {
+	if env["S46_API_MODE"] == "mock" || strs.Truthy(env["S46_DEV_SHELL"]) {
 		return false
 	}
 	if base := strings.TrimSpace(env["S46_API_BASE_URL"]); base != "" {

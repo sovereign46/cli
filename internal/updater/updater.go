@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/sovereign46/s46-cli/internal/strs"
 )
 
 const (
@@ -94,7 +96,7 @@ func (u Updater) Check(ctx context.Context) (CheckResult, error) {
 }
 
 func (u Updater) InstallMethod() InstallMethod {
-	if configured := strings.ToLower(strings.TrimSpace(envValue(u.Env, "S46_INSTALL_METHOD"))); configured != "" {
+	if configured := strings.ToLower(strings.TrimSpace(strs.EnvValue(u.Env, "S46_INSTALL_METHOD"))); configured != "" {
 		switch configured {
 		case string(InstallHomebrew), "brew":
 			return InstallHomebrew
@@ -110,7 +112,7 @@ func (u Updater) InstallMethod() InstallMethod {
 	if resolved, err := filepath.EvalSymlinks(executable); err == nil {
 		paths = append(paths, filepath.ToSlash(resolved))
 	}
-	prefix := strings.TrimRight(filepath.ToSlash(envValue(u.Env, "HOMEBREW_PREFIX")), "/")
+	prefix := strings.TrimRight(filepath.ToSlash(strs.EnvValue(u.Env, "HOMEBREW_PREFIX")), "/")
 	for _, path := range paths {
 		if prefix != "" && (path == prefix+"/bin/s46" || strings.HasPrefix(path, prefix+"/Cellar/s46/")) {
 			return InstallHomebrew
@@ -125,15 +127,15 @@ func (u Updater) InstallMethod() InstallMethod {
 func (u Updater) UpdateInstruction(method InstallMethod) string {
 	switch method {
 	case InstallHomebrew:
-		formula := firstNonEmpty(envValue(u.Env, "S46_HOMEBREW_FORMULA"), DefaultBrewFormula)
+		formula := strs.FirstNonEmpty(strs.EnvValue(u.Env, "S46_HOMEBREW_FORMULA"), DefaultBrewFormula)
 		return fmt.Sprintf("brew upgrade %s", formula)
 	default:
-		return fmt.Sprintf("install the latest release from https://github.com/%s/releases/latest", firstNonEmpty(u.Repo, envValue(u.Env, "S46_UPDATE_REPO"), DefaultRepo))
+		return fmt.Sprintf("install the latest release from https://github.com/%s/releases/latest", strs.FirstNonEmpty(u.Repo, strs.EnvValue(u.Env, "S46_UPDATE_REPO"), DefaultRepo))
 	}
 }
 
 func IsCheckDisabled(env map[string]string) bool {
-	return truthy(envValue(env, "S46_SKIP_UPDATE_CHECK")) || truthy(envValue(env, "S46_SKIP_VERSION_CHECK")) || truthy(envValue(env, "S46_OFFLINE"))
+	return strs.Truthy(strs.EnvValue(env, "S46_SKIP_UPDATE_CHECK")) || strs.Truthy(strs.EnvValue(env, "S46_SKIP_VERSION_CHECK")) || strs.Truthy(strs.EnvValue(env, "S46_OFFLINE"))
 }
 
 func IsComparableVersion(version string) bool {
@@ -228,7 +230,7 @@ func (u Updater) latestRelease(ctx context.Context) (Release, error) {
 	}
 	request.Header.Set("Accept", "application/vnd.github+json")
 	request.Header.Set("User-Agent", "s46/"+u.currentVersion())
-	if token := envValue(u.Env, "GITHUB_TOKEN"); token != "" {
+	if token := strs.EnvValue(u.Env, "GITHUB_TOKEN"); token != "" {
 		request.Header.Set("Authorization", "Bearer "+token)
 	}
 
@@ -248,7 +250,7 @@ func (u Updater) latestRelease(ctx context.Context) (Release, error) {
 	if err := json.NewDecoder(response.Body).Decode(&github); err != nil {
 		return Release{}, err
 	}
-	version := normalizeVersion(firstNonEmpty(github.TagName, github.Name))
+	version := normalizeVersion(strs.FirstNonEmpty(github.TagName, github.Name))
 	if version == "" {
 		return Release{}, fmt.Errorf("GitHub latest release did not include a version")
 	}
@@ -274,15 +276,15 @@ func selectReleaseAsset(assets []githubAsset, version string) string {
 }
 
 func (u Updater) latestReleaseURL() string {
-	if value := envValue(u.Env, "S46_UPDATE_LATEST_URL"); value != "" {
+	if value := strs.EnvValue(u.Env, "S46_UPDATE_LATEST_URL"); value != "" {
 		return value
 	}
-	repo := firstNonEmpty(u.Repo, envValue(u.Env, "S46_UPDATE_REPO"), DefaultRepo)
+	repo := strs.FirstNonEmpty(u.Repo, strs.EnvValue(u.Env, "S46_UPDATE_REPO"), DefaultRepo)
 	return fmt.Sprintf(latestURLFormat, repo)
 }
 
 func (u Updater) currentVersion() string {
-	return firstNonEmpty(u.CurrentVersion, "dev")
+	return strs.FirstNonEmpty(u.CurrentVersion, "dev")
 }
 
 func (u Updater) httpClient() *http.Client {
@@ -301,29 +303,4 @@ func (u Updater) executablePath() (string, error) {
 		return "", err
 	}
 	return executable, nil
-}
-
-func envValue(env map[string]string, key string) string {
-	if env == nil {
-		return os.Getenv(key)
-	}
-	return env[key]
-}
-
-func truthy(value string) bool {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "", "0", "false", "no", "off":
-		return false
-	default:
-		return true
-	}
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if value != "" {
-			return value
-		}
-	}
-	return ""
 }

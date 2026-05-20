@@ -6,18 +6,18 @@ Usage:
 Available Commands:
   airplane    manage local airplane mode
   connect     connect a team and configure a harness
-  detach      mock-detach a session to an S46 box
+  detach      detach a session to an S46 box
   devices     list and revoke paired devices
   disconnect  remove S46 configuration for a team and harness
   help        Help about any command
   login       authenticate with Sovereign46 using magic-link device auth
   logout      clear local credentials
   mode        view or set operating mode
-  resume      mock-resume a session locally
+  resume      resume a session locally
   run         start a direct mocked s46 session
   session     session subcommands
   sessions    list local and remote sessions
-  share       mock Pi-style HTML share via secret gist
+  share       share a session as a Pi-style HTML page via secret gist
   status      show active team, lane, harness, mode, and checks
   teams       list and switch connected teams
   token       print a bearer token for harness helpers

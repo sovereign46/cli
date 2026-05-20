@@ -44,7 +44,7 @@ func TestPlanConnectPreservesProvidersAndAddsS46(t *testing.T) {
 func TestPlanConnectUsesAirplaneModelLimits(t *testing.T) {
 	home := t.TempDir()
 	env := map[string]string{"HOME": home, "S46_AIRPLANE_CONTEXT": "16384", "S46_AIRPLANE_MAX_TOKENS": "2048"}
-	team := api.Team{Name: "local", Endpoint: airplane.LocalGatewayURL, Mode: airplane.ModeAirplane, Models: []string{airplane.LocalModelID}, DefaultModel: airplane.LocalModelID}
+	team := api.Team{Name: "local", Endpoint: airplane.LocalGatewayURL, Models: []string{airplane.LocalModelID}, DefaultModel: airplane.LocalModelID}
 	plan, err := New().PlanConnect(context.Background(), harness.ConnectRequest{Env: env, Team: team, Model: airplane.LocalModelID, Mode: airplane.ModeAirplane})
 	if err != nil {
 		t.Fatal(err)

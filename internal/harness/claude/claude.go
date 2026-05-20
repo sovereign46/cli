@@ -138,8 +138,29 @@ func (a Adapter) PlanDisconnect(ctx context.Context, req harness.DisconnectReque
 	}, nil
 }
 
-func (a Adapter) ApplyConnect(ctx context.Context, plan harness.Plan) (harness.AppliedPlan, error) {
+func (a Adapter) Apply(ctx context.Context, plan harness.Plan) (harness.AppliedPlan, error) {
 	return harness.ApplyPlan(nil, plan)
+}
+
+func (a Adapter) Status(ctx context.Context, req harness.StatusRequest) []harness.StatusCheck {
+	path := filepath.Join(config.HomeDir(req.Env), ".claude", "settings.json")
+	raw, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return []harness.StatusCheck{{Name: "claude-config", OK: false, Message: fmt.Sprintf("not configured; run `s46 connect %s --harness=claude-code`", req.TeamName)}}
+	}
+	if err != nil {
+		return []harness.StatusCheck{{Name: "claude-config", OK: false, Message: err.Error()}}
+	}
+	settings := map[string]any{}
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		return []harness.StatusCheck{{Name: "claude-config", OK: false, Message: err.Error()}}
+	}
+	envMap, _ := settings["env"].(map[string]any)
+	return []harness.StatusCheck{
+		{Name: "claude-token-helper", OK: settings["apiKeyHelper"] == "s46 token --refresh", Message: fmt.Sprint(settings["apiKeyHelper"])},
+		{Name: "claude-base-url", OK: envMap["ANTHROPIC_BASE_URL"] == req.Endpoint+"/anthropic", Message: fmt.Sprint(envMap["ANTHROPIC_BASE_URL"])},
+		{Name: "claude-model", OK: settings["model"] == req.DefaultModel && envMap["ANTHROPIC_MODEL"] == req.DefaultModel && envMap["ANTHROPIC_DEFAULT_SONNET_MODEL"] == req.DefaultModel, Message: fmt.Sprint(settings["model"])},
+	}
 }
 
 func settingsPath(env map[string]string, scope string) string {

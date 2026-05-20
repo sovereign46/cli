@@ -18,6 +18,8 @@ builds:
     goarch:
       - amd64
       - arm64
+    flags:
+      - -tags=release
     ldflags:
       - -s -w -X github.com/sovereign46/s46-cli/internal/version.Version={{.Version}} -X github.com/sovereign46/s46-cli/internal/version.Commit={{.Commit}} -X github.com/sovereign46/s46-cli/internal/version.Date={{.Date}}
 

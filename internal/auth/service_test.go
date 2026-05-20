@@ -61,8 +61,8 @@ func TestTokenReturnsLocalAirplaneTokenWithoutCloudRefresh(t *testing.T) {
 		"S46_AIRPLANE_TOKEN": "local-dev-token",
 	}
 	store := config.NewStore(env, "")
-	team := api.Team{Name: "acme", Endpoint: airplane.LocalGatewayURL, Mode: airplane.ModeAirplane, DefaultModel: airplane.LocalModelID}
-	if err := store.SaveConfig(config.Config{Mode: airplane.ModeAirplane, ActiveTeam: "acme", Teams: map[string]config.TeamConfig{"acme": config.TeamConfigFromAPI(team, "standard", airplane.LocalModelID)}}); err != nil {
+	team := api.Team{Name: "acme", Endpoint: airplane.LocalGatewayURL, DefaultModel: airplane.LocalModelID}
+	if err := store.SaveConfig(config.Config{Mode: config.ModeAirplane, ActiveTeam: "acme", Teams: map[string]config.TeamConfig{"acme": config.TeamConfigFromAPI(team, "standard", airplane.LocalModelID, config.ModeAirplane)}}); err != nil {
 		t.Fatal(err)
 	}
 	service := Service{API: refreshFailsAPI{Client: api.NewMockClient()}, Config: store, Keyring: keyring.FileStore{Path: filepath.Join(home, "keyring.json")}}
@@ -183,4 +183,50 @@ func (p *pendingDeviceAPI) PollDeviceLogin(ctx context.Context, deviceCode strin
 		return api.TokenSet{}, api.ErrAuthorizationPending
 	}
 	return p.MockClient.PollDeviceLogin(ctx, deviceCode)
+}
+
+func TestAccessTokenReturnsEmptyInAirplaneMode(t *testing.T) {
+	home := t.TempDir()
+	env := map[string]string{"HOME": home, "XDG_CONFIG_HOME": filepath.Join(home, ".config"), "XDG_DATA_HOME": filepath.Join(home, ".data")}
+	store := config.NewStore(env, "")
+	if err := store.SaveConfig(config.Config{Mode: config.ModeAirplane, ActiveTeam: "local", Teams: map[string]config.TeamConfig{"local": {Mode: config.ModeAirplane}}}); err != nil {
+		t.Fatal(err)
+	}
+	service := Service{API: api.NewMockClient(), Config: store, Keyring: keyring.FileStore{Path: filepath.Join(home, "keyring.json")}}
+	token, err := service.AccessToken(context.Background())
+	if err != nil {
+		t.Fatalf("AccessToken err = %v", err)
+	}
+	if token != "" {
+		t.Fatalf("expected empty token in airplane mode, got %q", token)
+	}
+}
+
+func TestAccessTokenReturnsBearerFromKeyring(t *testing.T) {
+	home := t.TempDir()
+	env := map[string]string{"HOME": home, "XDG_CONFIG_HOME": filepath.Join(home, ".config"), "XDG_DATA_HOME": filepath.Join(home, ".data")}
+	store := config.NewStore(env, "")
+	service := Service{API: api.NewMockClient(), Config: store, Keyring: keyring.FileStore{Path: filepath.Join(home, "keyring.json")}}
+
+	if _, err := service.Login(context.Background(), "dscape@acme.s46.dev", ""); err != nil {
+		t.Fatal(err)
+	}
+	token, err := service.AccessToken(context.Background())
+	if err != nil {
+		t.Fatalf("AccessToken err = %v", err)
+	}
+	if !strings.HasPrefix(token, "s46_mock_access_") {
+		t.Fatalf("unexpected token: %q", token)
+	}
+}
+
+func TestAccessTokenFailsWhenNotAuthenticated(t *testing.T) {
+	home := t.TempDir()
+	env := map[string]string{"HOME": home, "XDG_CONFIG_HOME": filepath.Join(home, ".config"), "XDG_DATA_HOME": filepath.Join(home, ".data")}
+	store := config.NewStore(env, "")
+	service := Service{API: api.NewMockClient(), Config: store, Keyring: keyring.FileStore{Path: filepath.Join(home, "keyring.json")}}
+
+	if _, err := service.AccessToken(context.Background()); err == nil {
+		t.Fatal("expected AccessToken to fail without login")
+	}
 }

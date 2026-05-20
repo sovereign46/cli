@@ -9,12 +9,13 @@ import (
 
 	"github.com/sovereign46/s46-cli/internal/airplane"
 	"github.com/sovereign46/s46-cli/internal/api"
+	"github.com/sovereign46/s46-cli/internal/auth"
 	"github.com/sovereign46/s46-cli/internal/config"
 	"github.com/sovereign46/s46-cli/internal/keyring"
 )
 
 func TestRunStoresSessionAndListReturnsLocalState(t *testing.T) {
-	service, store := newTestService(t, api.Team{Name: "s46", Endpoint: "http://127.0.0.1:8080", Lane: "EU-OPO", Mode: "local", DefaultModel: api.DefaultModel}, nil)
+	service, store := newTestService(t, api.Team{Name: "s46", Endpoint: "http://127.0.0.1:8080", Lane: "EU-OPO", DefaultModel: api.DefaultModel}, config.ModeAirplane, nil)
 
 	run, err := service.Run(context.Background(), "Fix /v1 sessions", "", "", false)
 	if err != nil {
@@ -41,7 +42,7 @@ func TestRunStoresSessionAndListReturnsLocalState(t *testing.T) {
 }
 
 func TestDetachAndResumePersistSessionState(t *testing.T) {
-	service, store := newTestService(t, api.Team{Name: "s46", Endpoint: "https://s46.s46.dev", Lane: "EU-OPO", Mode: "cloud", DefaultModel: api.DefaultModel}, nil)
+	service, store := newTestService(t, api.Team{Name: "s46", Endpoint: "https://s46.s46.dev", Lane: "EU-OPO", DefaultModel: api.DefaultModel}, config.ModeCloud, nil)
 
 	detached, err := service.Detach(context.Background(), "@nunojob/task", "", "", false)
 	if err != nil {
@@ -67,7 +68,7 @@ func TestDetachAndResumePersistSessionState(t *testing.T) {
 }
 
 func TestMockSharePersistsViewerURL(t *testing.T) {
-	service, store := newTestService(t, api.Team{Name: "s46", Endpoint: "http://127.0.0.1:8080", Lane: "EU-OPO", Mode: "cloud", DefaultModel: api.DefaultModel}, map[string]string{"S46_SHARE_BACKEND": "mock", "S46_MOCK_GIST_ID": "fixed-gist"})
+	service, store := newTestService(t, api.Team{Name: "s46", Endpoint: "http://127.0.0.1:8080", Lane: "EU-OPO", DefaultModel: api.DefaultModel}, config.ModeCloud, map[string]string{"S46_SHARE_BACKEND": "mock", "S46_MOCK_GIST_ID": "fixed-gist"})
 
 	share, err := service.Share(context.Background(), "@nunojob/task", false)
 	if err != nil {
@@ -93,8 +94,8 @@ func TestAirplaneSessionCallsDoNotSendCloudBearer(t *testing.T) {
 		"XDG_DATA_HOME":   home + "/.data",
 	}
 	store := config.NewStore(env, "")
-	team := api.Team{Name: "acme", Endpoint: airplane.LocalGatewayURL, Lane: "local", Mode: airplane.ModeAirplane, DefaultModel: airplane.LocalModelID}
-	if err := store.SaveConfig(config.Config{Mode: airplane.ModeAirplane, ActiveTeam: "acme", Teams: map[string]config.TeamConfig{"acme": config.TeamConfigFromAPI(team, "standard", airplane.LocalModelID)}}); err != nil {
+	team := api.Team{Name: "acme", Endpoint: airplane.LocalGatewayURL, Lane: "local", DefaultModel: airplane.LocalModelID}
+	if err := store.SaveConfig(config.Config{Mode: config.ModeAirplane, ActiveTeam: "acme", Teams: map[string]config.TeamConfig{"acme": config.TeamConfigFromAPI(team, "standard", airplane.LocalModelID, config.ModeAirplane)}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.SaveState(config.State{Authenticated: true, CurrentUser: "nunojob@icloud.com"}); err != nil {
@@ -105,11 +106,12 @@ func TestAirplaneSessionCallsDoNotSendCloudBearer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := keyringStore.Set(context.Background(), tokenService, "nunojob@icloud.com", string(tokens)); err != nil {
+	if err := keyringStore.Set(context.Background(), auth.TokenService, "nunojob@icloud.com", string(tokens)); err != nil {
 		t.Fatal(err)
 	}
 	apiClient := &recordingSessionsAPI{MockClient: api.NewMockClient()}
-	listed, err := (Service{API: apiClient, Config: store, Keyring: keyringStore}).List(context.Background())
+	authService := auth.Service{API: apiClient, Config: store, Keyring: keyringStore}
+	listed, err := (Service{API: apiClient, Auth: authService, Config: store, Keyring: keyringStore}).List(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,8 +132,8 @@ func TestListForbiddenExplainsMatchingTeamAndLocalAPI(t *testing.T) {
 		"S46_DEV_SHELL":   "1",
 	}
 	store := config.NewStore(env, "")
-	team := api.Team{Name: "s46", Endpoint: "http://127.0.0.1:8080", Lane: "EU-OPO", Mode: "cloud", DefaultModel: api.DefaultModel}
-	if err := store.SaveConfig(config.Config{ActiveTeam: "s46", Teams: map[string]config.TeamConfig{"s46": config.TeamConfigFromAPI(team, "standard", api.DefaultModel)}}); err != nil {
+	team := api.Team{Name: "s46", Endpoint: "http://127.0.0.1:8080", Lane: "EU-OPO", DefaultModel: api.DefaultModel}
+	if err := store.SaveConfig(config.Config{ActiveTeam: "s46", Teams: map[string]config.TeamConfig{"s46": config.TeamConfigFromAPI(team, "standard", api.DefaultModel, config.ModeCloud)}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.SaveState(config.State{Authenticated: true, CurrentUser: "nunojob@icloud.com"}); err != nil {
@@ -142,14 +144,15 @@ func TestListForbiddenExplainsMatchingTeamAndLocalAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := keyringStore.Set(context.Background(), tokenService, "nunojob@icloud.com", string(tokens)); err != nil {
+	if err := keyringStore.Set(context.Background(), auth.TokenService, "nunojob@icloud.com", string(tokens)); err != nil {
 		t.Fatal(err)
 	}
 	mock := api.NewMockClient()
 	mock.Fixtures.Account = "nunojob@icloud.com"
 	mock.Fixtures.Team = "s46"
 
-	_, err = Service{API: forbiddenSessionsAPI{MockClient: mock}, Config: store, Keyring: keyringStore}.List(context.Background())
+	authService := auth.Service{API: mock, Config: store, Keyring: keyringStore}
+	_, err = Service{API: forbiddenSessionsAPI{MockClient: mock}, Auth: authService, Config: store, Keyring: keyringStore}.List(context.Background())
 	if err == nil {
 		t.Fatal("expected forbidden error")
 	}
@@ -169,8 +172,8 @@ func TestListForbiddenSuggestsTeamsUseForMismatchedTeam(t *testing.T) {
 		"XDG_DATA_HOME":   home + "/.data",
 	}
 	store := config.NewStore(env, "")
-	team := api.Team{Name: "s46", Endpoint: "https://s46.s46.dev", Lane: "EU-OPO", Mode: "cloud", DefaultModel: api.DefaultModel}
-	if err := store.SaveConfig(config.Config{ActiveTeam: "s46", Teams: map[string]config.TeamConfig{"s46": config.TeamConfigFromAPI(team, "standard", api.DefaultModel)}}); err != nil {
+	team := api.Team{Name: "s46", Endpoint: "https://s46.s46.dev", Lane: "EU-OPO", DefaultModel: api.DefaultModel}
+	if err := store.SaveConfig(config.Config{ActiveTeam: "s46", Teams: map[string]config.TeamConfig{"s46": config.TeamConfigFromAPI(team, "standard", api.DefaultModel, config.ModeCloud)}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.SaveState(config.State{Authenticated: true, CurrentUser: "nunojob@icloud.com"}); err != nil {
@@ -181,14 +184,15 @@ func TestListForbiddenSuggestsTeamsUseForMismatchedTeam(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := keyringStore.Set(context.Background(), tokenService, "nunojob@icloud.com", string(tokens)); err != nil {
+	if err := keyringStore.Set(context.Background(), auth.TokenService, "nunojob@icloud.com", string(tokens)); err != nil {
 		t.Fatal(err)
 	}
 	mock := api.NewMockClient()
 	mock.Fixtures.Account = "nunojob@icloud.com"
 	mock.Fixtures.Team = "acme"
 
-	_, err = Service{API: forbiddenSessionsAPI{MockClient: mock}, Config: store, Keyring: keyringStore}.List(context.Background())
+	authService := auth.Service{API: mock, Config: store, Keyring: keyringStore}
+	_, err = Service{API: forbiddenSessionsAPI{MockClient: mock}, Auth: authService, Config: store, Keyring: keyringStore}.List(context.Background())
 	if err == nil {
 		t.Fatal("expected forbidden error")
 	}
@@ -200,7 +204,7 @@ func TestListForbiddenSuggestsTeamsUseForMismatchedTeam(t *testing.T) {
 	}
 }
 
-func newTestService(t *testing.T, team api.Team, extraEnv map[string]string) (Service, *config.Store) {
+func newTestService(t *testing.T, team api.Team, mode string, extraEnv map[string]string) (Service, *config.Store) {
 	t.Helper()
 	home := t.TempDir()
 	env := map[string]string{
@@ -212,13 +216,53 @@ func newTestService(t *testing.T, team api.Team, extraEnv map[string]string) (Se
 		env[key] = value
 	}
 	store := config.NewStore(env, "")
-	if err := store.SaveConfig(config.Config{ActiveTeam: team.Name, Teams: map[string]config.TeamConfig{team.Name: config.TeamConfigFromAPI(team, "standard", team.DefaultModel)}}); err != nil {
+	cfg := config.Config{ActiveTeam: team.Name, Teams: map[string]config.TeamConfig{team.Name: config.TeamConfigFromAPI(team, "standard", team.DefaultModel, mode)}}
+	if mode == config.ModeAirplane {
+		cfg.Mode = config.ModeAirplane
+	}
+	if err := store.SaveConfig(cfg); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.SaveState(config.State{Authenticated: true, CurrentUser: "nunojob@icloud.com"}); err != nil {
 		t.Fatal(err)
 	}
-	return Service{API: api.NewMockClient(), Config: store}, store
+	mockClient := api.NewMockClient()
+	authService := auth.Service{API: mockClient, Config: store}
+	return Service{API: mockClient, Auth: authService, Config: store}, store
+}
+
+func TestListErrorsWhenNoActiveTeam(t *testing.T) {
+	home := t.TempDir()
+	env := map[string]string{
+		"HOME":            home,
+		"XDG_CONFIG_HOME": home + "/.config",
+		"XDG_DATA_HOME":   home + "/.data",
+	}
+	store := config.NewStore(env, "")
+	service := Service{API: api.NewMockClient(), Config: store}
+	_, err := service.List(context.Background())
+	if err == nil {
+		t.Fatal("expected error when no active team is configured")
+	}
+	if !strings.Contains(err.Error(), "no active team") {
+		t.Fatalf("expected no-active-team error, got: %v", err)
+	}
+}
+
+func TestIDForTaskUsesUserSlugAndFallback(t *testing.T) {
+	t.Parallel()
+	got := IDForTask("nuno@yld.io", "Fix the redirect bug")
+	if !strings.HasPrefix(got, "@nuno/fix-the-redirect-bug-") {
+		t.Fatalf("expected @nuno/<slug>, got %q", got)
+	}
+	// Empty user must not default to "dscape" (a former mock leak).
+	got = IDForTask("", "some task")
+	if !strings.HasPrefix(got, "@user/some-task-") {
+		t.Fatalf("expected @user/<slug>, got %q", got)
+	}
+	if strings.Contains(got, "dscape") {
+		t.Fatalf("ID should not embed mock identity, got %q", got)
+	}
 }
 
 type recordingSessionsAPI struct {

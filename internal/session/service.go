@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
@@ -14,20 +13,32 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"time"
 
-	"github.com/sovereign46/s46-cli/internal/airplane"
 	"github.com/sovereign46/s46-cli/internal/api"
 	"github.com/sovereign46/s46-cli/internal/config"
 	"github.com/sovereign46/s46-cli/internal/keyring"
+	"github.com/sovereign46/s46-cli/internal/strs"
 )
 
-const tokenService = "s46.tokens"
+// SessionsAPI is the narrow API surface the session service actually
+// needs from the s46 control plane. It is a composition of two of the
+// finer interfaces in package api.
+type SessionsAPI interface {
+	api.SessionAPI
+	api.AccountAPI
+}
 
 type Service struct {
-	API     api.Client
+	API     SessionsAPI
+	Auth    AuthTokens
 	Config  *config.Store
 	Keyring keyring.Store
+}
+
+// AuthTokens is the small bit of the auth package session needs:
+// give me a bearer token (or empty in airplane mode).
+type AuthTokens interface {
+	AccessToken(ctx context.Context) (string, error)
 }
 
 type ShareResult struct {
@@ -65,7 +76,7 @@ func (s Service) List(ctx context.Context) ([]api.Session, error) {
 		sort.Slice(sessions, func(i, j int) bool { return sessions[i].ID < sessions[j].ID })
 		return sessions, nil
 	}
-	if ctxState.Config.Mode == airplane.ModeAirplane || ctxState.Team.Mode == airplane.ModeAirplane || ctxState.TeamConfig.Mode == airplane.ModeAirplane {
+	if ctxState.Config.ActiveMode() == config.ModeAirplane {
 		return []api.Session{}, nil
 	}
 	accessToken := s.accessToken(ctx, ctxState)
@@ -124,7 +135,7 @@ func localDevelopmentAPI(env map[string]string) bool {
 	if _, ok := api.LocalDevelopmentOrigin(env["S46_API_BASE_URL"]); ok {
 		return true
 	}
-	return isTruthy(env["S46_DEV_SHELL"])
+	return strs.Truthy(env["S46_DEV_SHELL"])
 }
 
 func (s Service) Detach(ctx context.Context, sessionID string, harness string, box string, dryRun bool) (api.Session, error) {
@@ -274,7 +285,7 @@ func (s Service) Run(ctx context.Context, task string, model string, sessionID s
 		sessionID = IDForTask(ctxState.State.CurrentUser, task)
 	}
 	location := "local"
-	if ctxState.Team.Mode == "local" || ctxState.Team.Mode == "airplane" {
+	if ctxState.Config.ActiveMode() == config.ModeAirplane {
 		location = "localhost"
 	}
 	result := RunResult{ID: sessionID, Task: task, State: "mocked", Location: location, Harness: "s46", Model: model, Lane: ctxState.Team.Lane, DryRun: dryRun}
@@ -306,11 +317,11 @@ func (s Service) contextState() (workspaceContext, error) {
 	}
 	teamName := cfg.ActiveTeam
 	if teamName == "" {
-		teamName = "acme"
+		return workspaceContext{}, fmt.Errorf("no active team; run `s46 login` or `s46 connect <team>` first")
 	}
-	teamConfig := cfg.Teams[teamName]
-	if teamConfig.Endpoint == "" {
-		teamConfig = config.TeamConfigFromAPI(api.Team{Name: teamName, Endpoint: s.defaultEndpoint(teamName), Lane: "EU-OPO", Mode: "cloud", Boxes: []string{"box-01", "box-02"}, DefaultModel: api.DefaultModel, Models: api.DefaultModels}, "claude-code", api.DefaultModel)
+	teamConfig, ok := cfg.Teams[teamName]
+	if !ok || teamConfig.Endpoint == "" {
+		return workspaceContext{}, fmt.Errorf("active team %q has no configuration; run `s46 connect %s` to set one up", teamName, teamName)
 	}
 	return workspaceContext{
 		Config:     cfg,
@@ -322,56 +333,14 @@ func (s Service) contextState() (workspaceContext, error) {
 }
 
 func (s Service) accessToken(ctx context.Context, ctxState workspaceContext) string {
-	if ctxState.Config.Mode == airplane.ModeAirplane || ctxState.Team.Mode == airplane.ModeAirplane || ctxState.TeamConfig.Mode == airplane.ModeAirplane {
+	if ctxState.Config.ActiveMode() == config.ModeAirplane {
 		return ""
 	}
-	state := ctxState.State
-	if s.Keyring == nil || state.CurrentUser == "" {
+	if s.Auth == nil || ctxState.State.CurrentUser == "" {
 		return ""
 	}
-	raw, err := s.Keyring.Get(ctx, tokenService, state.CurrentUser)
-	if err != nil {
-		return ""
-	}
-	var tokens api.TokenSet
-	if err := json.Unmarshal([]byte(raw), &tokens); err != nil {
-		return ""
-	}
-	if tokens.RefreshToken != "" && time.Until(tokens.ExpiresAt) < 30*time.Second {
-		refreshed, err := s.API.RefreshToken(ctx, tokens.RefreshToken, state.CurrentUser)
-		if err == nil && refreshed.AccessToken != "" {
-			if encoded, err := json.Marshal(refreshed); err == nil {
-				_ = s.Keyring.Set(ctx, tokenService, refreshed.Account, string(encoded))
-			}
-			return refreshed.AccessToken
-		}
-	}
-	return tokens.AccessToken
-}
-
-func (s Service) defaultEndpoint(teamName string) string {
-	if origin, ok := api.LocalDevelopmentOrigin(s.Config.Env["S46_API_BASE_URL"]); ok {
-		return origin
-	}
-	if isTruthy(s.Config.Env["S46_DEV_SHELL"]) {
-		baseURL := s.Config.Env["S46_DEV_BASE_URL"]
-		if baseURL == "" {
-			baseURL = "http://127.0.0.1:8080"
-		}
-		if origin, ok := api.LocalDevelopmentOrigin(baseURL); ok {
-			return origin
-		}
-	}
-	return fmt.Sprintf("https://%s.s46.dev", teamName)
-}
-
-func isTruthy(value string) bool {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "", "0", "false", "no", "off":
-		return false
-	default:
-		return true
-	}
+	token, _ := s.Auth.AccessToken(ctx)
+	return token
 }
 
 func findOrDefault(state config.State, sessionID string, team api.Team, teamConfig config.TeamConfig) api.Session {
@@ -386,15 +355,19 @@ func findOrDefault(state config.State, sessionID string, team api.Team, teamConf
 	return session
 }
 
+var (
+	userSlugSanitizer = regexp.MustCompile(`[^a-zA-Z0-9_-]+`)
+	taskSlugSanitizer = regexp.MustCompile(`[^a-z0-9]+`)
+)
+
 func IDForTask(user string, task string) string {
-	name := "dscape"
+	name := "user"
 	if user != "" {
-		name = regexp.MustCompile(`[^a-zA-Z0-9_-]+`).ReplaceAllString(strings.Split(user, "@")[0], "")
+		if extracted := userSlugSanitizer.ReplaceAllString(strings.Split(user, "@")[0], ""); extracted != "" {
+			name = extracted
+		}
 	}
-	if name == "" {
-		name = "user"
-	}
-	slug := regexp.MustCompile(`[^a-z0-9]+`).ReplaceAllString(strings.ToLower(task), "-")
+	slug := taskSlugSanitizer.ReplaceAllString(strings.ToLower(task), "-")
 	slug = strings.Trim(slug, "-")
 	if len(slug) > 48 {
 		slug = strings.Trim(slug[:48], "-")

@@ -35,7 +35,7 @@ func TestAdapterPlansDoNotWriteThirdPartyFiles(t *testing.T) {
 	if disconnect.Harness != "standard" || len(disconnect.Files) != 0 {
 		t.Fatalf("disconnect plan = %#v", disconnect)
 	}
-	applied, err := adapter.ApplyConnect(context.Background(), connect)
+	applied, err := adapter.Apply(context.Background(), connect)
 	if err != nil {
 		t.Fatal(err)
 	}

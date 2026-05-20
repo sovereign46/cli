@@ -10,14 +10,18 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sovereign46/s46-cli/internal/airplane"
 	"github.com/sovereign46/s46-cli/internal/api"
 	"github.com/sovereign46/s46-cli/internal/config"
 	"github.com/sovereign46/s46-cli/internal/keyring"
+	"github.com/sovereign46/s46-cli/internal/strs"
 )
 
 const (
-	tokenService         = "s46.tokens"
+	// TokenService is the keyring service name under which user bearer
+	// tokens are stored. Exported so test helpers and any future consumers
+	// can write or read tokens with a stable key.
+	TokenService = "s46.tokens"
+
 	defaultAirplaneToken = "s46_airplane_local"
 )
 
@@ -36,7 +40,6 @@ type LoginResult struct {
 	VerificationURI string    `json:"verificationUri"`
 	UserCode        string    `json:"userCode"`
 	ExpiresAt       time.Time `json:"expiresAt"`
-	Mock            bool      `json:"mock"`
 }
 
 type LoginRequest struct {
@@ -84,7 +87,7 @@ func (s Service) LoginWithDeviceCallback(ctx context.Context, req LoginRequest, 
 	if err != nil {
 		return LoginResult{}, fmt.Errorf("login failed after approval: could not load account details from /v1/me: %w", err)
 	}
-	account := firstNonEmpty(user.Email, tokens.Account)
+	account := strs.FirstNonEmpty(user.Email, tokens.Account)
 	tokens.Account = account
 	if err := s.storeTokens(ctx, tokens); err != nil {
 		return LoginResult{}, err
@@ -109,7 +112,7 @@ func (s Service) LoginWithDeviceCallback(ctx context.Context, req LoginRequest, 
 		return LoginResult{}, err
 	}
 	if _, ok := cfg.Teams[team.Name]; !ok {
-		cfg.Teams[team.Name] = config.TeamConfigFromAPI(team, "standard", team.DefaultModel)
+		cfg.Teams[team.Name] = config.TeamConfigFromAPI(team, "standard", team.DefaultModel, config.ModeCloud)
 	}
 	cfg.ActiveTeam = team.Name
 	if err := s.Config.SaveConfig(cfg); err != nil {
@@ -122,7 +125,7 @@ func (s Service) LoginWithDeviceCallback(ctx context.Context, req LoginRequest, 
 	}
 	state.Authenticated = true
 	state.CurrentUser = account
-	state.CurrentDeviceID = firstNonEmpty(tokens.DeviceID, loginReq.DeviceID)
+	state.CurrentDeviceID = strs.FirstNonEmpty(tokens.DeviceID, loginReq.DeviceID)
 	state.CurrentDeviceName = loginReq.DeviceName
 	state.LastLoginAt = time.Now().UTC().Format(time.RFC3339)
 	if err := s.Config.SaveState(state); err != nil {
@@ -138,7 +141,6 @@ func (s Service) LoginWithDeviceCallback(ctx context.Context, req LoginRequest, 
 		VerificationURI: device.VerificationURI,
 		UserCode:        device.UserCode,
 		ExpiresAt:       tokens.ExpiresAt,
-		Mock:            true,
 	}, nil
 }
 
@@ -151,12 +153,12 @@ func (s Service) resolveLoginRequest(req LoginRequest) (api.DeviceLoginRequest, 
 	if err != nil {
 		return api.DeviceLoginRequest{}, err
 	}
-	deviceID := firstNonEmpty(req.DeviceID, envValue(s.Config.Env, "S46_DEVICE_ID"), state.CurrentDeviceID, defaultDeviceID(s.Config.Env))
+	deviceID := strs.FirstNonEmpty(req.DeviceID, strs.EnvValue(s.Config.Env, "S46_DEVICE_ID"), state.CurrentDeviceID, defaultDeviceID(s.Config.Env))
 	deviceID = sanitizeDeviceID(deviceID)
 	if deviceID == "" {
 		return api.DeviceLoginRequest{}, fmt.Errorf("device id is required; pass --device-id <id>")
 	}
-	deviceName := firstNonEmpty(req.DeviceName, envValue(s.Config.Env, "S46_DEVICE_NAME"), state.CurrentDeviceName, defaultDeviceName(deviceID))
+	deviceName := strs.FirstNonEmpty(req.DeviceName, strs.EnvValue(s.Config.Env, "S46_DEVICE_NAME"), state.CurrentDeviceName, defaultDeviceName(deviceID))
 	return api.DeviceLoginRequest{Email: req.Email, DeviceID: deviceID, DeviceName: deviceName}, nil
 }
 
@@ -196,7 +198,7 @@ func (s Service) currentLogin(ctx context.Context) (LoginResult, bool) {
 		Authenticated: true,
 		User:          state.CurrentUser,
 		Team:          cfg.ActiveTeam,
-		DeviceID:      firstNonEmpty(tokens.DeviceID, state.CurrentDeviceID),
+		DeviceID:      strs.FirstNonEmpty(tokens.DeviceID, state.CurrentDeviceID),
 		DeviceName:    state.CurrentDeviceName,
 		ExpiresAt:     tokens.ExpiresAt,
 	}, true
@@ -255,8 +257,27 @@ func (s Service) Token(ctx context.Context, refresh bool) (string, error) {
 	if s.airplaneMode() {
 		return s.airplaneToken(), nil
 	}
-	state, tokens, err := s.currentTokenSet(ctx, refresh)
-	_ = state
+	_, tokens, err := s.currentTokenSet(ctx, refresh)
+	if err != nil {
+		return "", err
+	}
+	return tokens.AccessToken, nil
+}
+
+// AccessToken returns a valid bearer access token for the current user,
+// refreshing it transparently if it is within 30 seconds of expiry. In
+// airplane mode it returns an empty string with no error so that callers
+// fall through to local-gateway calls without a bearer. When no keyring
+// is configured (typical in lightweight tests) it returns an empty token
+// rather than panicking, mirroring "no credentials available" semantics.
+func (s Service) AccessToken(ctx context.Context) (string, error) {
+	if s.airplaneMode() {
+		return "", nil
+	}
+	if s.Keyring == nil {
+		return "", nil
+	}
+	_, tokens, err := s.currentTokenSet(ctx, false)
 	if err != nil {
 		return "", err
 	}
@@ -283,7 +304,7 @@ func (s Service) DeleteDevice(ctx context.Context, deviceID string) (bool, error
 	if err := s.API.DeleteDevice(ctx, requestedID, tokens.AccessToken); err != nil {
 		return false, err
 	}
-	currentID := sanitizeDeviceID(firstNonEmpty(state.CurrentDeviceID, tokens.DeviceID))
+	currentID := sanitizeDeviceID(strs.FirstNonEmpty(state.CurrentDeviceID, tokens.DeviceID))
 	if requestedID == currentID {
 		return true, s.clearLocalCredentials(ctx, state)
 	}
@@ -316,7 +337,7 @@ func (s Service) currentTokenSet(ctx context.Context, refresh bool) (config.Stat
 
 func (s Service) clearLocalCredentials(ctx context.Context, state config.State) error {
 	if state.CurrentUser != "" {
-		if err := s.Keyring.Delete(ctx, tokenService, state.CurrentUser); err != nil {
+		if err := s.Keyring.Delete(ctx, TokenService, state.CurrentUser); err != nil {
 			return err
 		}
 	}
@@ -333,11 +354,11 @@ func (s Service) storeTokens(ctx context.Context, tokens api.TokenSet) error {
 	if err != nil {
 		return err
 	}
-	return s.Keyring.Set(ctx, tokenService, tokens.Account, string(raw))
+	return s.Keyring.Set(ctx, TokenService, tokens.Account, string(raw))
 }
 
 func (s Service) loadTokens(ctx context.Context, account string) (api.TokenSet, error) {
-	raw, err := s.Keyring.Get(ctx, tokenService, account)
+	raw, err := s.Keyring.Get(ctx, TokenService, account)
 	if err != nil {
 		return api.TokenSet{}, err
 	}
@@ -356,15 +377,12 @@ func (s Service) airplaneMode() bool {
 	if err != nil {
 		return false
 	}
-	if cfg.Mode == airplane.ModeAirplane {
-		return true
-	}
-	return cfg.ActiveTeam != "" && cfg.Teams[cfg.ActiveTeam].Mode == airplane.ModeAirplane
+	return cfg.ActiveMode() == config.ModeAirplane
 }
 
 func (s Service) airplaneToken() string {
 	if s.Config != nil {
-		return firstNonEmpty(envValue(s.Config.Env, "S46_AIRPLANE_TOKEN"), defaultAirplaneToken)
+		return strs.FirstNonEmpty(strs.EnvValue(s.Config.Env, "S46_AIRPLANE_TOKEN"), defaultAirplaneToken)
 	}
 	return defaultAirplaneToken
 }
@@ -380,7 +398,7 @@ func sanitizeDeviceID(value string) string {
 }
 
 func defaultDeviceID(env map[string]string) string {
-	if value := envValue(env, "HOSTNAME"); value != "" {
+	if value := strs.EnvValue(env, "HOSTNAME"); value != "" {
 		return value
 	}
 	if host, err := os.Hostname(); err == nil && host != "" {
@@ -394,20 +412,4 @@ func defaultDeviceName(deviceID string) string {
 		return host
 	}
 	return deviceID
-}
-
-func envValue(env map[string]string, key string) string {
-	if env == nil {
-		return os.Getenv(key)
-	}
-	return env[key]
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
-		}
-	}
-	return ""
 }

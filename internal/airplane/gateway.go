@@ -1,0 +1,131 @@
+package airplane
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+
+	"github.com/sovereign46/s46-cli/internal/strs"
+)
+
+type gatewayCommand struct {
+	Path        string
+	Args        []string
+	Dir         string
+	Description string
+}
+
+func (s Service) StartGateway() error {
+	if strs.Truthy(s.env("S46_AIRPLANE_SKIP_SETUP_CHECKS")) {
+		return nil
+	}
+	if s.gatewayReady(context.Background()) {
+		return nil
+	}
+	if strs.Truthy(s.env("S46_TEST_START_GATEWAY_OK")) {
+		s.setEnv("S46_TEST_GATEWAY_READY", "1")
+		return nil
+	}
+	if s.gatewayResponding(context.Background()) {
+		return fmt.Errorf("local S46 API at %s is running but is not airplane-ready; run `s46 airplane setup` to restart it in airplane mode", s.gatewayURL())
+	}
+	command, ok := s.gatewayCommand()
+	if !ok {
+		return fmt.Errorf("local S46 gateway is not running and no start command was found; run setup to install it or set S46_API_BINARY/S46_API_REPO")
+	}
+	cmd := exec.Command(command.Path, command.Args...)
+	cmd.Dir = command.Dir
+	env := append([]string{"S46_ENV=airplane", "S46_ADDR=127.0.0.1:8080", "S46_LOCAL_OLLAMA_URL=" + s.ollamaURL(), "S46_LOCAL_MODEL=" + s.backendModel()}, AirplaneGatewayEnv(s.Env)...)
+	cmd.Env = s.processEnv(env...)
+	return s.startDetached(cmd, "s46-api-airplane.log")
+}
+
+func (s Service) GatewayInstallDescription() string {
+	return fmt.Sprintf("from GitHub release or git clone %s into %s", s.gatewayGitHubRepo(), s.gatewayInstallDir())
+}
+
+func (s Service) GatewayStartDescription() (string, bool) {
+	command, ok := s.gatewayCommand()
+	if !ok {
+		return "", false
+	}
+	return command.Description, true
+}
+
+// GatewayReady is the public alias for the private gatewayReady predicate
+// used by health checks.
+func (s Service) GatewayReady(ctx context.Context) bool {
+	return s.gatewayReady(ctx)
+}
+
+// GatewayResponding is the public alias for the private gatewayResponding
+// predicate used by health checks.
+func (s Service) GatewayResponding(ctx context.Context) bool {
+	return s.gatewayResponding(ctx)
+}
+
+func (s Service) gatewayBinary() (string, bool) {
+	command, ok := s.gatewayCommand()
+	if !ok {
+		return "", false
+	}
+	return command.Description, true
+}
+
+func (s Service) gatewayCommand() (gatewayCommand, bool) {
+	if path := strings.TrimSpace(s.env("S46_API_BINARY")); path != "" {
+		if executableFile(path) {
+			return gatewayCommand{Path: path, Description: path}, true
+		}
+		return gatewayCommand{}, false
+	}
+	if path := strings.TrimSpace(s.env("S46_TEST_GATEWAY_BINARY")); path != "" {
+		if path == "missing" {
+			return gatewayCommand{}, false
+		}
+		return gatewayCommand{Path: path, Description: path}, true
+	}
+	if command, ok := s.gatewaySourceCommand(); ok {
+		return command, true
+	}
+	if path := s.managedGatewayBinaryPath(); executableFile(path) {
+		return gatewayCommand{Path: path, Description: path}, true
+	}
+	if path, err := exec.LookPath(GatewayBinaryName); err == nil {
+		return gatewayCommand{Path: path, Description: path}, true
+	}
+	return gatewayCommand{}, false
+}
+
+func (s Service) gatewaySourceCommand() (gatewayCommand, bool) {
+	candidate := strings.TrimSpace(s.env("S46_API_REPO"))
+	goPath, goErr := exec.LookPath("go")
+	if candidate == "" || goErr != nil {
+		return gatewayCommand{}, false
+	}
+	mainPath := filepath.Join(candidate, "cmd", GatewayBinaryName)
+	if info, err := os.Stat(mainPath); err == nil && info.IsDir() {
+		return gatewayCommand{Path: goPath, Args: []string{"run", "./cmd/" + GatewayBinaryName}, Dir: candidate, Description: "source repo " + candidate}, true
+	}
+	return gatewayCommand{}, false
+}
+
+func (s Service) gatewayURL() string {
+	return strs.FirstNonEmpty(s.env("S46_AIRPLANE_GATEWAY_URL"), LocalGatewayURL)
+}
+
+func (s Service) gatewayMessage(ctx context.Context, ready bool, path string) string {
+	if ready {
+		return "airplane-ready at " + s.gatewayURL()
+	}
+	if s.gatewayResponding(ctx) {
+		return "responding at " + s.gatewayURL() + " but not airplane-ready"
+	}
+	if path != "" {
+		return "startable: " + path
+	}
+	return "not installed or running"
+}

@@ -4,13 +4,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/sovereign46/s46-cli/internal/strs"
 )
 
 func HomeDir(env map[string]string) string {
-	if value := envValue(env, "HOME"); value != "" {
+	if value := strs.EnvValue(env, "HOME"); value != "" {
 		return value
 	}
-	if value := envValue(env, "USERPROFILE"); value != "" {
+	if value := strs.EnvValue(env, "USERPROFILE"); value != "" {
 		return value
 	}
 	dir, _ := os.UserHomeDir()
@@ -18,21 +20,21 @@ func HomeDir(env map[string]string) string {
 }
 
 func ConfigDir(env map[string]string) string {
-	if value := envValue(env, "XDG_CONFIG_HOME"); value != "" {
+	if value := strs.EnvValue(env, "XDG_CONFIG_HOME"); value != "" {
 		return value
 	}
 	return filepath.Join(HomeDir(env), ".config")
 }
 
 func DataDir(env map[string]string) string {
-	if value := envValue(env, "XDG_DATA_HOME"); value != "" {
+	if value := strs.EnvValue(env, "XDG_DATA_HOME"); value != "" {
 		return value
 	}
 	return filepath.Join(HomeDir(env), ".local", "share")
 }
 
 func CacheDir(env map[string]string) string {
-	if value := envValue(env, "XDG_CACHE_HOME"); value != "" {
+	if value := strs.EnvValue(env, "XDG_CACHE_HOME"); value != "" {
 		return value
 	}
 	return filepath.Join(HomeDir(env), ".cache")
@@ -55,11 +57,4 @@ func DisplayPath(path string, env map[string]string) string {
 		return "~" + strings.TrimPrefix(path, home)
 	}
 	return path
-}
-
-func envValue(env map[string]string, key string) string {
-	if env == nil {
-		return os.Getenv(key)
-	}
-	return env[key]
 }

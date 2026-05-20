@@ -16,7 +16,76 @@ import (
 	"time"
 
 	"github.com/sovereign46/s46-cli/internal/airplane"
+	"github.com/sovereign46/s46-cli/internal/api"
+	"github.com/sovereign46/s46-cli/internal/config"
 )
+
+func TestResolveConnectModePrecedence(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		cfg      config.Config
+		existing config.TeamConfig
+		req      connectRequest
+		want     string
+	}{
+		{
+			name: "explicit airplane wins",
+			req:  connectRequest{Mode: config.ModeAirplane},
+			want: config.ModeAirplane,
+		},
+		{
+			name: "explicit cloud wins over current airplane mode",
+			cfg:  config.Config{Mode: config.ModeAirplane},
+			req:  connectRequest{Mode: config.ModeCloud},
+			want: config.ModeCloud,
+		},
+		{
+			name: "local endpoint forces airplane",
+			req:  connectRequest{Endpoint: "http://127.0.0.1:8080"},
+			want: config.ModeAirplane,
+		},
+		{
+			name: "current airplane config implies airplane",
+			cfg:  config.Config{Mode: config.ModeAirplane},
+			want: config.ModeAirplane,
+		},
+		{
+			name:     "existing team mode used when nothing else specified",
+			existing: config.TeamConfig{Mode: config.ModeAirplane},
+			want:     config.ModeAirplane,
+		},
+		{
+			name: "defaults to cloud",
+			want: config.ModeCloud,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveConnectMode(tc.cfg, tc.existing, tc.req); got != tc.want {
+				t.Errorf("resolveConnectMode() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func seedActiveTeam(t *testing.T, env map[string]string, name string, endpoint string) {
+	t.Helper()
+	store := config.NewStore(env, "")
+	teamConfig := config.TeamConfig{
+		Endpoint:       endpoint,
+		Lane:           "EU-OPO",
+		Mode:           config.ModeCloud,
+		DefaultHarness: "claude-code",
+		DefaultModel:   api.DefaultModel,
+		Boxes:          []string{"box-01"},
+		Models:         api.DefaultModels,
+	}
+	cfg := config.Config{ActiveTeam: name, Teams: map[string]config.TeamConfig{name: teamConfig}}
+	if err := store.SaveConfig(cfg); err != nil {
+		t.Fatalf("seed active team: %v", err)
+	}
+}
 
 type commandResult struct {
 	stdout string
@@ -83,6 +152,7 @@ func TestDevShellMockShareUsesLocalViewerURL(t *testing.T) {
 	env := testEnv(t)
 	env["S46_DEV_SHELL"] = "1"
 	env["S46_DEV_BASE_URL"] = "http://127.0.0.1:8080"
+	seedActiveTeam(t, env, "acme", "http://127.0.0.1:8080")
 	out := requireOK(t, run(t, env, "share", "@dscape/auth-redirect-fix"))
 	if !strings.Contains(out, "Share URL: http://127.0.0.1:8080/session/#") {
 		t.Fatalf("unexpected share output: %s", out)
@@ -379,7 +449,7 @@ func TestAirplaneModeOnAndCloudModeRestoreEndpoint(t *testing.T) {
 		}
 	}
 	status := requireOK(t, run(t, env, "status"))
-	if !strings.Contains(status, "[s46✈] mode:    airplane") || !strings.Contains(status, "[s46✈] model:   s46/devstral-small-2-24b") {
+	if !strings.Contains(status, "[s46✈] team:    acme · EU-OPO · airplane") || !strings.Contains(status, "[s46✈] harness: standard · s46/devstral-small-2-24b") {
 		t.Fatalf("unexpected airplane status:\n%s", status)
 	}
 	modeJSON := requireOK(t, run(t, env, "mode", "--json"))
@@ -499,7 +569,7 @@ func TestStatusShowsOllamaRuntime(t *testing.T) {
 	env["S46_TEST_OLLAMA_LIST"] = airplane.BackendModel
 	env["S46_TEST_OLLAMA_PS"] = airplane.BackendModel + ":65536"
 
-	out := requireOK(t, run(t, env, "status"))
+	out := requireOK(t, run(t, env, "--verbose", "status"))
 	for _, want := range []string{
 		"[s46] Ollama server: manual",
 		"[s46] ollama list: devstral-small-2:24b-instruct-2512-q4_K_M",
@@ -564,7 +634,7 @@ func TestAirplaneSetupCanTurnOnAirplaneModeWithoutLogin(t *testing.T) {
 	}
 	env["S46_TEST_LISTENER_11434"] = "111 ollama"
 	env["S46_TEST_LISTENER_8080"] = "222 s46-api"
-	status := requireOK(t, run(t, env, "status"))
+	status := requireOK(t, run(t, env, "--verbose", "status"))
 	for _, want := range []string{
 		"[s46✈] team:    local",
 		"[s46✈] harness: claude-code",
@@ -696,7 +766,7 @@ func TestAirplaneTokenHelperUsesLocalToken(t *testing.T) {
 	if strings.TrimSpace(out) != "local-airplane-token" {
 		t.Fatalf("unexpected airplane token: %q", out)
 	}
-	status := requireOK(t, run(t, env, "status"))
+	status := requireOK(t, run(t, env, "--verbose", "status"))
 	if !strings.Contains(status, "[ok] tenant") {
 		t.Fatalf("unexpected airplane status output: %s", status)
 	}
@@ -1035,7 +1105,7 @@ func TestBackupsBeforeOverwriteAndIdempotency(t *testing.T) {
 func TestStatusAfterLoginDoesNotRequireHarnessConnect(t *testing.T) {
 	env := testEnv(t)
 	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
-	out := requireOK(t, run(t, env, "status"))
+	out := requireOK(t, run(t, env, "--verbose", "status"))
 	if !strings.Contains(out, "[ok] standard") || strings.Contains(out, "claude-config") {
 		t.Fatalf("unexpected status output: %s", out)
 	}
@@ -1048,7 +1118,7 @@ func TestTeamsUseWithoutTeamShowsExpectedInput(t *testing.T) {
 		t.Fatal("expected teams use without team to fail")
 	}
 	message := result.err.Error()
-	if !strings.Contains(message, "missing team") || !strings.Contains(message, "[s46] expected: s46 teams use <team>") {
+	if !strings.Contains(message, "missing team") || !strings.Contains(message, "expected: s46 teams use <team>") {
 		t.Fatalf("unexpected error: %v", result.err)
 	}
 }
@@ -1073,7 +1143,7 @@ func TestDisconnectTeamsUseStatusAndModeRequireActiveTeam(t *testing.T) {
 	requireOK(t, run(t, env, "airplane", "mode", "off"))
 	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
 	requireOK(t, run(t, env, "connect", "acme", "--harness=claude-code"))
-	if out := requireOK(t, run(t, env, "status")); !strings.Contains(out, "[ok] tenant") || !strings.Contains(out, "[ok] harness") {
+	if out := requireOK(t, run(t, env, "--verbose", "status")); !strings.Contains(out, "[ok] tenant") || !strings.Contains(out, "[ok] harness") {
 		t.Fatalf("unexpected status output: %s", out)
 	}
 	requireOK(t, run(t, env, "teams", "use", "acme"))

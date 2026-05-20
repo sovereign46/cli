@@ -9,6 +9,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/sovereign46/s46-cli/internal/config"
+	"github.com/sovereign46/s46-cli/internal/strs"
 )
 
 type Store interface {
@@ -18,10 +21,10 @@ type Store interface {
 }
 
 func New(env map[string]string) (Store, error) {
-	if envValue(env, "S46_KEYRING_BACKEND") == "file" {
-		path := envValue(env, "S46_KEYRING_FILE")
+	if strs.EnvValue(env, "S46_KEYRING_BACKEND") == "file" {
+		path := strs.EnvValue(env, "S46_KEYRING_FILE")
 		if path == "" {
-			path = filepath.Join(dataHome(env), "s46", "keyring.mock.json")
+			path = filepath.Join(config.DataDir(env), "s46", "keyring.mock.json")
 		}
 		return FileStore{Path: path}, nil
 	}
@@ -168,28 +171,6 @@ func (s FileStore) write(entries map[string]string) error {
 
 func key(service string, account string) string {
 	return service + "\x00" + account
-}
-
-func envValue(env map[string]string, key string) string {
-	if env == nil {
-		return os.Getenv(key)
-	}
-	return env[key]
-}
-
-func dataHome(env map[string]string) string {
-	if value := envValue(env, "XDG_DATA_HOME"); value != "" {
-		return value
-	}
-	return filepath.Join(home(env), ".local", "share")
-}
-
-func home(env map[string]string) string {
-	if value := envValue(env, "HOME"); value != "" {
-		return value
-	}
-	dir, _ := os.UserHomeDir()
-	return dir
 }
 
 func trimTrailingNewline(value string) string {
