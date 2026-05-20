@@ -18,6 +18,7 @@ import (
 	"github.com/sovereign46/s46-cli/internal/config"
 	"github.com/sovereign46/s46-cli/internal/keyring"
 	"github.com/sovereign46/s46-cli/internal/strs"
+	"github.com/sovereign46/s46-cli/internal/workspace"
 )
 
 // SessionsAPI is the narrow API surface the session service actually
@@ -298,38 +299,11 @@ func (s Service) Run(ctx context.Context, task string, model string, sessionID s
 	return result, nil
 }
 
-type workspaceContext struct {
-	Config     config.Config
-	State      config.State
-	TeamName   string
-	TeamConfig config.TeamConfig
-	Team       api.Team
-}
+// workspaceContext is the session-local alias for workspace.Context.
+type workspaceContext = workspace.Context
 
 func (s Service) contextState() (workspaceContext, error) {
-	cfg, err := s.Config.LoadConfig()
-	if err != nil {
-		return workspaceContext{}, err
-	}
-	state, err := s.Config.LoadState()
-	if err != nil {
-		return workspaceContext{}, err
-	}
-	teamName := cfg.ActiveTeam
-	if teamName == "" {
-		return workspaceContext{}, fmt.Errorf("no active team; run `s46 login` or `s46 connect <team>` first")
-	}
-	teamConfig, ok := cfg.Teams[teamName]
-	if !ok || teamConfig.Endpoint == "" {
-		return workspaceContext{}, fmt.Errorf("active team %q has no configuration; run `s46 connect %s` to set one up", teamName, teamName)
-	}
-	return workspaceContext{
-		Config:     cfg,
-		State:      state,
-		TeamName:   teamName,
-		TeamConfig: teamConfig,
-		Team:       teamConfig.API(teamName),
-	}, nil
+	return workspace.Resolve(s.Config)
 }
 
 func (s Service) accessToken(ctx context.Context, ctxState workspaceContext) string {

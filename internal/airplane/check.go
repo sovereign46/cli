@@ -315,19 +315,21 @@ func readBodySnippet(body io.Reader) string {
 }
 
 func formatDuration(duration time.Duration) string {
-	if duration < time.Second {
-		return "0s"
+	if duration%time.Minute == 0 {
+		minutes := int(duration / time.Minute)
+		if minutes == 1 {
+			return "1 minute"
+		}
+		return fmt.Sprintf("%d minutes", minutes)
 	}
-	seconds := int(duration.Seconds())
-	minutes := seconds / 60
-	seconds = seconds % 60
-	if minutes <= 0 {
-		return fmt.Sprintf("%ds", seconds)
+	if duration%time.Second == 0 {
+		seconds := int(duration / time.Second)
+		if seconds == 1 {
+			return "1 second"
+		}
+		return fmt.Sprintf("%d seconds", seconds)
 	}
-	if seconds == 0 {
-		return fmt.Sprintf("%dm", minutes)
-	}
-	return fmt.Sprintf("%dm%ds", minutes, seconds)
+	return duration.String()
 }
 
 func boolMessage(ok bool, success string, failure string) string {

@@ -1,151 +1,47 @@
 # Contributing
 
-## Local development setup
-
-From the repository root:
+## Tests
 
 ```sh
-cd ~/dev/s46-cli
+go test ./...
+gofmt -w cmd internal
 ```
 
-Install Go if it is not already available:
+Install pre-commit hooks once with `make install-hooks`.
+
+## Sandboxed dev shell
+
+`make shell` builds an `s46` binary, sets up an isolated temporary `HOME`, exports test-friendly env vars (`S46_DEV_SHELL=1`, `S46_API_BASE_URL=http://127.0.0.1:8080`, file keyring, mock share backend), and drops you into a subshell. Exit with `Ctrl-D` or `exit` — the tempdir is cleaned up.
 
 ```sh
-brew install go
+make shell
 ```
 
-Verify the toolchain:
+Inside the shell, every `s46` command writes only inside the tempdir.
 
-```sh
-go version
-gofmt -h
-```
-
-## Run the CLI without installing
-
-Use the file keyring backend for local testing so credentials are written to local test state instead of the OS keychain:
+## Run without installing
 
 ```sh
 S46_KEYRING_BACKEND=file S46_SHARE_BACKEND=mock go run ./cmd/s46 --help
 ```
 
-Example flow:
+A typical exercise flow:
 
 ```sh
-export S46_KEYRING_BACKEND=file
-export S46_SHARE_BACKEND=mock
-export S46_MOCK_GIST_ID=0123456789abcdef0123456789abcdef
-
 go run ./cmd/s46 login
-go run ./cmd/s46 whoami
-go run ./cmd/s46 token --refresh
 go run ./cmd/s46 connect acme --harness=claude-code --dry-run
 go run ./cmd/s46 connect acme --harness=claude-code
 go run ./cmd/s46 status
-go run ./cmd/s46 sessions
 go run ./cmd/s46 share @dscape/auth-redirect-fix
-go run ./cmd/s46 session land
 ```
-
-## Test without touching real user config
-
-Recommended for manual testing: start the development shell. It builds a temporary `s46` binary, creates an isolated temporary `HOME`, and sets safe local environment variables for you. The shell marks itself with `S46_DEV_SHELL=1` and defaults `S46_API_BASE_URL` to `http://127.0.0.1:8080`, so commands use a local HTTP API unless you override the base URL.
-
-```sh
-make shell
-S46_API_BASE_URL=http://127.0.0.1:8080 make shell
-```
-
-Inside the shell, run commands normally:
-
-```sh
-s46 login
-s46 connect acme --harness=claude-code --dry-run
-s46 connect acme --harness=claude-code
-s46 status
-s46 share @dscape/auth-redirect-fix
-```
-
-Exit with `Ctrl-C`, `Ctrl-D`, or `exit`. The temporary home directory and binary are deleted automatically.
-
-If you need to reproduce the setup manually, use:
-
-```sh
-tmp="$(mktemp -d)"
-
-export HOME="$tmp"
-export XDG_CONFIG_HOME="$tmp/.config"
-export XDG_DATA_HOME="$tmp/.data"
-export XDG_CACHE_HOME="$tmp/.cache"
-export S46_KEYRING_BACKEND=file
-export S46_SHARE_BACKEND=mock
-export S46_MOCK_GIST_ID=0123456789abcdef0123456789abcdef
-
-go run ./cmd/s46 login
-go run ./cmd/s46 connect acme --harness=claude-code
-go run ./cmd/s46 status
-find "$tmp" -maxdepth 5 -type f -print
-```
-
-Both approaches write only inside the temporary directory.
-
-## Build and run a local binary
-
-```sh
-go build -o ./s46 ./cmd/s46
-```
-
-Then run:
-
-```sh
-export S46_KEYRING_BACKEND=file
-export S46_SHARE_BACKEND=mock
-
-./s46 --help
-./s46 login
-./s46 connect acme --harness=pi --dry-run
-```
-
-Clean up:
-
-```sh
-rm ./s46
-```
-
-## Tests
-
-Run all tests:
-
-```sh
-go test ./...
-```
-
-## Formatting
-
-Format Go code before submitting changes:
-
-```sh
-gofmt -w cmd internal
-```
-
-If `gofmt` is not found, Go is not on your `PATH`; install Go with Homebrew or add your Go toolchain to `PATH`.
 
 ## Releases
 
-Releases use the Go-based pi-mono-style helper. It requires a clean working tree, requires `[Unreleased]` changelog bullets, updates `VERSION`, `internal/version/version.go`, and `CHANGELOG.md`, runs tests, creates the release commit and tag, adds a fresh `[Unreleased]` section, commits again, then pushes `main` and the tag.
-
-Before releasing, generate changelog context for the diff from the last version/changelog edit to HEAD and add any missing user-facing entries:
+The release helper requires a clean tree and `[Unreleased]` changelog bullets. It bumps `VERSION` and `internal/version/version.go`, moves `[Unreleased]` to `[x.y.z] - YYYY-MM-DD`, runs tests, tags, and pushes.
 
 ```sh
-make release-changelog-context
+make release-changelog-context   # prep changelog
+make release-patch               # or release-minor / release-major
 ```
 
-```sh
-make release-patch
-make release-minor
-make release-major
-# or:
-go run ./scripts/release.go 0.2.0
-```
-
-The pushed `v*.*.*` tag triggers `.github/workflows/release.yml` and GoReleaser. Set `GORELEASER_TOKEN` in GitHub secrets when the workflow must update the external Homebrew tap.
+GitHub Actions picks up the tag and runs GoReleaser. Set `GORELEASER_TOKEN` in repo secrets if you need to update the external Homebrew tap.

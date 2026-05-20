@@ -6,136 +6,89 @@ This repository implements the client-side command surface described on sovereig
 
 ## Development
 
-Requirements:
-
-- Go 1.23+
-
-Run directly:
+Requires Go 1.23+.
 
 ```sh
 go run ./cmd/s46 --help
-```
-
-Build:
-
-```sh
 go build ./cmd/s46
-```
-
-Tests:
-
-```sh
 go test ./...
 ```
 
-The production keyring backend uses the OS keychain where implemented. Tests and local mock runs can use the file keyring backend:
+For local mock/test runs, swap the OS keychain for a file backend:
 
 ```sh
 S46_KEYRING_BACKEND=file go run ./cmd/s46 login --user dscape@acme.s46.dev --device-id dev-laptop
 ```
 
-`s46 share` follows Pi's CLI-side flow and uses `gh gist create --public=false` by default. Tests and demos can force deterministic mock sharing:
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the sandboxed `make shell` flow.
+
+## Commands
 
 ```sh
-S46_SHARE_BACKEND=mock S46_MOCK_GIST_ID=0123456789abcdef0123456789abcdef go run ./cmd/s46 share @dscape/auth-redirect-fix
-```
-
-## Implemented command surface
-
-```sh
-s46 login --user <email> --device-id <device-id> [--device-name <name>]
+s46 login --user <email> --device-id <id> [--device-name <name>]
 s46 logout
 s46 whoami
 s46 token --refresh
-s46 devices
-s46 devices delete <device-id>
+s46 devices [delete <device-id>]
 s46 connect <team> --harness=pi|claude-code|codex|standard [--dry-run]
-s46 disconnect <team> [--harness=pi|claude-code|codex|standard] [--dry-run]
+s46 disconnect <team> [--harness=...] [--dry-run]
 s46 teams list
 s46 teams use <team>
-s46 status
+s46 status [--verbose]
 s46 version
-s46 update                         # check latest GitHub release and print Homebrew-safe upgrade command
+s46 update
 s46 sessions
 s46 detach <session>
 s46 resume <session>
-s46 share <session>                 # Pi-style HTML share via secret gist, mocked
+s46 share <session>
 s46 session land [session]
 s46 mode [cloud|airplane]
 s46 airplane setup
-s46 airplane mode on
-s46 airplane mode off
+s46 airplane mode on|off
+s46 airplane logs [ollama|gateway|all] [--follow]
 s46 run "task"
 ```
 
-Global flags:
-
-```sh
---config <path>
---json
---dry-run
---verbose
---help
-```
+Global flags: `--config <path>`, `--json`, `--dry-run`, `--verbose`, `--help`.
 
 ## Local state
 
-Default paths:
+| Path | Purpose |
+|---|---|
+| `~/.config/s46/config.json` | Active team, mode, per-team config |
+| `~/.local/share/s46/state.json` | Authenticated user, sessions, share records |
+| `~/.cache/s46/` | Logs and lock file |
 
-```txt
-~/.config/s46/config.json
-~/.local/share/s46/state.json
-~/.cache/s46/
-```
+Secrets live in the OS keychain (`internal/keyring.Store`). The file keyring backend is test-only.
 
-Secrets are stored through `internal/keyring.Store`. The file keyring backend is for tests and mock runs only.
+`s46 connect` writes harness config to `~/.claude/settings.json`, `~/.codex/config.toml`, or `~/.pi/agent/models.json`. Existing files are merged and backed up with `.s46-backup-<timestamp>`. A connect failure that leaves files half-written is rolled back automatically.
 
-Tenant endpoints use `https://<team>.s46.dev` in cloud mode. Airplane mode rewrites the active team to the local gateway at `http://127.0.0.1:8080` and uses `s46/devstral-small-2-24b`.
+## Airplane mode
 
-`s46 status` diagnoses the local Ollama and gateway runtime, including `ollama list`/`ollama ps` equivalents, macOS `launchctl` settings for GUI Ollama, and the running `ollama serve` process environment when available. `airplane setup` installs the local gateway from the latest `sovereign46/api` GitHub release into `~/.local/share/s46/gateway/s46-api/` when no gateway is available. If no release archive is published yet, it falls back to cloning and building the repo for users with git access and Go installed. For local development, set `S46_API_REPO=/path/to/api`; `make shell` automatically exposes a sandbox symlink when `../s46-api` exists. Setup output uses the normal `[s46]` prefix, offers to configure macOS GUI Ollama with `launchctl setenv`, and asks whether to turn on airplane mode, including which harness to configure, when the local runtime is ready. After launchctl changes, fully quit and restart Ollama before enabling airplane mode.
+Airplane mode runs everything through a local Ollama + S46 gateway, with no cloud auth required.
 
-Airplane mode does not require login or a cloud team. If no active team exists, `s46 airplane mode on` creates a local `local` team that points at the local gateway. In airplane mode, `s46 token --refresh` returns a local airplane token instead of refreshing cloud credentials, and CLI calls to the local gateway do not send cloud bearer tokens. `s46 airplane mode on` snapshots harness files before rewriting them, and `s46 airplane mode off` restores that snapshot so Pi/Claude/Codex return to their previous local state. Cloud-only commands fail fast with a go-online message; `--help` explains how to turn airplane mode off. Use `s46 airplane logs --follow` to inspect Ollama/gateway logs. Local defaults use a 64k context window, 4096 max output tokens, one Ollama parallel request, one loaded model, Flash Attention, q8_0 KV cache, a 10m keep-alive, and a 10m gateway write timeout for long local generations. Override them with `S46_AIRPLANE_CONTEXT`, `S46_AIRPLANE_MAX_TOKENS`, `S46_AIRPLANE_NUM_PARALLEL`, `S46_AIRPLANE_MAX_LOADED_MODELS`, `S46_AIRPLANE_KEEP_ALIVE`, `OLLAMA_FLASH_ATTENTION`, `OLLAMA_KV_CACHE_TYPE`, and `S46_WRITE_TIMEOUT`. Override the local helper token with `S46_AIRPLANE_TOKEN` if needed. `S46_LOCAL_MODEL` is a dev/test-only backend override for `s46/devstral-small-2-24b`; do not use it for public model naming.
+- `s46 airplane setup` installs Ollama, pulls the local model, installs the gateway (`sovereign46/api` GitHub release, falling back to a git+go build), and optionally configures macOS GUI Ollama via `launchctl setenv`.
+- `s46 airplane mode on` snapshots harness files, rewrites them for the local gateway at `http://127.0.0.1:8080`, and creates a `local` team if none exists. `off` restores the snapshot.
+- In airplane mode, `s46 token --refresh` returns a local token; cloud-only commands fail fast.
+- Output is prefixed `[s46✈]` (human) or undecorated (`--json`).
 
-Harness config written by `s46 connect`:
+Local defaults (override with env vars): 64k context (`S46_AIRPLANE_CONTEXT`), 4096 max output tokens (`S46_AIRPLANE_MAX_TOKENS`), 1 parallel request (`S46_AIRPLANE_NUM_PARALLEL`), 1 loaded model (`S46_AIRPLANE_MAX_LOADED_MODELS`), Flash Attention (`OLLAMA_FLASH_ATTENTION`), q8_0 KV cache (`OLLAMA_KV_CACHE_TYPE`), 10m keep-alive (`S46_AIRPLANE_KEEP_ALIVE`), 10m gateway write timeout (`S46_WRITE_TIMEOUT`). Override the local helper token with `S46_AIRPLANE_TOKEN`.
 
-```txt
-~/.claude/settings.json
-~/.codex/config.toml
-~/.pi/agent/models.json
-```
-
-Mutation commands support `--dry-run`. Existing harness config files are merged and backed up with `.s46-backup-<timestamp>` before writes.
+For local gateway development, set `S46_API_REPO=/path/to/api`; `make shell` exposes a sandbox symlink when `../s46-api` exists.
 
 ## Updates
 
-`s46 update` checks the latest GitHub release and follows Homebrew formula best practice: it does not replace a Homebrew-managed binary itself. For Homebrew installs it prints the package-manager command, normally:
+`s46 update` checks GitHub for the latest release. Homebrew installs are detected and not overwritten — it prints `brew upgrade s46` instead. Set `S46_SKIP_UPDATE_CHECK=1` or `S46_OFFLINE=1` to disable.
+
+## Releases
+
+GoReleaser config in `.goreleaser.yml` targets macOS and Linux on amd64/arm64 plus a Homebrew formula. Release builds use `-tags=release` so mock fixtures are excluded.
+
+Release flow (also see [CONTRIBUTING.md](CONTRIBUTING.md)):
 
 ```sh
-brew upgrade s46
+make release-changelog-context   # diff since last release for changelog drafting
+make release-patch | release-minor | release-major
 ```
 
-Set `S46_SKIP_UPDATE_CHECK=1` or `S46_OFFLINE=1` to disable release checks.
-
-## Release
-
-GoReleaser configuration is in `.goreleaser.yml` and targets:
-
-- macOS amd64/arm64
-- Linux amd64/arm64
-- Homebrew formula generation
-
-Release state is tracked in `VERSION` and `internal/version/version.go`. The Go release helper mirrors pi-mono's flow: verify a clean tree, require `[Unreleased]` changelog bullets, bump the version, move `CHANGELOG.md` from `[Unreleased]` to `[x.y.z] - YYYY-MM-DD`, run tests, commit and tag, add a fresh `[Unreleased]` section, commit, and push. The pushed tag triggers `.github/workflows/release.yml` and GoReleaser.
-
-Before releasing, generate changelog context for the diff from the last version/changelog edit to HEAD and add any missing user-facing entries:
-
-```sh
-make release-changelog-context
-```
-
-```sh
-make release-patch
-make release-minor
-make release-major
-# or an explicit version:
-go run ./scripts/release.go 0.2.0
-```
+The pushed `v*.*.*` tag triggers `.github/workflows/release.yml`.

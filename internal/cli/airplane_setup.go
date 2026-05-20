@@ -1,0 +1,829 @@
+package cli
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/sovereign46/s46-cli/internal/airplane"
+	"github.com/sovereign46/s46-cli/internal/api"
+	"github.com/sovereign46/s46-cli/internal/config"
+	"github.com/sovereign46/s46-cli/internal/harness"
+	"github.com/sovereign46/s46-cli/internal/strs"
+	"github.com/sovereign46/s46-cli/internal/workspace"
+)
+
+func runAirplaneSetup(ctx context.Context, app *app, allowPrompts bool) (airplane.Report, error) {
+	var progress io.Writer
+	if !app.options.json {
+		progress = app.runtime.Stdout
+	}
+	service := airplane.Service{Env: app.runtime.Env, Stdin: app.runtime.Stdin, Stdout: app.runtime.Stdout, Stderr: app.runtime.Stderr, Progress: progress, LogPrefix: "[s46]"}
+	report := service.Check(ctx)
+	if app.options.json {
+		return report, nil
+	}
+	if err := app.renderer.Lines(renderAirplaneReport(report)...); err != nil {
+		return report, err
+	}
+	if !allowPrompts || !checkOK(report, "memory") || !checkOK(report, "disk") {
+		return report, nil
+	}
+
+	changed := false
+	if configured, err := offerOllamaLaunchctlConfig(ctx, app, service); err != nil {
+		return report, err
+	} else if configured {
+		changed = true
+	}
+	if missingCheck(report, "ollama-installed") && service.HomebrewAvailable() {
+		if yes, err := promptYesNo(app, "[s46] Ollama is not installed.\n[s46] Install with Homebrew? [Y/n] ", true); err != nil {
+			return report, err
+		} else if yes {
+			if err := app.renderer.Lines("[s46] installing Ollama with Homebrew..."); err != nil {
+				return report, err
+			}
+			if err := service.InstallOllama(ctx); err != nil {
+				return report, fmt.Errorf("failed to install Ollama with Homebrew: %w", err)
+			}
+			changed = true
+			report = service.Check(ctx)
+		}
+	}
+	if checkOK(report, "ollama-installed") && missingCheck(report, "ollama-running") {
+		if yes, err := promptYesNo(app, "[s46] Ollama is installed but not running.\n[s46] Start Ollama now? [Y/n] ", true); err != nil {
+			return report, err
+		} else if yes {
+			if err := app.renderer.Lines("[s46] starting Ollama..."); err != nil {
+				return report, err
+			}
+			if err := service.StartOllama(); err != nil {
+				return report, fmt.Errorf("failed to start Ollama: %w", err)
+			}
+			changed = true
+			report = waitForAirplaneCheck(ctx, service, "ollama-running", 30*time.Second)
+		}
+	}
+	if checkOK(report, "ollama-running") && missingCheck(report, "model-downloaded") {
+		if yes, err := promptYesNo(app, fmt.Sprintf("[s46] Download %s (~15 GB)? [Y/n] ", airplane.BackendModel), true); err != nil {
+			return report, err
+		} else if yes {
+			if err := service.PullModel(ctx); err != nil {
+				return report, fmt.Errorf("failed to download %s: %w", airplane.BackendModel, err)
+			}
+			changed = true
+			report = service.Check(ctx)
+		}
+	}
+	if missingCheck(report, "local-gateway") && service.GatewayResponding(ctx) && !service.GatewayReady(ctx) {
+		var err error
+		report, changed, err = offerAirplaneGatewayRestart(ctx, app, service, report)
+		if err != nil {
+			return report, err
+		}
+		if !changed {
+			return report, nil
+		}
+		if missingCheck(report, "local-gateway") && service.GatewayResponding(ctx) && !service.GatewayReady(ctx) {
+			if err := app.renderer.Lines(renderAirplaneReport(report)...); err != nil {
+				return report, err
+			}
+			return report, nil
+		}
+	}
+	if missingCheck(report, "local-gateway") {
+		if _, ok := service.GatewayStartDescription(); !ok && service.GatewayDownloadAvailable() {
+			if yes, err := promptYesNo(app, fmt.Sprintf("[s46] Local S46 gateway is not installed.\n[s46] Install %s? [Y/n] ", service.GatewayInstallDescription()), true); err != nil {
+				return report, err
+			} else if yes {
+				if err := app.renderer.Lines("[s46] installing local S46 gateway..."); err != nil {
+					return report, err
+				}
+				if err := service.InstallGateway(ctx); err != nil {
+					return report, fmt.Errorf("failed to install local S46 gateway: %w", err)
+				}
+				changed = true
+				report = service.Check(ctx)
+			}
+		}
+	}
+	if missingCheck(report, "local-gateway") {
+		if description, ok := service.GatewayStartDescription(); ok {
+			if yes, err := promptYesNo(app, fmt.Sprintf("[s46] Local S46 gateway is available as %s.\n[s46] Start local gateway now? [Y/n] ", description), true); err != nil {
+				return report, err
+			} else if yes {
+				if err := app.renderer.Lines("[s46] starting local S46 gateway..."); err != nil {
+					return report, err
+				}
+				if err := service.StartGateway(); err != nil {
+					return report, fmt.Errorf("failed to start local S46 gateway: %w", err)
+				}
+				changed = true
+				report = waitForAirplaneCheck(ctx, service, "local-gateway", 30*time.Second)
+			}
+		} else if err := app.renderer.Lines(
+			"[s46] Local S46 gateway is not installed or running.",
+			"[s46] In development, set S46_API_REPO=/path/to/api or use make shell with ../s46-api present.",
+			"[s46] In production, connect to the network and rerun setup to install the gateway release or clone the source.",
+			"[s46] Or set S46_API_BINARY=/path/to/s46-api.",
+		); err != nil {
+			return report, err
+		}
+	}
+	if changed {
+		if err := app.renderer.Lines(renderAirplaneReport(report)...); err != nil {
+			return report, err
+		}
+	}
+	return report, nil
+}
+
+func offerOllamaLaunchctlConfig(ctx context.Context, app *app, service airplane.Service) (bool, error) {
+	runtimeReport := service.OllamaRuntime(ctx)
+	if !runtimeReport.NeedsLaunchctlUpdate() {
+		return false, renderOllamaRestartGuidance(app, runtimeReport)
+	}
+	lines := []string{
+		"[s46] macOS GUI Ollama is running without the recommended airplane settings.",
+		"[s46] Recommended launchd settings:",
+	}
+	for _, setting := range airplane.AirplaneOllamaSettings(app.runtime.Env) {
+		lines = append(lines, fmt.Sprintf("[s46]   %s=%s", setting.Key, setting.Value))
+	}
+	if err := app.renderer.Lines(lines...); err != nil {
+		return false, err
+	}
+	if app.runtime.Stdin == nil {
+		return false, app.renderer.Lines("[s46] Run `s46 airplane setup` interactively to apply them with launchctl.")
+	}
+	if yes, err := promptYesNo(app, "[s46] Configure macOS Ollama launchd settings now? [Y/n] ", true); err != nil {
+		return false, err
+	} else if !yes {
+		return false, nil
+	}
+	if app.options.dryRun {
+		return false, app.renderer.Lines("[s46] dry-run: would run launchctl setenv for Ollama airplane settings")
+	}
+	if err := service.ConfigureMacOSOllamaLaunchd(ctx); err != nil {
+		return false, fmt.Errorf("failed to configure macOS Ollama launchd settings: %w", err)
+	}
+	return true, app.renderer.Lines(
+		"[s46] updated macOS Ollama launchd settings.",
+		"[s46] Fully quit and restart Ollama so the GUI app picks up the new settings.",
+	)
+}
+
+func ensureOllamaRuntimeSettings(ctx context.Context, app *app, service airplane.Service) error {
+	if strs.Truthy(app.runtime.Env["S46_AIRPLANE_SKIP_SETUP_CHECKS"]) {
+		return nil
+	}
+	runtimeReport := service.OllamaRuntime(ctx)
+	if runtimeReport.NeedsLaunchctlUpdate() {
+		return fmt.Errorf("macOS GUI Ollama launchd settings differ; run `s46 airplane setup` to apply them")
+	}
+	if runtimeReport.NeedsProcessRestart() {
+		if err := renderOllamaRestartGuidance(app, runtimeReport); err != nil {
+			return err
+		}
+		return fmt.Errorf("Ollama is running with different airplane settings")
+	}
+	return nil
+}
+
+func renderOllamaRestartGuidance(app *app, runtimeReport airplane.OllamaRuntime) error {
+	if !runtimeReport.NeedsProcessRestart() {
+		return nil
+	}
+	switch runtimeReport.Server {
+	case "macos-gui":
+		return app.renderer.Lines("[s46] Fully quit and restart Ollama so the GUI app picks up launchd settings.")
+	case "manual":
+		return app.renderer.Lines(
+			"[s46] Manual Ollama is running without the recommended airplane settings.",
+			"[s46] Restart it with:",
+			"[s46]   "+strings.Join(airplane.AirplaneOllamaEnv(app.runtime.Env), " ")+" ollama serve",
+		)
+	default:
+		return nil
+	}
+}
+
+func offerAirplaneGatewayRestart(ctx context.Context, app *app, service airplane.Service, report airplane.Report) (airplane.Report, bool, error) {
+	listener := gatewayListeningProcess(app.runtime.Env, report.GatewayURL)
+	if err := app.renderer.Lines(renderAirplaneGatewayConflict(report.GatewayURL, listener)...); err != nil {
+		return report, false, err
+	}
+	if !canRestartAirplaneGateway(listener) {
+		if err := app.renderer.Lines("[s46] Setup will not stop an unknown or non-S46 process automatically."); err != nil {
+			return report, false, err
+		}
+		return report, false, nil
+	}
+	if app.runtime.Stdin == nil {
+		if err := app.renderer.Lines("[s46] Run `s46 airplane setup` interactively to restart it automatically."); err != nil {
+			return report, false, err
+		}
+		return report, false, nil
+	}
+	if yes, err := promptYesNo(app, "[s46] Restart the local S46 API in airplane mode now? [Y/n] ", true); err != nil {
+		return report, false, err
+	} else if !yes {
+		return report, false, nil
+	}
+	if err := app.renderer.Lines("[s46] stopping local S46 API..."); err != nil {
+		return report, false, err
+	}
+	if err := stopListeningProcess(app.runtime.Env, report.GatewayURL, listener.PID, 5*time.Second); err != nil {
+		return report, false, fmt.Errorf("failed to stop local S46 API: %w", err)
+	}
+	if err := app.renderer.Lines("[s46] starting local S46 gateway..."); err != nil {
+		return report, false, err
+	}
+	if err := service.StartGateway(); err != nil {
+		return report, false, fmt.Errorf("failed to start local S46 gateway: %w", err)
+	}
+	return waitForAirplaneCheck(ctx, service, "local-gateway", 30*time.Second), true, nil
+}
+
+func renderAirplaneGatewayConflict(gatewayURL string, listener listeningProcessStatus) []string {
+	return []string{
+		fmt.Sprintf("[s46] Local S46 API is already running at %s, but it is not airplane-ready.", gatewayURL),
+		"[s46] This usually means another s46-api process owns the port without the local Ollama worker configured.",
+		renderAirplaneGatewayProcess(listener),
+	}
+}
+
+func renderAirplaneGatewayProcess(listener listeningProcessStatus) string {
+	switch listener.Status {
+	case "listening":
+		if listener.PID != "" && listener.Command != "" {
+			return fmt.Sprintf("[s46] Process: pid %s (%s)", listener.PID, listener.Command)
+		}
+		if listener.PID != "" {
+			return fmt.Sprintf("[s46] Process: pid %s", listener.PID)
+		}
+		if listener.Command != "" {
+			return fmt.Sprintf("[s46] Process: %s", listener.Command)
+		}
+		return "[s46] Process: listening process unknown"
+	case "not_listening":
+		return "[s46] Process: no listener found on the gateway port"
+	default:
+		return "[s46] Process: " + strs.FirstNonEmpty(listener.Message, "unknown")
+	}
+}
+
+func gatewayListeningProcess(env map[string]string, gatewayURL string) listeningProcessStatus {
+	port := localServerPort(gatewayURL)
+	if port == "" {
+		return listeningProcessStatus{Status: "unknown", Message: "gateway port unknown"}
+	}
+	return listeningProcess(env, port)
+}
+
+func localServerPort(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	if port := parsed.Port(); port != "" {
+		return port
+	}
+	return defaultPort(parsed.Scheme)
+}
+
+func canRestartAirplaneGateway(listener listeningProcessStatus) bool {
+	return listener.Status == "listening" && listener.PID != "" && isS46APIProcess(listener.Command)
+}
+
+func isS46APIProcess(command string) bool {
+	for _, field := range strings.Fields(command) {
+		if filepath.Base(field) == airplane.GatewayBinaryName {
+			return true
+		}
+	}
+	return filepath.Base(strings.TrimSpace(command)) == airplane.GatewayBinaryName
+}
+
+func stopListeningProcess(env map[string]string, gatewayURL string, pid string, timeout time.Duration) error {
+	port := localServerPort(gatewayURL)
+	if strs.Truthy(env["S46_TEST_STOP_GATEWAY_OK"]) {
+		env["S46_TEST_GATEWAY_RESPONDING"] = "0"
+		if port != "" {
+			env["S46_TEST_LISTENER_"+port] = "missing"
+		}
+		return nil
+	}
+	pidInt, err := strconv.Atoi(pid)
+	if err != nil || pidInt <= 0 {
+		return fmt.Errorf("invalid pid %q", pid)
+	}
+	process, err := os.FindProcess(pidInt)
+	if err != nil {
+		return err
+	}
+	if err := process.Signal(syscall.SIGTERM); err != nil && sameListeningPID(env, port, pid) {
+		return err
+	}
+	if waitForListenerToExit(env, port, pid, timeout) {
+		return nil
+	}
+	if err := process.Kill(); err != nil && sameListeningPID(env, port, pid) {
+		return err
+	}
+	if waitForListenerToExit(env, port, pid, 2*time.Second) {
+		return nil
+	}
+	return fmt.Errorf("process %s is still listening on port %s", pid, port)
+}
+
+func waitForListenerToExit(env map[string]string, port string, pid string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if !sameListeningPID(env, port, pid) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+func sameListeningPID(env map[string]string, port string, pid string) bool {
+	if port == "" {
+		return false
+	}
+	listener := listeningProcess(env, port)
+	return listener.Status == "listening" && listener.PID == pid
+}
+
+func waitForAirplaneCheck(ctx context.Context, service airplane.Service, name string, timeout time.Duration) airplane.Report {
+	deadline := time.Now().Add(timeout)
+	var report airplane.Report
+	for {
+		report = service.Check(ctx)
+		if checkOK(report, name) || time.Now().After(deadline) {
+			return report
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+func waitForGatewayReady(ctx context.Context, service airplane.Service, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if service.GatewayReady(ctx) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+func offerAirplaneModeOnAfterSetup(ctx context.Context, app *app, report airplane.Report) error {
+	if app.options.dryRun {
+		return nil
+	}
+	if !report.Ready {
+		return app.renderer.Lines("[s46] Airplane mode was not offered because setup is incomplete.")
+	}
+	service := airplane.Service{Env: app.runtime.Env, Stdin: app.runtime.Stdin, Stdout: app.runtime.Stdout, Stderr: app.runtime.Stderr, LogPrefix: "[s46]"}
+	if airplaneRuntimeNeedsRestart(ctx, app, service) {
+		return app.renderer.Lines("[s46] Airplane mode was not offered because Ollama needs to be restarted with airplane settings.")
+	}
+	cfg, teamName, teamConfig, err := airplaneModeTargetConfig(app)
+	if err != nil {
+		return err
+	}
+	if cfg.ActiveMode() == config.ModeAirplane {
+		return nil
+	}
+	if app.runtime.Stdin == nil {
+		return app.renderer.Lines("[s46] Airplane mode is ready. Run `s46 airplane mode on` to enable it.")
+	}
+	yes, err := promptYesNo(app, "[s46] Turn on airplane mode now? [Y/n] ", true)
+	if err != nil {
+		return err
+	}
+	if !yes {
+		return nil
+	}
+	out := app.runtime.Stdout
+	if out == nil {
+		out = io.Discard
+	}
+	harnessName, err := promptHarness(app, app.stdinReader(), out, defaultConnectHarness("", teamConfig.DefaultHarness))
+	if err != nil {
+		return err
+	}
+	teamConfig.DefaultHarness = harnessName
+	return enableAirplaneMode(ctx, app, service, cfg, teamName, teamConfig, report)
+}
+
+func airplaneRuntimeNeedsRestart(ctx context.Context, app *app, service airplane.Service) bool {
+	if strs.Truthy(app.runtime.Env["S46_AIRPLANE_SKIP_SETUP_CHECKS"]) {
+		return false
+	}
+	runtimeReport := service.OllamaRuntime(ctx)
+	return runtimeReport.NeedsLaunchctlUpdate() || runtimeReport.NeedsProcessRestart()
+}
+
+func renderAirplaneReport(report airplane.Report) []string {
+	return renderAirplaneReportWithTitle(report, "airplane setup")
+}
+
+func renderAirplaneReportWithTitle(report airplane.Report, title string) []string {
+	lines := []string{
+		fmt.Sprintf("[s46] %s: checking local runtime", title),
+		fmt.Sprintf("[s46] model: %s -> %s", report.Model, report.BackendModel),
+	}
+	for _, check := range report.Checks {
+		status := "ok"
+		if !check.OK {
+			status = "fail"
+		}
+		lines = append(lines, fmt.Sprintf("[s46] [%s] %s: %s", status, check.Name, check.Message))
+	}
+	if !checkOK(report, "memory") && report.MemoryGB > 0 {
+		lines = append(lines,
+			fmt.Sprintf("[s46] This machine has %d GB memory.", report.MemoryGB),
+			"[s46] s46/devstral-small-2-24b recommends 32–64 GB.",
+			"[s46] Use cloud mode or choose a smaller local model when available.",
+		)
+	}
+	if !checkOK(report, "disk") && report.FreeDiskGB > 0 {
+		lines = append(lines,
+			fmt.Sprintf("[s46] %d GB free disk detected.", report.FreeDiskGB),
+			"[s46] s46/devstral-small-2-24b setup needs about 30 GB free.",
+		)
+	}
+	if report.Ready {
+		lines = append(lines, fmt.Sprintf("[s46] %s: ready", title))
+	} else {
+		lines = append(lines, fmt.Sprintf("[s46] %s: incomplete", title))
+	}
+	return lines
+}
+
+func renderOllamaRuntime(runtimeReport airplane.OllamaRuntime) []string {
+	lines := []string{fmt.Sprintf("[s46] Ollama server: %s", renderOllamaServer(runtimeReport))}
+	if !runtimeReport.Running {
+		return lines
+	}
+	if len(runtimeReport.InstalledModels) > 0 {
+		lines = append(lines, fmt.Sprintf("[s46] ollama list: %s", strings.Join(runtimeReport.InstalledModels, ", ")))
+	}
+	if len(runtimeReport.LoadedModels) == 0 {
+		lines = append(lines, "[s46] ollama ps: no models loaded")
+	} else {
+		for _, model := range runtimeReport.LoadedModels {
+			contextText := "context unknown"
+			if model.ContextLength > 0 {
+				contextText = fmt.Sprintf("context %d", model.ContextLength)
+			}
+			until := ""
+			if model.ExpiresAt != "" {
+				until = " · expires " + model.ExpiresAt
+			}
+			lines = append(lines, fmt.Sprintf("[s46] ollama ps: %s · %s%s", strs.FirstNonEmpty(model.Name, model.Model), contextText, until))
+		}
+	}
+	lines = append(lines, renderOllamaSettings(runtimeReport)...)
+	if runtimeReport.NeedsLaunchctlUpdate() {
+		lines = append(lines, "[s46] macOS Ollama launchd settings differ; run `s46 airplane setup` to apply them.")
+	}
+	if runtimeReport.NeedsProcessRestart() {
+		switch runtimeReport.Server {
+		case "macos-gui":
+			lines = append(lines, "[s46] Fully quit and restart Ollama so the GUI app picks up launchd settings.")
+		case "manual":
+			lines = append(lines, "[s46] Restart manual `ollama serve` with the shown OLLAMA_* settings.")
+		}
+	}
+	return lines
+}
+
+func renderOllamaServer(runtimeReport airplane.OllamaRuntime) string {
+	if !runtimeReport.Running {
+		return "not running"
+	}
+	parts := []string{runtimeReport.Server}
+	if runtimeReport.PID > 0 {
+		parts = append(parts, fmt.Sprintf("pid %d", runtimeReport.PID))
+	}
+	if runtimeReport.Command != "" {
+		parts = append(parts, runtimeReport.Command)
+	}
+	return strings.Join(parts, " · ")
+}
+
+func renderOllamaSettings(runtimeReport airplane.OllamaRuntime) []string {
+	lines := []string{}
+	for _, setting := range runtimeReport.Settings {
+		parts := []string{fmt.Sprintf("want %s", setting.Expected)}
+		if runtimeReport.LaunchctlKnown {
+			parts = append(parts, fmt.Sprintf("launchctl %s", renderSettingValue(setting.Launchctl, setting.LaunchctlOK)))
+		}
+		if setting.ProcessKnown {
+			parts = append(parts, fmt.Sprintf("process %s", renderSettingValue(setting.Process, setting.ProcessOK)))
+		}
+		lines = append(lines, fmt.Sprintf("[s46] Ollama %s: %s", setting.Key, strings.Join(parts, " · ")))
+	}
+	if runtimeReport.LaunchctlSupported && !runtimeReport.LaunchctlKnown {
+		lines = append(lines, "[s46] Ollama launchctl env: unavailable")
+	}
+	if runtimeReport.Running && !runtimeReport.ProcessEnvKnown {
+		lines = append(lines, "[s46] Ollama process env: unavailable")
+	}
+	return lines
+}
+
+func renderSettingValue(value string, ok bool) string {
+	if value == "" {
+		value = "unset"
+	}
+	if ok {
+		return value + " (ok)"
+	}
+	return value + " (differs)"
+}
+
+func airplaneModeOn(ctx context.Context, app *app) error {
+	cfg, teamName, teamConfig, err := airplaneModeTargetConfig(app)
+	if err != nil {
+		return err
+	}
+	service := airplane.Service{Env: app.runtime.Env, Stdin: app.runtime.Stdin, Stdout: app.runtime.Stdout, Stderr: app.runtime.Stderr, LogPrefix: "[s46]"}
+	report, err := runAirplaneSetup(ctx, app, false)
+	if err != nil {
+		return err
+	}
+	return enableAirplaneMode(ctx, app, service, cfg, teamName, teamConfig, report)
+}
+
+func enableAirplaneMode(ctx context.Context, app *app, service airplane.Service, cfg config.Config, teamName string, teamConfig config.TeamConfig, report airplane.Report) error {
+	wasAirplane := cfg.ActiveMode() == config.ModeAirplane || teamConfig.Mode == config.ModeAirplane || isLocalEndpoint(teamConfig.Endpoint)
+	if app.options.dryRun {
+		if app.options.json {
+			return app.renderer.WriteJSON(map[string]any{"mode": config.ModeAirplane, "team": teamName, "endpoint": airplane.LocalGatewayURL, "model": airplane.LocalModelID, "dryRun": true})
+		}
+		return app.renderer.Lines(fmt.Sprintf("[s46] dry-run: would set airplane mode for %s", teamName))
+	}
+	if checkOK(report, "ollama-installed") && !checkOK(report, "ollama-running") {
+		if err := app.renderer.Lines("[s46] starting Ollama..."); err != nil {
+			return err
+		}
+		if err := service.StartOllama(); err != nil {
+			return fmt.Errorf("could not start Ollama: %w", err)
+		}
+		time.Sleep(500 * time.Millisecond)
+		report = service.Check(ctx)
+	}
+	if !report.Ready {
+		if app.runtime.Stdin == nil {
+			return fmt.Errorf("airplane setup is incomplete; run `s46 airplane setup`")
+		}
+		yes, err := promptYesNo(app, "[s46] Airplane setup is incomplete. Run setup now? [Y/n] ", true)
+		if err != nil {
+			return err
+		}
+		if !yes {
+			return fmt.Errorf("airplane setup is incomplete; run `s46 airplane setup`")
+		}
+		report, err = runAirplaneSetup(ctx, app, true)
+		if err != nil {
+			return err
+		}
+		if checkOK(report, "ollama-installed") && !checkOK(report, "ollama-running") {
+			if err := service.StartOllama(); err != nil {
+				return fmt.Errorf("could not start Ollama: %w", err)
+			}
+			time.Sleep(500 * time.Millisecond)
+			report = service.Check(ctx)
+		}
+		if !checkOK(report, "local-gateway") {
+			if err := service.StartGateway(); err != nil {
+				return fmt.Errorf("could not start local S46 gateway: %w", err)
+			}
+			time.Sleep(500 * time.Millisecond)
+			report = service.Check(ctx)
+		}
+		if !report.Ready {
+			return fmt.Errorf("airplane setup is still incomplete")
+		}
+	}
+	if err := ensureOllamaRuntimeSettings(ctx, app, service); err != nil {
+		return err
+	}
+	if err := service.StartOllama(); err != nil {
+		return fmt.Errorf("could not start Ollama: %w", err)
+	}
+	if !service.OllamaRunning(ctx) && !strs.Truthy(app.runtime.Env["S46_AIRPLANE_SKIP_SETUP_CHECKS"]) {
+		return fmt.Errorf("Ollama did not become ready; run `s46 airplane setup`")
+	}
+	if err := service.StartGateway(); err != nil {
+		return fmt.Errorf("could not start local S46 gateway: %w", err)
+	}
+	if !strs.Truthy(app.runtime.Env["S46_AIRPLANE_SKIP_SETUP_CHECKS"]) && !waitForGatewayReady(ctx, service, 30*time.Second) {
+		return fmt.Errorf("local S46 gateway did not become ready; check ~/.cache/s46/s46-api-airplane.log or rerun `s46 airplane setup`")
+	}
+	if teamConfig.APISnapshot.Endpoint == "" || isLocalEndpoint(teamConfig.APISnapshot.Endpoint) {
+		teamConfig.APISnapshot = hostedTeamSnapshot(teamName, teamConfig)
+	}
+	teamConfig.Endpoint = airplane.LocalGatewayURL
+	teamConfig.Mode = config.ModeAirplane
+	teamConfig.DefaultModel = airplane.LocalModelID
+	teamConfig.Models = []string{airplane.LocalModelID}
+	if teamConfig.DefaultHarness == "" {
+		teamConfig.DefaultHarness = harness.DefaultName
+	}
+	adapter, plan, err := planHarnessConfig(ctx, app, teamName, teamConfig)
+	if err != nil {
+		return err
+	}
+	if !wasAirplane && teamConfig.HarnessSnapshot == nil {
+		teamConfig.HarnessSnapshot = harness.SnapshotPlan(plan)
+	}
+	if cfg.Teams == nil {
+		cfg.Teams = map[string]config.TeamConfig{}
+	}
+	cfg.ActiveTeam = teamName
+	cfg.Mode = config.ModeAirplane
+	cfg.Teams[teamName] = teamConfig
+	if !app.options.dryRun {
+		if err := app.config.SaveConfig(cfg); err != nil {
+			return err
+		}
+		if _, err := adapter.Apply(ctx, plan); err != nil {
+			return err
+		}
+	}
+	if app.options.json {
+		return app.renderer.WriteJSON(map[string]any{"mode": config.ModeAirplane, "team": teamName, "endpoint": teamConfig.Endpoint, "model": teamConfig.DefaultModel, "dryRun": app.options.dryRun})
+	}
+	app.renderer.Prefix = airplane.Prefix
+	return app.renderer.Lines(
+		"[s46] mode: airplane",
+		fmt.Sprintf("[s46] team: %s", teamName),
+		fmt.Sprintf("[s46] endpoint: %s", teamConfig.Endpoint),
+		fmt.Sprintf("[s46] model: %s -> %s", airplane.LocalModelID, airplane.BackendModel),
+	)
+}
+
+func airplaneModeOff(ctx context.Context, app *app) error {
+	cfg, teamName, teamConfig, err := activeTeamConfig(app)
+	if err != nil {
+		return err
+	}
+	snapshot := teamConfig.HarnessSnapshot
+	restored := restoreCloudTeamConfig(teamName, teamConfig)
+	restored.HarnessSnapshot = nil
+	cfg.Mode = config.ModeCloud
+	cfg.Teams[teamName] = restored
+	if !app.options.dryRun {
+		if snapshot != nil {
+			if err := harness.RestoreSnapshot(app.runtime.Env, *snapshot); err != nil {
+				return err
+			}
+		} else if err := applyHarnessConfig(ctx, app, teamName, restored); err != nil {
+			return err
+		}
+		if err := app.config.SaveConfig(cfg); err != nil {
+			return err
+		}
+	}
+	app.renderer.Prefix = "[s46]"
+	if app.options.json {
+		return app.renderer.WriteJSON(map[string]any{"mode": config.ModeCloud, "team": teamName, "endpoint": restored.Endpoint, "model": restored.DefaultModel, "dryRun": app.options.dryRun})
+	}
+	if app.options.dryRun {
+		return app.renderer.Lines(fmt.Sprintf("[s46] dry-run: would set cloud mode for %s", teamName))
+	}
+	return app.renderer.Lines(
+		"[s46] mode: cloud",
+		fmt.Sprintf("[s46] team: %s", teamName),
+		fmt.Sprintf("[s46] endpoint: %s", restored.Endpoint),
+		fmt.Sprintf("[s46] model: %s", restored.DefaultModel),
+	)
+}
+
+func activeTeamConfig(app *app) (config.Config, string, config.TeamConfig, error) {
+	ctx, err := workspace.Resolve(app.config)
+	if err != nil {
+		return config.Config{}, "", config.TeamConfig{}, err
+	}
+	return ctx.Config, ctx.TeamName, ctx.TeamConfig, nil
+}
+
+func airplaneModeTargetConfig(app *app) (config.Config, string, config.TeamConfig, error) {
+	cfg, err := app.config.LoadConfig()
+	if err != nil {
+		return config.Config{}, "", config.TeamConfig{}, err
+	}
+	if cfg.Teams == nil {
+		cfg.Teams = map[string]config.TeamConfig{}
+	}
+	teamName := strs.FirstNonEmpty(cfg.ActiveTeam, localAirplaneTeamName)
+	teamConfig := cfg.Teams[teamName]
+	if teamConfig.Endpoint == "" {
+		teamConfig = config.TeamConfigFromAPI(localAirplaneTeam(teamName, config.TeamConfig{}, connectRequest{}), harness.DefaultName, airplane.LocalModelID, config.ModeAirplane)
+	}
+	return cfg, teamName, teamConfig, nil
+}
+
+func localAirplaneTeam(teamName string, existing config.TeamConfig, req connectRequest) api.Team {
+	teamName = strs.FirstNonEmpty(teamName, localAirplaneTeamName)
+	return api.Team{
+		Name:         teamName,
+		Endpoint:     strs.FirstNonEmpty(req.Endpoint, airplane.LocalGatewayURL),
+		Lane:         strs.FirstNonEmpty(req.Lane, existing.Lane, "local"),
+		Boxes:        []string{"localhost"},
+		DefaultModel: strs.FirstNonEmpty(req.Model, airplane.LocalModelID),
+		Models:       []string{airplane.LocalModelID},
+	}
+}
+
+func hostedTeamSnapshot(teamName string, teamConfig config.TeamConfig) api.Team {
+	snapshot := teamConfig.APISnapshot
+	if snapshot.Name == "" {
+		snapshot.Name = teamName
+	}
+	if snapshot.Endpoint == "" || isLocalEndpoint(snapshot.Endpoint) {
+		snapshot.Endpoint = fmt.Sprintf("https://%s.s46.dev", teamName)
+	}
+	if snapshot.Lane == "" {
+		snapshot.Lane = teamConfig.Lane
+	}
+	if snapshot.DefaultModel == "" || snapshot.DefaultModel == airplane.LocalModelID {
+		snapshot.DefaultModel = api.DefaultModel
+	}
+	if len(snapshot.Models) == 0 {
+		snapshot.Models = api.DefaultModels
+	}
+	return snapshot
+}
+
+func restoreCloudTeamConfig(teamName string, teamConfig config.TeamConfig) config.TeamConfig {
+	snapshot := hostedTeamSnapshot(teamName, teamConfig)
+	teamConfig.Endpoint = snapshot.Endpoint
+	teamConfig.Lane = strs.FirstNonEmpty(snapshot.Lane, teamConfig.Lane)
+	teamConfig.Mode = config.ModeCloud
+	teamConfig.DefaultModel = strs.FirstNonEmpty(snapshot.DefaultModel, api.DefaultModel)
+	teamConfig.Boxes = snapshot.Boxes
+	teamConfig.Models = snapshot.Models
+	teamConfig.APISnapshot = snapshot
+	return teamConfig
+}
+
+func applyHarnessConfig(ctx context.Context, app *app, teamName string, teamConfig config.TeamConfig) error {
+	adapter, plan, err := planHarnessConfig(ctx, app, teamName, teamConfig)
+	if err != nil {
+		return err
+	}
+	if app.options.dryRun {
+		return nil
+	}
+	_, err = adapter.Apply(ctx, plan)
+	return err
+}
+
+func planHarnessConfig(ctx context.Context, app *app, teamName string, teamConfig config.TeamConfig) (harness.Adapter, harness.Plan, error) {
+	adapter, err := app.harness.Get(strs.FirstNonEmpty(teamConfig.DefaultHarness, harness.DefaultName))
+	if err != nil {
+		return nil, harness.Plan{}, err
+	}
+	team := teamConfig.API(teamName)
+	plan, err := adapter.PlanConnect(ctx, harness.ConnectRequest{Env: app.runtime.Env, Team: team, Model: teamConfig.DefaultModel, Mode: teamConfig.Mode, Scope: "user", DryRun: app.options.dryRun})
+	if err != nil {
+		return nil, harness.Plan{}, err
+	}
+	return adapter, plan, nil
+}
+
+func missingCheck(report airplane.Report, name string) bool {
+	return !checkOK(report, name)
+}
+
+func checkOK(report airplane.Report, name string) bool {
+	for _, check := range report.Checks {
+		if check.Name == name {
+			return check.OK
+		}
+	}
+	return false
+}
+
+func isLocalEndpoint(endpoint string) bool {
+	_, ok := api.LocalDevelopmentOrigin(endpoint)
+	return ok
+}
