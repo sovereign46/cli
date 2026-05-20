@@ -284,33 +284,6 @@ func (s Service) ConfigureMacOSOllamaLaunchd(ctx context.Context) error {
 	return nil
 }
 
-func (r *Report) add(check Check) {
-	r.Checks = append(r.Checks, check)
-}
-
-func (r Report) allRequiredOK() bool {
-	for _, check := range r.Checks {
-		if check.Required && !check.OK {
-			return false
-		}
-	}
-	return true
-}
-
-func (s Service) skippedReport() Report {
-	checks := []Check{
-		{Name: "os/arch", OK: true, Required: true, Message: runtime.GOOS + "/" + runtime.GOARCH},
-		{Name: "memory", OK: true, Required: true, Message: "skipped"},
-		{Name: "disk", OK: true, Required: true, Message: "skipped"},
-		{Name: "ollama-installed", OK: true, Required: true, Message: "skipped"},
-		{Name: "ollama-running", OK: true, Required: true, Message: "skipped"},
-		{Name: "model-downloaded", OK: true, Required: true, Message: s.backendModel()},
-		{Name: "model-probe", OK: true, Required: true, Message: LocalModelID + " responds"},
-		{Name: "local-gateway", OK: true, Required: true, Message: s.gatewayURL()},
-	}
-	return Report{Mode: ModeAirplane, Model: LocalModelID, BackendModel: s.backendModel(), GatewayURL: s.gatewayURL(), OllamaURL: s.ollamaURL(), Ready: true, Checks: checks, MemoryGB: 64, FreeDiskGB: 30}
-}
-
 func (s Service) ollamaPath() (string, bool) {
 	if path := strings.TrimSpace(s.env("S46_TEST_OLLAMA_PATH")); path != "" {
 		return path, path != "missing"
@@ -438,34 +411,6 @@ func parseEnvFields(raw string) map[string]string {
 		}
 	}
 	return values
-}
-
-func (s Service) ollamaRunning(ctx context.Context) bool {
-	if value := strings.TrimSpace(s.env("S46_TEST_OLLAMA_RUNNING")); value != "" {
-		return strs.Truthy(value)
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(s.ollamaURL(), "/")+"/api/tags", nil)
-	if err != nil {
-		return false
-	}
-	response, err := s.httpClient().Do(request)
-	if err != nil {
-		return false
-	}
-	defer response.Body.Close()
-	return response.StatusCode >= 200 && response.StatusCode < 300
-}
-
-func (s Service) modelDownloaded(ctx context.Context) bool {
-	if value := strings.TrimSpace(s.env("S46_TEST_MODEL_DOWNLOADED")); value != "" {
-		return strs.Truthy(value)
-	}
-	for _, model := range s.installedOllamaModels(ctx) {
-		if model == s.backendModel() {
-			return true
-		}
-	}
-	return false
 }
 
 func (s Service) installedOllamaModels(ctx context.Context) []string {
