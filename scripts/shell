@@ -15,6 +15,68 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 143' TERM
 
+seeded_harnesses=()
+
+copy_file_if_exists() {
+  local src="$1"
+  local dst="$2"
+  if [ ! -f "$src" ]; then
+    return 1
+  fi
+  mkdir -p "$(dirname "$dst")"
+  if cp -p "$src" "$dst"; then
+    return 0
+  fi
+  echo "[s46] warning: could not copy $src into sandbox" >&2
+  return 1
+}
+
+copy_dir_if_exists() {
+  local src="$1"
+  local dst="$2"
+  if [ ! -d "$src" ]; then
+    return 1
+  fi
+  mkdir -p "$(dirname "$dst")"
+  rm -rf "$dst"
+  if cp -pR "$src" "$dst"; then
+    return 0
+  fi
+  echo "[s46] warning: could not copy $src into sandbox" >&2
+  return 1
+}
+
+seed_harness_configs() {
+  if [ -z "$host_home" ] || [ ! -d "$host_home" ]; then
+    return 0
+  fi
+
+  if copy_dir_if_exists "$host_home/.pi/agent" "$HOME/.pi/agent"; then
+    seeded_harnesses+=("pi")
+  fi
+
+  if copy_file_if_exists "$host_home/.claude/settings.json" "$HOME/.claude/settings.json"; then
+    seeded_harnesses+=("claude-code")
+  fi
+
+  if copy_file_if_exists "$host_home/.codex/config.toml" "$HOME/.codex/config.toml"; then
+    seeded_harnesses+=("codex")
+  fi
+}
+
+join_by_comma() {
+  local joined=""
+  local item
+  for item in "$@"; do
+    if [ -z "$joined" ]; then
+      joined="$item"
+    else
+      joined="$joined, $item"
+    fi
+  done
+  echo "$joined"
+}
+
 mkdir -p "$sandbox/home" "$sandbox/home/.ollama" "$sandbox/home/.config" "$sandbox/home/.local/share" "$sandbox/home/.cache" "$sandbox/bin"
 
 cd "$repo_root"
@@ -42,6 +104,7 @@ export S46_DEV_BASE_URL="${S46_DEV_BASE_URL:-$S46_API_BASE_URL}"
 export S46_KEYRING_BACKEND=file
 export S46_SHARE_BACKEND=mock
 export S46_MOCK_GIST_ID=0123456789abcdef0123456789abcdef
+seed_harness_configs
 if [ -z "${S46_API_REPO:-}" ] && [ -d "$api_repo_default/cmd/s46-api" ]; then
   ln -s "$api_repo_default" "$sandbox/s46-api"
   export S46_API_REPO="$sandbox/s46-api"
@@ -55,6 +118,10 @@ export PATH="$TMP_FOLDER/bin:$PATH"
 api_base="$S46_API_BASE_URL"
 api_repo_display="${S46_API_REPO:-not configured}"
 api_repo_display="${api_repo_display/#$TMP_FOLDER/\$TMP_FOLDER}"
+seeded_harnesses_display="none"
+if [ "${#seeded_harnesses[@]}" -gt 0 ]; then
+  seeded_harnesses_display="$(join_by_comma "${seeded_harnesses[@]}")"
+fi
 
 cat <<EOF
 s46 development shell
@@ -67,6 +134,7 @@ API base: $api_base
 Ollama models: $OLLAMA_MODELS
 S46 logs: $S46_LOG_DIR
 S46 API repo: $api_repo_display
+Seeded harness configs: $seeded_harnesses_display
 
 Try:
   s46 airplane setup

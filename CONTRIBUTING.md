@@ -11,13 +11,13 @@ Install pre-commit hooks once with `make install-hooks`.
 
 ## Sandboxed dev shell
 
-`make shell` builds an `s46` binary, sets up an isolated temporary `HOME`, exports test-friendly env vars (`S46_DEV_SHELL=1`, `S46_API_BASE_URL=http://127.0.0.1:8080`, file keyring, mock share backend), and drops you into a subshell. Exit with `Ctrl-D` or `exit` — the tempdir is cleaned up.
+`make shell` builds an `s46` binary, sets up an isolated temporary `HOME`, copies any existing Pi agent dir (`~/.pi/agent`), Claude Code settings (`~/.claude/settings.json`), and Codex config (`~/.codex/config.toml`) into that tempdir, exports test-friendly env vars (`S46_DEV_SHELL=1`, `S46_API_BASE_URL=http://127.0.0.1:8080`, file keyring, mock share backend), and drops you into a subshell. Exit with `Ctrl-D` or `exit` — the tempdir is cleaned up.
 
 ```sh
 make shell
 ```
 
-Inside the shell, every `s46` command writes only inside the tempdir.
+Inside the shell, every `s46` command writes only inside the tempdir; copied harness files are disposable and never symlinked back to the host config.
 
 ## Run without installing
 
