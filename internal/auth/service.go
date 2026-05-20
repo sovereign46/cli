@@ -107,18 +107,11 @@ func (s Service) LoginWithDeviceCallback(ctx context.Context, req LoginRequest, 
 		return LoginResult{}, fmt.Errorf("login failed: could not load team %s: %w", teamName, err)
 	}
 
-	cfg, err := s.Config.LoadConfig()
-	if err != nil {
-		return LoginResult{}, err
-	}
-	if _, ok := cfg.Teams[team.Name]; !ok {
-		cfg.Teams[team.Name] = config.TeamConfigFromAPI(team, "standard", team.DefaultModel, config.ModeCloud)
-	}
-	cfg.ActiveTeam = team.Name
-	if err := s.Config.SaveConfig(cfg); err != nil {
-		return LoginResult{}, err
-	}
-
+	// Save state (auth identity) before config (active team). If only the
+	// first write succeeds, the user is authenticated but no team is
+	// selected — `s46 login` again recovers cleanly. The opposite order
+	// would leave a team active for a user we haven't recorded yet, which
+	// makes `s46 whoami` lie about the identity until login is retried.
 	state, err := s.Config.LoadState()
 	if err != nil {
 		return LoginResult{}, err
@@ -129,6 +122,18 @@ func (s Service) LoginWithDeviceCallback(ctx context.Context, req LoginRequest, 
 	state.CurrentDeviceName = loginReq.DeviceName
 	state.LastLoginAt = time.Now().UTC().Format(time.RFC3339)
 	if err := s.Config.SaveState(state); err != nil {
+		return LoginResult{}, err
+	}
+
+	cfg, err := s.Config.LoadConfig()
+	if err != nil {
+		return LoginResult{}, err
+	}
+	if _, ok := cfg.Teams[team.Name]; !ok {
+		cfg.Teams[team.Name] = config.TeamConfigFromAPI(team, "standard", team.DefaultModel, config.ModeCloud)
+	}
+	cfg.ActiveTeam = team.Name
+	if err := s.Config.SaveConfig(cfg); err != nil {
 		return LoginResult{}, err
 	}
 

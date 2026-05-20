@@ -18,7 +18,7 @@ func TestStoreLoadSaveConfigAndState(t *testing.T) {
 
 	cfg := DefaultConfig()
 	cfg.ActiveTeam = "acme"
-	cfg.Teams["acme"] = TeamConfig{Endpoint: "https://acme.s46.dev", Lane: "EU-OPO", Mode: "cloud", DefaultHarness: "claude-code", DefaultModel: api.DefaultModel}
+	cfg.Teams["acme"] = TeamConfig{Endpoint: "https://acme.s46.dev", Lane: "EU-OPO", DefaultHarness: "claude-code", DefaultModel: api.DefaultModel}
 	if err := store.SaveConfig(cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -60,12 +60,10 @@ func TestConfigActiveMode(t *testing.T) {
 		cfg  Config
 		want string
 	}{
-		{"empty falls through to cloud", Config{}, ModeCloud},
-		{"top-level airplane wins", Config{Mode: ModeAirplane, ActiveTeam: "acme", Teams: map[string]TeamConfig{"acme": {Mode: ModeCloud}}}, ModeAirplane},
-		{"top-level cloud wins over team airplane", Config{Mode: ModeCloud, ActiveTeam: "acme", Teams: map[string]TeamConfig{"acme": {Mode: ModeAirplane}}}, ModeCloud},
-		{"team airplane when top empty", Config{ActiveTeam: "acme", Teams: map[string]TeamConfig{"acme": {Mode: ModeAirplane}}}, ModeAirplane},
-		{"team without mode falls through", Config{ActiveTeam: "acme", Teams: map[string]TeamConfig{"acme": {}}}, ModeCloud},
-		{"active team missing from teams map", Config{ActiveTeam: "missing"}, ModeCloud},
+		{"empty defaults to cloud", Config{}, ModeCloud},
+		{"explicit airplane wins", Config{Mode: ModeAirplane}, ModeAirplane},
+		{"explicit cloud wins", Config{Mode: ModeCloud}, ModeCloud},
+		{"unknown active team does not influence mode", Config{ActiveTeam: "missing"}, ModeCloud},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

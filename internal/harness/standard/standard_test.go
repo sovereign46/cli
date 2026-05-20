@@ -43,3 +43,10 @@ func TestAdapterPlansDoNotWriteThirdPartyFiles(t *testing.T) {
 		t.Fatalf("applied = %#v", applied)
 	}
 }
+
+func TestStatusReportsOK(t *testing.T) {
+	checks := New().Status(context.Background(), harness.StatusRequest{TeamName: "acme"})
+	if len(checks) != 1 || !checks[0].OK || checks[0].Name != "standard" {
+		t.Fatalf("expected single passing 'standard' check, got %#v", checks)
+	}
+}

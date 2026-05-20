@@ -23,6 +23,11 @@ var (
 	ErrAuthenticateFirst    = errors.New("authenticate first")
 	ErrUnauthorized         = errors.New("unauthorized")
 	ErrForbidden            = errors.New("forbidden")
+	// ErrCloudUnavailable wraps any transport-level failure when calling
+	// the s46 API: DNS failure, connection refused, timeout, network
+	// unreachable, TLS handshake errors, etc. Callers use errors.Is to
+	// branch on "the API isn't reachable" without grepping error text.
+	ErrCloudUnavailable = errors.New("cloud unavailable")
 )
 
 type Error struct {
@@ -342,7 +347,9 @@ func (c *HTTPClient) do(ctx context.Context, method string, endpoint string, bea
 	}
 	response, err := client.Do(request)
 	if err != nil {
-		return err
+		// Transport failure: classify as ErrCloudUnavailable so callers
+		// can branch via errors.Is without inspecting message text.
+		return fmt.Errorf("%w: %s %s: %v", ErrCloudUnavailable, method, endpoint, err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {

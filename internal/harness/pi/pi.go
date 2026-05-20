@@ -14,6 +14,14 @@ import (
 	"github.com/sovereign46/s46-cli/internal/harness"
 )
 
+// modelsRelPath is the location of Pi's models config relative to
+// $HOME. Update this if Pi moves its config.
+var modelsRelPath = filepath.Join(".pi", "agent", "models.json")
+
+func modelsPath(env map[string]string) string {
+	return filepath.Join(config.HomeDir(env), modelsRelPath)
+}
+
 type Adapter struct{}
 
 func New() Adapter { return Adapter{} }
@@ -21,7 +29,7 @@ func New() Adapter { return Adapter{} }
 func (a Adapter) Name() string { return "pi" }
 
 func (a Adapter) Detect(ctx context.Context, env map[string]string) (harness.Detection, error) {
-	path := filepath.Join(config.HomeDir(env), ".pi", "agent", "models.json")
+	path := modelsPath(env)
 	if _, err := os.Stat(path); err == nil {
 		return harness.Detection{Installed: true, Path: config.DisplayPath(path, env)}, nil
 	}
@@ -32,7 +40,7 @@ func (a Adapter) Detect(ctx context.Context, env map[string]string) (harness.Det
 }
 
 func (a Adapter) PlanConnect(ctx context.Context, req harness.ConnectRequest) (harness.Plan, error) {
-	path := filepath.Join(config.HomeDir(req.Env), ".pi", "agent", "models.json")
+	path := modelsPath(req.Env)
 	oldContent, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		oldContent = nil
@@ -88,7 +96,7 @@ func (a Adapter) PlanConnect(ctx context.Context, req harness.ConnectRequest) (h
 }
 
 func (a Adapter) PlanDisconnect(ctx context.Context, req harness.DisconnectRequest) (harness.Plan, error) {
-	path := filepath.Join(config.HomeDir(req.Env), ".pi", "agent", "models.json")
+	path := modelsPath(req.Env)
 	oldContent, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		oldContent = nil
@@ -127,7 +135,7 @@ func (a Adapter) Apply(ctx context.Context, plan harness.Plan) (harness.AppliedP
 }
 
 func (a Adapter) Status(ctx context.Context, req harness.StatusRequest) []harness.StatusCheck {
-	path := filepath.Join(config.HomeDir(req.Env), ".pi", "agent", "models.json")
+	path := modelsPath(req.Env)
 	raw, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return []harness.StatusCheck{{Name: "pi-config", OK: false, Message: fmt.Sprintf("not configured; run `s46 connect %s --harness=pi`", req.TeamName)}}

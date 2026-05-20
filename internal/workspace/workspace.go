@@ -33,6 +33,14 @@ func (c Context) IsAirplane() bool {
 // Context. It returns a typed error when no team is configured so
 // callers can decide whether to fall back (e.g. airplane-mode commands)
 // or surface a "run `s46 login`" message.
+//
+// Concurrency: Resolve reads config and state as two separate file
+// operations. It does not hold a lock. A concurrent writer (e.g. another
+// `s46` process completing a connect) can produce a torn view where
+// Config reflects the new team but State does not, or vice versa.
+// Callers that need a consistent snapshot must take config.Store.Lock
+// before calling Resolve. CLI command handlers that hold s46's flock via
+// withLock are already protected; ad-hoc readers are not.
 func Resolve(store *config.Store) (Context, error) {
 	cfg, err := store.LoadConfig()
 	if err != nil {

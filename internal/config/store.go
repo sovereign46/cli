@@ -22,14 +22,15 @@ type Config struct {
 }
 
 type TeamConfig struct {
-	Endpoint        string           `json:"endpoint"`
-	Lane            string           `json:"lane"`
-	Mode            string           `json:"mode"`
-	DefaultHarness  string           `json:"defaultHarness"`
-	DefaultModel    string           `json:"defaultModel"`
-	Boxes           []string         `json:"boxes,omitempty"`
-	Models          []string         `json:"models,omitempty"`
-	APISnapshot     api.Team         `json:"apiSnapshot"`
+	Endpoint       string   `json:"endpoint"`
+	Lane           string   `json:"lane"`
+	DefaultHarness string   `json:"defaultHarness"`
+	DefaultModel   string   `json:"defaultModel"`
+	Boxes          []string `json:"boxes,omitempty"`
+	Models         []string `json:"models,omitempty"`
+	APISnapshot    api.Team `json:"apiSnapshot"`
+	// HarnessSnapshot records the harness files as they were before
+	// airplane mode rewrote them, so `airplane mode off` can restore.
 	HarnessSnapshot *HarnessSnapshot `json:"harnessSnapshot,omitempty"`
 }
 
@@ -81,14 +82,11 @@ func DefaultConfig() Config {
 	return Config{Teams: map[string]TeamConfig{}}
 }
 
+// ActiveMode returns the workspace mode. Mode is a workspace-level
+// setting; it is not per-team. Defaults to cloud when unset.
 func (c Config) ActiveMode() string {
 	if c.Mode != "" {
 		return c.Mode
-	}
-	if c.ActiveTeam != "" {
-		if team, ok := c.Teams[c.ActiveTeam]; ok && team.Mode != "" {
-			return team.Mode
-		}
 	}
 	return ModeCloud
 }
@@ -139,14 +137,17 @@ func (s *Store) SaveState(state State) error {
 	return WriteJSONAtomic(s.StatePath, state, 0o600)
 }
 
-func TeamConfigFromAPI(team api.Team, harness string, model string, mode string) TeamConfig {
+// TeamConfigFromAPI builds a TeamConfig from an api.Team response. The
+// mode parameter is accepted for source compatibility with older callers
+// but is no longer stored on TeamConfig — mode is workspace-level, see
+// Config.Mode and Config.ActiveMode().
+func TeamConfigFromAPI(team api.Team, harness string, model string, _ string) TeamConfig {
 	if model == "" {
 		model = team.DefaultModel
 	}
 	return TeamConfig{
 		Endpoint:       team.Endpoint,
 		Lane:           team.Lane,
-		Mode:           mode,
 		DefaultHarness: harness,
 		DefaultModel:   model,
 		Boxes:          team.Boxes,

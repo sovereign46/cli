@@ -94,12 +94,6 @@ func (s Service) processEnv(extra ...string) []string {
 	return env
 }
 
-func (s Service) setEnv(key string, value string) {
-	if s.Env != nil {
-		s.Env[key] = value
-	}
-}
-
 func cacheDir(env map[string]string) string {
 	if value := strings.TrimSpace(strs.EnvValue(env, "S46_LOG_DIR")); value != "" {
 		return value
@@ -148,9 +142,3 @@ func (s Service) logPrefix() string {
 	return strs.FirstNonEmpty(s.LogPrefix, Prefix)
 }
 
-func (s Service) env(key string) string {
-	if s.Env == nil {
-		return os.Getenv(key)
-	}
-	return s.Env[key]
-}

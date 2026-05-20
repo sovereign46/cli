@@ -80,7 +80,10 @@ func (s Service) List(ctx context.Context) ([]api.Session, error) {
 	if ctxState.Config.ActiveMode() == config.ModeAirplane {
 		return []api.Session{}, nil
 	}
-	accessToken := s.accessToken(ctx, ctxState)
+	accessToken, tokenErr := s.accessToken(ctx, ctxState)
+	if tokenErr != nil {
+		return nil, fmt.Errorf("could not obtain s46 access token: %w; run `s46 login` if your session expired", tokenErr)
+	}
 	sessions, err := s.API.Sessions(ctx, ctxState.Team, accessToken)
 	if err != nil {
 		if errors.Is(err, api.ErrForbidden) {
@@ -148,7 +151,11 @@ func (s Service) Detach(ctx context.Context, sessionID string, harness string, b
 	if harness == "" {
 		harness = existing.Harness
 	}
-	result, err := s.API.Detach(ctx, api.DetachRequest{SessionID: sessionID, Harness: harness, Box: box, Team: ctxState.Team, AccessToken: s.accessToken(ctx, ctxState)})
+	accessToken, tokenErr := s.accessToken(ctx, ctxState)
+	if tokenErr != nil {
+		return api.Session{}, fmt.Errorf("could not obtain s46 access token: %w; run `s46 login` if your session expired", tokenErr)
+	}
+	result, err := s.API.Detach(ctx, api.DetachRequest{SessionID: sessionID, Harness: harness, Box: box, Team: ctxState.Team, AccessToken: accessToken})
 	if err != nil {
 		return api.Session{}, err
 	}
@@ -168,7 +175,11 @@ func (s Service) Resume(ctx context.Context, sessionID string, dryRun bool) (api
 	}
 	existing := findOrDefault(ctxState.State, sessionID, ctxState.Team, ctxState.TeamConfig)
 	previous := existing.Location
-	result, err := s.API.Resume(ctx, api.ResumeRequest{SessionID: sessionID, Session: existing, Team: ctxState.Team, AccessToken: s.accessToken(ctx, ctxState)})
+	accessToken, tokenErr := s.accessToken(ctx, ctxState)
+	if tokenErr != nil {
+		return api.Session{}, "", fmt.Errorf("could not obtain s46 access token: %w; run `s46 login` if your session expired", tokenErr)
+	}
+	result, err := s.API.Resume(ctx, api.ResumeRequest{SessionID: sessionID, Session: existing, Team: ctxState.Team, AccessToken: accessToken})
 	if err != nil {
 		return api.Session{}, "", err
 	}
@@ -267,7 +278,11 @@ func (s Service) Land(ctx context.Context, sessionID string, title string) (api.
 		return api.LandResult{}, err
 	}
 	session := findOrDefault(ctxState.State, sessionID, ctxState.Team, ctxState.TeamConfig)
-	result, err := s.API.Land(ctx, api.LandRequest{SessionID: sessionID, Session: session, Team: ctxState.Team, Title: title, AccessToken: s.accessToken(ctx, ctxState)})
+	accessToken, tokenErr := s.accessToken(ctx, ctxState)
+	if tokenErr != nil {
+		return api.LandResult{}, fmt.Errorf("could not obtain s46 access token: %w; run `s46 login` if your session expired", tokenErr)
+	}
+	result, err := s.API.Land(ctx, api.LandRequest{SessionID: sessionID, Session: session, Team: ctxState.Team, Title: title, AccessToken: accessToken})
 	if err != nil {
 		return api.LandResult{}, err
 	}
@@ -306,15 +321,23 @@ func (s Service) contextState() (workspaceContext, error) {
 	return workspace.Resolve(s.Config)
 }
 
-func (s Service) accessToken(ctx context.Context, ctxState workspaceContext) string {
+// accessToken returns the bearer to use for cloud API calls. In airplane
+// mode it returns ("", nil) so callers send no bearer. When the user is
+// not logged in it returns ("", nil) too — the API will 403 and
+// sessionsForbiddenError will surface a clearer message.
+//
+// If we have a user but the auth provider (e.g. refresh) fails, the
+// error is returned so callers don't pretend "no token" was the user's
+// intent. Most CLI flows propagate this so the user sees "your session
+// expired, run `s46 login`" instead of "API denied access".
+func (s Service) accessToken(ctx context.Context, ctxState workspaceContext) (string, error) {
 	if ctxState.Config.ActiveMode() == config.ModeAirplane {
-		return ""
+		return "", nil
 	}
 	if s.Auth == nil || ctxState.State.CurrentUser == "" {
-		return ""
+		return "", nil
 	}
-	token, _ := s.Auth.AccessToken(ctx)
-	return token
+	return s.Auth.AccessToken(ctx)
 }
 
 func findOrDefault(state config.State, sessionID string, team api.Team, teamConfig config.TeamConfig) api.Session {

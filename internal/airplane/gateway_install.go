@@ -30,15 +30,8 @@ type gatewayAsset struct {
 }
 
 func (s Service) InstallGateway(ctx context.Context) error {
-	if strs.Truthy(s.env("S46_TEST_INSTALL_GATEWAY_OK")) {
-		path := s.managedGatewayBinaryPath()
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			return err
-		}
-		if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
-			return err
-		}
-		return nil
+	if handled, err := s.seamInstallGateway(); handled {
+		return err
 	}
 	if !s.GatewayDownloadAvailable() {
 		return fmt.Errorf("gateway install is not available for %s/%s", runtime.GOOS, runtime.GOARCH)
@@ -151,10 +144,10 @@ func (s Service) gatewayInstallEnv() []string {
 }
 
 func (s Service) GatewayDownloadAvailable() bool {
-	if value := strings.TrimSpace(s.env("S46_TEST_GATEWAY_DOWNLOAD_AVAILABLE")); value != "" {
-		return strs.Truthy(value)
+	if available, ok := s.seamGatewayDownloadAvailable(); ok {
+		return available
 	}
-	if strs.Truthy(s.env("S46_OFFLINE")) {
+	if strs.Truthy(strs.EnvValue(s.Env, "S46_OFFLINE")) {
 		return false
 	}
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
@@ -164,7 +157,7 @@ func (s Service) GatewayDownloadAvailable() bool {
 }
 
 func (s Service) gatewayDownloadURL(ctx context.Context) (string, error) {
-	if url := strings.TrimSpace(s.env("S46_API_GATEWAY_DOWNLOAD_URL")); url != "" {
+	if url := strings.TrimSpace(strs.EnvValue(s.Env, "S46_API_GATEWAY_DOWNLOAD_URL")); url != "" {
 		return url, nil
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, s.gatewayLatestReleaseURL(), nil)
@@ -196,18 +189,18 @@ func (s Service) gatewayDownloadURL(ctx context.Context) (string, error) {
 }
 
 func (s Service) gatewayLatestReleaseURL() string {
-	if url := strings.TrimSpace(s.env("S46_API_GATEWAY_LATEST_URL")); url != "" {
+	if url := strings.TrimSpace(strs.EnvValue(s.Env, "S46_API_GATEWAY_LATEST_URL")); url != "" {
 		return url
 	}
 	return fmt.Sprintf(githubLatestURLFormat, s.gatewayGitHubRepo())
 }
 
 func (s Service) gatewayGitHubRepo() string {
-	return strs.FirstNonEmpty(s.env("S46_API_GATEWAY_REPO"), DefaultGatewayRepo)
+	return strs.FirstNonEmpty(strs.EnvValue(s.Env, "S46_API_GATEWAY_REPO"), DefaultGatewayRepo)
 }
 
 func (s Service) gatewayCloneURLs() []string {
-	if cloneURL := strings.TrimSpace(s.env("S46_API_GATEWAY_CLONE_URL")); cloneURL != "" {
+	if cloneURL := strings.TrimSpace(strs.EnvValue(s.Env, "S46_API_GATEWAY_CLONE_URL")); cloneURL != "" {
 		return []string{cloneURL}
 	}
 	repo := s.gatewayGitHubRepo()
@@ -295,7 +288,7 @@ func (s Service) installGatewayArchive(body io.Reader) error {
 func (s Service) setGitHubHeaders(request *http.Request) {
 	request.Header.Set("Accept", "application/vnd.github+json")
 	request.Header.Set("User-Agent", "s46-airplane")
-	if token := strings.TrimSpace(s.env("GITHUB_TOKEN")); token != "" {
+	if token := strings.TrimSpace(strs.EnvValue(s.Env, "GITHUB_TOKEN")); token != "" {
 		request.Header.Set("Authorization", "Bearer "+token)
 	}
 }
@@ -309,7 +302,7 @@ func (s Service) managedGatewaySourceDir() string {
 }
 
 func (s Service) gatewayInstallDir() string {
-	if dir := strings.TrimSpace(s.env("S46_GATEWAY_DIR")); dir != "" {
+	if dir := strings.TrimSpace(strs.EnvValue(s.Env, "S46_GATEWAY_DIR")); dir != "" {
 		return dir
 	}
 	return filepath.Join(dataDir(s.Env), "s46", "gateway", GatewayBinaryName)

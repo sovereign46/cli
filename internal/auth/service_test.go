@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -189,7 +190,7 @@ func TestAccessTokenReturnsEmptyInAirplaneMode(t *testing.T) {
 	home := t.TempDir()
 	env := map[string]string{"HOME": home, "XDG_CONFIG_HOME": filepath.Join(home, ".config"), "XDG_DATA_HOME": filepath.Join(home, ".data")}
 	store := config.NewStore(env, "")
-	if err := store.SaveConfig(config.Config{Mode: config.ModeAirplane, ActiveTeam: "local", Teams: map[string]config.TeamConfig{"local": {Mode: config.ModeAirplane}}}); err != nil {
+	if err := store.SaveConfig(config.Config{Mode: config.ModeAirplane, ActiveTeam: "local", Teams: map[string]config.TeamConfig{"local": {Endpoint: airplane.LocalGatewayURL}}}); err != nil {
 		t.Fatal(err)
 	}
 	service := Service{API: api.NewMockClient(), Config: store, Keyring: keyring.FileStore{Path: filepath.Join(home, "keyring.json")}}
@@ -228,5 +229,114 @@ func TestAccessTokenFailsWhenNotAuthenticated(t *testing.T) {
 
 	if _, err := service.AccessToken(context.Background()); err == nil {
 		t.Fatal("expected AccessToken to fail without login")
+	}
+}
+
+func TestCurrentLoginReturnsFalseWithoutKeyring(t *testing.T) {
+	home := t.TempDir()
+	env := map[string]string{"HOME": home, "XDG_CONFIG_HOME": filepath.Join(home, ".config"), "XDG_DATA_HOME": filepath.Join(home, ".data")}
+	store := config.NewStore(env, "")
+	service := Service{API: api.NewMockClient(), Config: store}
+	if _, ok := service.CurrentLogin(context.Background()); ok {
+		t.Fatal("expected CurrentLogin to fail without keyring")
+	}
+}
+
+func TestCurrentLoginReturnsFalseWhenUnauthenticated(t *testing.T) {
+	home := t.TempDir()
+	env := map[string]string{"HOME": home, "XDG_CONFIG_HOME": filepath.Join(home, ".config"), "XDG_DATA_HOME": filepath.Join(home, ".data")}
+	store := config.NewStore(env, "")
+	service := Service{API: api.NewMockClient(), Config: store, Keyring: keyring.FileStore{Path: filepath.Join(home, "keyring.json")}}
+	if _, ok := service.CurrentLogin(context.Background()); ok {
+		t.Fatal("expected CurrentLogin to fail with no state on disk")
+	}
+}
+
+func TestAccessTokenPersistsRotatedRefreshToken(t *testing.T) {
+	// Pins that if the server rotates the refresh token on refresh,
+	// the rotated value is persisted so the next refresh uses it. A
+	// future "optimization" that re-uses the old refresh token after
+	// rotation would silently break logins on real rotating servers.
+	home := t.TempDir()
+	env := map[string]string{"HOME": home, "XDG_CONFIG_HOME": filepath.Join(home, ".config"), "XDG_DATA_HOME": filepath.Join(home, ".data")}
+	store := config.NewStore(env, "")
+	keyringStore := keyring.FileStore{Path: filepath.Join(home, "keyring.json")}
+
+	rotator := &rotatingRefreshAPI{MockClient: api.NewMockClient(), rotatedRefresh: "ROTATED-REFRESH-TOKEN"}
+	service := Service{API: rotator, Config: store, Keyring: keyringStore}
+
+	// First, log in normally so there's a token to refresh.
+	if _, err := service.Login(context.Background(), "dscape@acme.s46.dev", ""); err != nil {
+		t.Fatal(err)
+	}
+	// Stamp the stored token as already-expired so AccessToken triggers a refresh.
+	raw, err := keyringStore.Get(context.Background(), TokenService, "dscape@acme.s46.dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tokens api.TokenSet
+	if err := json.Unmarshal([]byte(raw), &tokens); err != nil {
+		t.Fatal(err)
+	}
+	tokens.ExpiresAt = time.Now().Add(-time.Minute)
+	encoded, err := json.Marshal(tokens)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := keyringStore.Set(context.Background(), TokenService, "dscape@acme.s46.dev", string(encoded)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Trigger refresh.
+	if _, err := service.AccessToken(context.Background()); err != nil {
+		t.Fatalf("AccessToken err = %v", err)
+	}
+	if rotator.refreshes == 0 {
+		t.Fatal("expected refresh to be called")
+	}
+
+	// Verify the rotated refresh token is now what's stored.
+	raw, err = keyringStore.Get(context.Background(), TokenService, "dscape@acme.s46.dev")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(raw), &tokens); err != nil {
+		t.Fatal(err)
+	}
+	if tokens.RefreshToken != "ROTATED-REFRESH-TOKEN" {
+		t.Fatalf("expected rotated refresh token persisted, got %q", tokens.RefreshToken)
+	}
+}
+
+type rotatingRefreshAPI struct {
+	*api.MockClient
+	rotatedRefresh string
+	refreshes      int
+}
+
+func (r *rotatingRefreshAPI) RefreshToken(ctx context.Context, refreshToken string, account string) (api.TokenSet, error) {
+	r.refreshes++
+	tokens, err := r.MockClient.RefreshToken(ctx, refreshToken, account)
+	if err != nil {
+		return tokens, err
+	}
+	tokens.RefreshToken = r.rotatedRefresh
+	return tokens, nil
+}
+
+func TestCurrentLoginReturnsResultAfterLogin(t *testing.T) {
+	home := t.TempDir()
+	env := map[string]string{"HOME": home, "XDG_CONFIG_HOME": filepath.Join(home, ".config"), "XDG_DATA_HOME": filepath.Join(home, ".data")}
+	store := config.NewStore(env, "")
+	service := Service{API: api.NewMockClient(), Config: store, Keyring: keyring.FileStore{Path: filepath.Join(home, "keyring.json")}}
+	if _, err := service.Login(context.Background(), "dscape@acme.s46.dev", ""); err != nil {
+		t.Fatal(err)
+	}
+	result, ok := service.CurrentLogin(context.Background())
+	if !ok {
+		t.Fatal("expected CurrentLogin to succeed after Login")
+	}
+	if !result.Authenticated || result.User != "dscape@acme.s46.dev" || result.Team != "acme" {
+		t.Fatalf("unexpected CurrentLogin result: %#v", result)
 	}
 }

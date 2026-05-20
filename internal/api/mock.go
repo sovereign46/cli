@@ -15,6 +15,14 @@ import (
 	"github.com/sovereign46/s46-cli/internal/strs"
 )
 
+// init wires the mock client factory into the api package on non-release
+// builds. The release build excludes this file (see the //go:build tag at
+// the top), leaving mockClientFactory nil and so S46_API_MODE=mock has
+// no effect in release binaries. This is a deliberate compile-time choice;
+// callers cannot opt-in to the mock at runtime in a release build.
+//
+// The factory must not depend on package-level state that's initialized
+// after init() runs. Right now it captures nothing, which keeps it safe.
 func init() {
 	mockClientFactory = func(env map[string]string) Client { return NewMockClient() }
 }

@@ -9,11 +9,26 @@ import (
 	"github.com/sovereign46/s46-cli/internal/harness"
 )
 
+// DefaultPrefix is the literal CLI prefix used for cloud-mode output
+// and is the marker token that production code embeds at the start of
+// rendered lines. The renderer translates this marker to whatever
+// active prefix is set (e.g. airplane.Prefix), so every brand-aware
+// line uses DefaultPrefix and the renderer rewrites at print time.
+//
+// New code: import this constant rather than hardcoding "[s46]".
+const DefaultPrefix = "[s46]"
+
 type Interface interface {
 	WriteJSON(value any) error
 	Lines(lines ...string) error
 }
 
+// Renderer prints either JSON or plain lines. Plain output respects
+// the active brand prefix: lines that begin with DefaultPrefix have
+// it swapped for r.Prefix; lines that begin with the status markers
+// "[ok]" or "[fail]" get r.Prefix prepended when r.Prefix differs
+// from DefaultPrefix (cloud mode emits bare status lines; airplane
+// mode prefixes them to disambiguate from third-party tools).
 type Renderer struct {
 	JSON   bool
 	Out    io.Writer
@@ -27,7 +42,7 @@ func (r Renderer) WriteJSON(value any) error {
 }
 
 func (r Renderer) Lines(lines ...string) error {
-	if r.Prefix != "" && r.Prefix != "[s46]" {
+	if r.Prefix != "" && r.Prefix != DefaultPrefix {
 		lines = rewritePrefix(lines, r.Prefix)
 	}
 	_, err := fmt.Fprintln(r.Out, strings.Join(lines, "\n"))
@@ -37,8 +52,8 @@ func (r Renderer) Lines(lines ...string) error {
 func rewritePrefix(lines []string, prefix string) []string {
 	rewritten := make([]string, len(lines))
 	for i, line := range lines {
-		if strings.HasPrefix(line, "[s46]") {
-			rewritten[i] = prefix + strings.TrimPrefix(line, "[s46]")
+		if strings.HasPrefix(line, DefaultPrefix) {
+			rewritten[i] = prefix + strings.TrimPrefix(line, DefaultPrefix)
 		} else if strings.HasPrefix(line, "[ok]") || strings.HasPrefix(line, "[fail]") {
 			rewritten[i] = prefix + " " + line
 		} else {
@@ -49,7 +64,7 @@ func rewritePrefix(lines []string, prefix string) []string {
 }
 
 func RenderPlan(plan harness.Plan) []string {
-	lines := []string{fmt.Sprintf("[s46] %s", plan.Title), fmt.Sprintf("[s46] %s", plan.Summary)}
+	lines := []string{fmt.Sprintf("%s %s", DefaultPrefix, plan.Title), fmt.Sprintf("%s %s", DefaultPrefix, plan.Summary)}
 	for _, operation := range plan.Operations {
 		lines = append(lines, "  - "+operation)
 	}

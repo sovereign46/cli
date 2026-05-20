@@ -14,8 +14,12 @@ type Lock struct {
 	file *os.File
 }
 
+// Lock acquires an exclusive flock guarding mutations of the workspace
+// config (ConfigPath). The lock file lives next to config.json so that
+// two `s46` processes pointing at the same config — even with different
+// XDG_CACHE_HOME values — serialize against each other.
 func (s *Store) Lock(ctx context.Context) (*Lock, error) {
-	lockPath := filepath.Join(CacheDir(s.Env), "s46", "lock")
+	lockPath := s.ConfigPath + ".lock"
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
 		return nil, err
 	}

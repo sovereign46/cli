@@ -79,6 +79,9 @@ func ProcessEnv() map[string]string {
 }
 
 func NewRootCommand(runtime Runtime) *cobra.Command {
+	if runtime.Env == nil {
+		runtime.Env = ProcessEnv()
+	}
 	opts := &options{}
 	root := &cobra.Command{
 		Use:   "s46",
@@ -133,9 +136,6 @@ func NewRootCommand(runtime Runtime) *cobra.Command {
 }
 
 func airplaneHelpActive(env map[string]string, configPath string) bool {
-	if env == nil {
-		env = ProcessEnv()
-	}
 	cfg, err := config.NewStore(env, configPath).LoadConfig()
 	return err == nil && cfg.ActiveMode() == config.ModeAirplane
 }
@@ -150,9 +150,6 @@ func airplaneHelpNotice() string {
 
 func checkForStartupUpdate(ctx context.Context, runtime Runtime, opts *options, cmd *cobra.Command) error {
 	env := runtime.Env
-	if env == nil {
-		env = ProcessEnv()
-	}
 	if skipStartupUpdateCheck(cmd, env) {
 		return nil
 	}
@@ -201,12 +198,12 @@ func OutputPrefix(env map[string]string, configPath string) string {
 func activeOutputPrefix(store *config.Store) string {
 	cfg, err := store.LoadConfig()
 	if err != nil {
-		return "[s46]"
+		return output.DefaultPrefix
 	}
 	if cfg.ActiveMode() == config.ModeAirplane {
 		return airplane.Prefix
 	}
-	return "[s46]"
+	return output.DefaultPrefix
 }
 
 func apiClientForMode(env map[string]string, store *config.Store) api.Client {
@@ -649,22 +646,10 @@ type connectRequest struct {
 }
 
 func runConnect(ctx context.Context, app *app, req connectRequest) error {
-	if req.Scope != "" && req.Scope != "user" && req.Scope != "project" {
-		return fmt.Errorf("unknown scope %q; expected user or project", req.Scope)
+	if err := validateConnectRequest(req); err != nil {
+		return err
 	}
-	harnessName, err := resolveHarnessName(ctx, app, req.Harness)
-	if err != nil {
-		var selection *harnessSelectionError
-		if !app.options.json && errors.As(err, &selection) {
-			harnessName, err = promptMissingHarness(app, req)
-			if err != nil {
-				return err
-			}
-		} else {
-			return err
-		}
-	}
-	adapter, err := app.harness.Get(harnessName)
+	harnessName, adapter, err := selectConnectHarness(ctx, app, req)
 	if err != nil {
 		return err
 	}
@@ -672,11 +657,9 @@ func runConnect(ctx context.Context, app *app, req connectRequest) error {
 	if err != nil {
 		return err
 	}
-	if req.TeamName == "" && (cfg.ActiveMode() == config.ModeAirplane || req.Mode == config.ModeAirplane) {
-		req.TeamName = strs.FirstNonEmpty(cfg.ActiveTeam, localAirplaneTeamName)
-	}
-	if req.TeamName == "" {
-		return fmt.Errorf("team is required; pass `s46 connect <team>` or run bare `s46 connect` interactively")
+	req, err = fillMissingTeamForConnect(cfg, req)
+	if err != nil {
+		return err
 	}
 	existing := cfg.Teams[req.TeamName]
 	targetMode := resolveConnectMode(cfg, existing, req)
@@ -689,56 +672,116 @@ func runConnect(ctx context.Context, app *app, req connectRequest) error {
 	if err != nil {
 		return err
 	}
-	result := map[string]any{
-		"team":       team.Name,
-		"lane":       team.Lane,
-		"mode":       targetMode,
-		"harness":    harnessName,
-		"model":      selectedModel,
-		"endpoint":   team.Endpoint,
-		"dryRun":     app.options.dryRun,
-		"operations": plan.Operations,
-		"files":      plan.Files,
-	}
+	result := connectResult(team, harnessName, selectedModel, targetMode, plan, app.options.dryRun)
 	if app.options.dryRun {
 		return renderConnectDryRun(app, team, plan, result)
 	}
-	cfgBefore := cfg
-	if cfg.Teams == nil {
-		cfg.Teams = map[string]config.TeamConfig{}
-	}
-	cfg.ActiveTeam = team.Name
-	if targetMode == config.ModeAirplane {
-		cfg.Mode = config.ModeAirplane
-	}
-	teamConfig := config.TeamConfigFromAPI(team, harnessName, selectedModel, targetMode)
-	if targetMode == config.ModeAirplane && existing.APISnapshot.Endpoint != "" && !isLocalEndpoint(existing.APISnapshot.Endpoint) {
-		teamConfig.APISnapshot = existing.APISnapshot
-	}
-	cfg.Teams[team.Name] = teamConfig
-	if err := app.config.SaveConfig(cfg); err != nil {
-		return err
-	}
-	applied, err := adapter.Apply(ctx, plan)
+	cfgBefore, cfgAfter := buildConnectConfigs(cfg, team, harnessName, selectedModel, targetMode, existing)
+	applied, err := applyAtomicConfigAndHarness(ctx, app, cfgBefore, cfgAfter, adapter, plan, "connect")
 	if err != nil {
-		// Roll back: first restore the harness files we touched, then
-		// restore the prior s46 config. We surface the original cause
-		// while annotating any rollback failures so the user can see
-		// the leftover state instead of silent half-finished writes.
-		rollbackErr := harness.RollbackPlan(applied)
-		if saveErr := app.config.SaveConfig(cfgBefore); saveErr != nil {
-			if rollbackErr != nil {
-				return fmt.Errorf("connect failed: %w; rollback errors: %v; config restore: %v", err, rollbackErr, saveErr)
-			}
-			return fmt.Errorf("connect failed: %w; config restore: %v", err, saveErr)
-		}
-		if rollbackErr != nil {
-			return fmt.Errorf("connect failed: %w; rollback: %v", err, rollbackErr)
-		}
-		return fmt.Errorf("connect failed: %w", err)
+		return err
 	}
 	result["files"] = applied.Files
 	return renderConnectApplied(app, team, plan, applied, result)
+}
+
+func validateConnectRequest(req connectRequest) error {
+	if req.Scope != "" && req.Scope != "user" && req.Scope != "project" {
+		return fmt.Errorf("unknown scope %q; expected user or project", req.Scope)
+	}
+	return nil
+}
+
+func selectConnectHarness(ctx context.Context, app *app, req connectRequest) (string, harness.Adapter, error) {
+	name, err := resolveHarnessName(ctx, app, req.Harness)
+	if err != nil {
+		var selection *harnessSelectionError
+		if !app.options.json && errors.As(err, &selection) {
+			if name, err = promptMissingHarness(app, req); err != nil {
+				return "", nil, err
+			}
+		} else {
+			return "", nil, err
+		}
+	}
+	adapter, err := app.harness.Get(name)
+	if err != nil {
+		return "", nil, err
+	}
+	return name, adapter, nil
+}
+
+func fillMissingTeamForConnect(cfg config.Config, req connectRequest) (connectRequest, error) {
+	if req.TeamName == "" && (cfg.ActiveMode() == config.ModeAirplane || req.Mode == config.ModeAirplane) {
+		req.TeamName = strs.FirstNonEmpty(cfg.ActiveTeam, localAirplaneTeamName)
+	}
+	if req.TeamName == "" {
+		return req, fmt.Errorf("team is required; pass `s46 connect <team>` or run bare `s46 connect` interactively")
+	}
+	return req, nil
+}
+
+func connectResult(team api.Team, harnessName, model, mode string, plan harness.Plan, dryRun bool) map[string]any {
+	return map[string]any{
+		"team":       team.Name,
+		"lane":       team.Lane,
+		"mode":       mode,
+		"harness":    harnessName,
+		"model":      model,
+		"endpoint":   team.Endpoint,
+		"dryRun":     dryRun,
+		"operations": plan.Operations,
+		"files":      plan.Files,
+	}
+}
+
+func buildConnectConfigs(cfg config.Config, team api.Team, harnessName, model, mode string, existing config.TeamConfig) (config.Config, config.Config) {
+	before := cfg
+	after := cfg
+	after.Teams = make(map[string]config.TeamConfig, len(cfg.Teams)+1)
+	for k, v := range cfg.Teams {
+		after.Teams[k] = v
+	}
+	after.ActiveTeam = team.Name
+	if mode == config.ModeAirplane {
+		after.Mode = config.ModeAirplane
+	}
+	teamConfig := config.TeamConfigFromAPI(team, harnessName, model, mode)
+	if mode == config.ModeAirplane && existing.APISnapshot.Endpoint != "" && !isLocalEndpoint(existing.APISnapshot.Endpoint) {
+		teamConfig.APISnapshot = existing.APISnapshot
+	}
+	after.Teams[team.Name] = teamConfig
+	return before, after
+}
+
+// applyAtomicConfigAndHarness writes `after` to disk, then applies the
+// harness plan. If the harness apply fails partway through, it rolls
+// back the files that were touched and restores the original config.
+// All three failure modes (apply error, rollback error, config-restore
+// error) are joined into a single error so the user sees the original
+// cause plus any cleanup failures that may need manual reconciliation.
+func applyAtomicConfigAndHarness(ctx context.Context, app *app, before, after config.Config, adapter harness.Adapter, plan harness.Plan, op string) (harness.AppliedPlan, error) {
+	if err := app.config.SaveConfig(after); err != nil {
+		return harness.AppliedPlan{}, fmt.Errorf("%s: save config: %w", op, err)
+	}
+	applied, err := adapter.Apply(ctx, plan)
+	if err == nil {
+		return applied, nil
+	}
+	rollbackErr := harness.RollbackPlan(applied)
+	saveErr := app.config.SaveConfig(before)
+	return applied, joinAtomicErrors(op, err, rollbackErr, saveErr)
+}
+
+func joinAtomicErrors(op string, primary error, rollbackErr, saveErr error) error {
+	parts := []string{fmt.Sprintf("%s failed: %v", op, primary)}
+	if rollbackErr != nil {
+		parts = append(parts, fmt.Sprintf("rollback: %v", rollbackErr))
+	}
+	if saveErr != nil {
+		parts = append(parts, fmt.Sprintf("config restore: %v", saveErr))
+	}
+	return errors.New(strings.Join(parts, "; "))
 }
 
 func resolveConnectMode(cfg config.Config, existing config.TeamConfig, req connectRequest) string {
@@ -751,7 +794,7 @@ func resolveConnectMode(cfg config.Config, existing config.TeamConfig, req conne
 	if cfg.ActiveMode() == config.ModeAirplane {
 		return config.ModeAirplane
 	}
-	return strs.FirstNonEmpty(existing.Mode, config.ModeCloud)
+	return config.ModeCloud
 }
 
 func connectTeam(ctx context.Context, app *app, mode string, existing config.TeamConfig, req connectRequest) (api.Team, error) {
@@ -894,15 +937,18 @@ func runDisconnect(ctx context.Context, app *app, teamName string, harnessName s
 		lines = append(lines, "", "[s46] dry-run: no files written")
 		return app.renderer.Lines(lines...)
 	}
-	applied, err := adapter.Apply(ctx, plan)
+	cfgBefore := cfg
+	cfgAfter := cfg
+	cfgAfter.Teams = make(map[string]config.TeamConfig, len(cfg.Teams))
+	for k, v := range cfg.Teams {
+		cfgAfter.Teams[k] = v
+	}
+	delete(cfgAfter.Teams, teamName)
+	if cfgAfter.ActiveTeam == teamName {
+		cfgAfter.ActiveTeam = ""
+	}
+	applied, err := applyAtomicConfigAndHarness(ctx, app, cfgBefore, cfgAfter, adapter, plan, "disconnect")
 	if err != nil {
-		return err
-	}
-	delete(cfg.Teams, teamName)
-	if cfg.ActiveTeam == teamName {
-		cfg.ActiveTeam = ""
-	}
-	if err := app.config.SaveConfig(cfg); err != nil {
 		return err
 	}
 	result["files"] = applied.Files
@@ -980,7 +1026,6 @@ func teamsUseCommand(runtime Runtime, opts *options) *cobra.Command {
 type teamListEntry struct {
 	Name     string `json:"name"`
 	Active   bool   `json:"active"`
-	Mode     string `json:"mode"`
 	Lane     string `json:"lane"`
 	Harness  string `json:"harness"`
 	Model    string `json:"model"`
@@ -1014,7 +1059,6 @@ func teamListEntries(cfg config.Config) []teamListEntry {
 		entries = append(entries, teamListEntry{
 			Name:     name,
 			Active:   name == cfg.ActiveTeam,
-			Mode:     team.Mode,
 			Lane:     team.Lane,
 			Harness:  strs.FirstNonEmpty(team.DefaultHarness, harness.DefaultName),
 			Model:    team.DefaultModel,
@@ -1026,13 +1070,13 @@ func teamListEntries(cfg config.Config) []teamListEntry {
 
 func renderTeamsList(entries []teamListEntry) []string {
 	rows := make([][]string, 0, len(entries)+1)
-	rows = append(rows, []string{"ACTIVE", "TEAM", "MODE", "LANE", "HARNESS", "MODEL", "ENDPOINT"})
+	rows = append(rows, []string{"ACTIVE", "TEAM", "LANE", "HARNESS", "MODEL", "ENDPOINT"})
 	for _, entry := range entries {
 		active := ""
 		if entry.Active {
 			active = "*"
 		}
-		rows = append(rows, []string{active, entry.Name, entry.Mode, entry.Lane, entry.Harness, entry.Model, entry.Endpoint})
+		rows = append(rows, []string{active, entry.Name, entry.Lane, entry.Harness, entry.Model, entry.Endpoint})
 	}
 	lines := []string{"[s46] connected teams:"}
 	lines = append(lines, output.Table(rows[0], rows[1:])...)

@@ -51,11 +51,6 @@ func TestResolveConnectModePrecedence(t *testing.T) {
 			want: config.ModeAirplane,
 		},
 		{
-			name:     "existing team mode used when nothing else specified",
-			existing: config.TeamConfig{Mode: config.ModeAirplane},
-			want:     config.ModeAirplane,
-		},
-		{
 			name: "defaults to cloud",
 			want: config.ModeCloud,
 		},
@@ -75,7 +70,6 @@ func seedActiveTeam(t *testing.T, env map[string]string, name string, endpoint s
 	teamConfig := config.TeamConfig{
 		Endpoint:       endpoint,
 		Lane:           "EU-OPO",
-		Mode:           config.ModeCloud,
 		DefaultHarness: "claude-code",
 		DefaultModel:   api.DefaultModel,
 		Boxes:          []string{"box-01"},
@@ -985,14 +979,13 @@ func TestStatusModeSessionsAndShare(t *testing.T) {
 		ActiveTeam string `json:"activeTeam"`
 		Team       struct {
 			Endpoint       string `json:"endpoint"`
-			Mode           string `json:"mode"`
 			DefaultHarness string `json:"defaultHarness"`
 		} `json:"team"`
 	}
 	if err := json.Unmarshal([]byte(statusRaw), &status); err != nil {
 		t.Fatal(err)
 	}
-	if status.ActiveTeam != "acme" || status.Team.Endpoint != "https://acme.s46.dev" || status.Team.Mode != "cloud" || status.Team.DefaultHarness != "standard" {
+	if status.ActiveTeam != "acme" || status.Team.Endpoint != "https://acme.s46.dev" || status.Team.DefaultHarness != "standard" {
 		t.Fatalf("unexpected status: %s", statusRaw)
 	}
 	sessions := requireOK(t, run(t, env, "sessions"))
@@ -1019,9 +1012,9 @@ func TestTeamsListShowsConnectedTeamsAndActiveTeam(t *testing.T) {
 	out := requireOK(t, run(t, env, "teams", "list"))
 	for _, want := range []string{
 		"[s46] connected teams:",
-		"ACTIVE  TEAM  MODE   LANE    HARNESS   MODEL            ENDPOINT",
-		"        acme  cloud  EU-OPO  standard  s46/kimi-k2.6    https://acme.s46.dev",
-		"*       beta  cloud  EU-OPO  standard  s46/qwen3-coder  https://beta.s46.dev",
+		"ACTIVE  TEAM  LANE    HARNESS   MODEL            ENDPOINT",
+		"        acme  EU-OPO  standard  s46/kimi-k2.6    https://acme.s46.dev",
+		"*       beta  EU-OPO  standard  s46/qwen3-coder  https://beta.s46.dev",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("teams list missing %q:\n%s", want, out)

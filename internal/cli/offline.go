@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -83,13 +84,26 @@ func (c offlineSuggestionClient) Land(ctx context.Context, req api.LandRequest) 
 }
 
 func (c offlineSuggestionClient) wrap(ctx context.Context, err error) error {
-	if err == nil || !cloudUnavailable(err) {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, api.ErrUnauthorized) || errors.Is(err, api.ErrAuthenticateFirst) {
+		return fmt.Errorf("your s46 session is invalid or expired; run `s46 login` to reauthenticate: %w", err)
+	}
+	if !cloudUnavailable(err) {
 		return err
 	}
 	if baseURL := c.localAPIBaseURL(); baseURL != "" {
 		return fmt.Errorf("%s\nunderlying error: %w", localAPIUnavailableSuggestion(c.env, baseURL), err)
 	}
 	if !cloudCall(c.env) {
+		return err
+	}
+	// S46_OFFLINE is the user telling us "I know I'm offline; don't
+	// probe Ollama, don't suggest airplane mode, just surface the
+	// underlying error." Skip the suggestion-building airplane.Check
+	// call which would otherwise hit the local Ollama HTTP API.
+	if strs.Truthy(c.env["S46_OFFLINE"]) {
 		return err
 	}
 	return fmt.Errorf("%s\nunderlying error: %w", offlineSuggestion(ctx, c.env), err)
@@ -149,7 +163,14 @@ func cloudCall(env map[string]string) bool {
 	return true
 }
 
+// cloudUnavailable detects transport-level failures. api.ErrCloudUnavailable
+// is wrapped around any client.Do() failure by api/http.go, so this is the
+// canonical check. The legacy string-matching is kept as a fallback for
+// non-api error sources (e.g. share-gist gh shellouts).
 func cloudUnavailable(err error) bool {
+	if errors.Is(err, api.ErrCloudUnavailable) {
+		return true
+	}
 	message := strings.ToLower(err.Error())
 	for _, fragment := range []string{"no such host", "network is unreachable", "connection refused", "i/o timeout", "context deadline exceeded", "connection reset", "temporary failure"} {
 		if strings.Contains(message, fragment) {

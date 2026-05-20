@@ -171,7 +171,7 @@ func renderStatusConcise(app *app, cfg config.Config, state config.State, team *
 	} else {
 		harnessName := strs.FirstNonEmpty(team.DefaultHarness, harness.DefaultName)
 		lines = append(lines,
-			fmt.Sprintf("[s46] team:    %s · %s · %s", cfg.ActiveTeam, team.Lane, team.Mode),
+			fmt.Sprintf("[s46] team:    %s · %s · %s", cfg.ActiveTeam, team.Lane, cfg.ActiveMode()),
 			fmt.Sprintf("[s46] harness: %s · %s", harnessName, team.DefaultModel),
 			fmt.Sprintf("[s46] api:     %s", team.Endpoint),
 		)
@@ -200,7 +200,7 @@ func renderStatusVerbose(app *app, cfg config.Config, state config.State, team *
 		lines = append(lines,
 			fmt.Sprintf("[s46] team:    %s", cfg.ActiveTeam),
 			fmt.Sprintf("[s46] lane:    %s", team.Lane),
-			fmt.Sprintf("[s46] mode:    %s", team.Mode),
+			fmt.Sprintf("[s46] mode:    %s", cfg.ActiveMode()),
 			fmt.Sprintf("[s46] harness: %s", strs.FirstNonEmpty(team.DefaultHarness, harness.DefaultName)),
 			fmt.Sprintf("[s46] model:   %s", team.DefaultModel),
 			fmt.Sprintf("[s46] api:     %s", team.Endpoint),
@@ -404,10 +404,7 @@ type listeningProcessStatus struct {
 }
 
 func listeningProcess(env map[string]string, port string) listeningProcessStatus {
-	if override, ok := env["S46_TEST_LISTENER_"+port]; ok {
-		return parseListeningProcessOverride(override)
-	}
-	if override, ok := env["S46_TEST_LISTENER_DEFAULT"]; ok {
+	if override, ok := seamListeningProcess(env, port); ok {
 		return parseListeningProcessOverride(override)
 	}
 	lsof, err := exec.LookPath("lsof")

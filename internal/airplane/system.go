@@ -10,22 +10,23 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"github.com/sovereign46/s46-cli/internal/strs"
 )
 
-// HomebrewAvailable reports whether the brew binary is on PATH. The
-// S46_TEST_BREW_PATH env override lets tests force a yes/no answer.
+// HomebrewAvailable reports whether the brew binary is on PATH. Tests
+// can override this via the seam in testseams_dev.go.
 func (s Service) HomebrewAvailable() bool {
-	if path := strings.TrimSpace(s.env("S46_TEST_BREW_PATH")); path != "" {
-		return path != "missing"
+	if available, ok := s.seamHomebrewAvailable(); ok {
+		return available
 	}
 	_, err := exec.LookPath("brew")
 	return err == nil
 }
 
 func (s Service) memoryBytes() int64 {
-	if value := strings.TrimSpace(s.env("S46_TEST_MEMORY_BYTES")); value != "" {
-		parsed, _ := strconv.ParseInt(value, 10, 64)
-		return parsed
+	if bytes, ok := s.seamMemoryBytes(); ok {
+		return bytes
 	}
 	switch runtime.GOOS {
 	case "darwin":
@@ -54,11 +55,10 @@ func (s Service) memoryBytes() int64 {
 }
 
 func (s Service) freeDiskBytes() int64 {
-	if value := strings.TrimSpace(s.env("S46_TEST_FREE_DISK_BYTES")); value != "" {
-		parsed, _ := strconv.ParseInt(value, 10, 64)
-		return parsed
+	if bytes, ok := s.seamFreeDiskBytes(); ok {
+		return bytes
 	}
-	path := s.env("S46_AIRPLANE_DISK_PATH")
+	path := strs.EnvValue(s.Env, "S46_AIRPLANE_DISK_PATH")
 	if path == "" {
 		path = "."
 	}

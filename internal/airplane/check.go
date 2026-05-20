@@ -42,7 +42,7 @@ type Report struct {
 
 // Check returns a Report of the local airplane runtime state.
 func (s Service) Check(ctx context.Context) Report {
-	if strs.Truthy(s.env("S46_AIRPLANE_SKIP_SETUP_CHECKS")) {
+	if strs.Truthy(strs.EnvValue(s.Env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")) {
 		return s.skippedReport()
 	}
 
@@ -154,8 +154,8 @@ func (s Service) modelProbeTimeout() time.Duration {
 // ollamaRunning is the private liveness probe (does Ollama answer on
 // /api/tags?). The public OllamaRunning wraps this.
 func (s Service) ollamaRunning(ctx context.Context) bool {
-	if value := strings.TrimSpace(s.env("S46_TEST_OLLAMA_RUNNING")); value != "" {
-		return strs.Truthy(value)
+	if running, ok := s.seamOllamaRunning(); ok {
+		return running
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(s.ollamaURL(), "/")+"/api/tags", nil)
 	if err != nil {
@@ -170,8 +170,8 @@ func (s Service) ollamaRunning(ctx context.Context) bool {
 }
 
 func (s Service) modelDownloaded(ctx context.Context) bool {
-	if value := strings.TrimSpace(s.env("S46_TEST_MODEL_DOWNLOADED")); value != "" {
-		return strs.Truthy(value)
+	if downloaded, ok := s.seamModelDownloaded(); ok {
+		return downloaded
 	}
 	for _, model := range s.installedOllamaModels(ctx) {
 		if model == s.backendModel() {
@@ -222,14 +222,8 @@ func (s Service) writeModelProbeProgress(done <-chan struct{}, finished chan<- s
 }
 
 func (s Service) modelProbe(ctx context.Context) (bool, string) {
-	if value := strings.TrimSpace(s.env("S46_TEST_MODEL_PROBE")); value != "" {
-		if strs.Truthy(value) {
-			return true, LocalModelID + " responds"
-		}
-		if message := strings.TrimSpace(s.env("S46_TEST_MODEL_PROBE_MESSAGE")); message != "" {
-			return false, message
-		}
-		return false, "model probe failed"
+	if probeOK, message, ok := s.seamModelProbe(); ok {
+		return probeOK, message
 	}
 	body, _ := json.Marshal(map[string]any{"model": s.backendModel(), "prompt": "ping", "stream": false, "options": map[string]any{"num_ctx": ContextWindow(s.Env)}, "keep_alive": KeepAlive(s.Env)})
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(s.ollamaURL(), "/")+"/api/generate", bytes.NewReader(body))
@@ -259,8 +253,8 @@ func (s Service) modelProbe(ctx context.Context) (bool, string) {
 }
 
 func (s Service) gatewayReady(ctx context.Context) bool {
-	if value := strings.TrimSpace(s.env("S46_TEST_GATEWAY_READY")); value != "" {
-		return strs.Truthy(value)
+	if ready, ok := s.seamGatewayReady(); ok {
+		return ready
 	}
 	type payload struct {
 		Workers []struct {
@@ -291,8 +285,8 @@ func (s Service) gatewayReady(ctx context.Context) bool {
 }
 
 func (s Service) gatewayResponding(ctx context.Context) bool {
-	if value := strings.TrimSpace(s.env("S46_TEST_GATEWAY_RESPONDING")); value != "" {
-		return strs.Truthy(value)
+	if responding, ok := s.seamGatewayResponding(); ok {
+		return responding
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(s.gatewayURL(), "/")+"/v1/models", nil)
 	if err != nil {

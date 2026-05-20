@@ -67,9 +67,8 @@ type ollamaProcess struct {
 }
 
 func (s Service) InstallOllama(ctx context.Context) error {
-	if strs.Truthy(s.env("S46_TEST_INSTALL_OLLAMA_OK")) {
-		s.setEnv("S46_TEST_OLLAMA_PATH", "/opt/homebrew/bin/ollama")
-		return nil
+	if handled, err := s.seamInstallOllama(); handled {
+		return err
 	}
 	cmd := exec.CommandContext(ctx, "brew", "install", "ollama")
 	cmd.Stdout = s.Stdout
@@ -78,10 +77,8 @@ func (s Service) InstallOllama(ctx context.Context) error {
 }
 
 func (s Service) PullModel(ctx context.Context) error {
-	if strs.Truthy(s.env("S46_TEST_PULL_MODEL_OK")) {
-		s.setEnv("S46_TEST_MODEL_DOWNLOADED", "1")
-		s.setEnv("S46_TEST_MODEL_PROBE", "1")
-		return nil
+	if handled, err := s.seamPullModel(); handled {
+		return err
 	}
 	if err := s.ensureOllamaDirs(); err != nil {
 		return err
@@ -94,15 +91,14 @@ func (s Service) PullModel(ctx context.Context) error {
 }
 
 func (s Service) StartOllama() error {
-	if strs.Truthy(s.env("S46_AIRPLANE_SKIP_SETUP_CHECKS")) {
+	if strs.Truthy(strs.EnvValue(s.Env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")) {
 		return nil
 	}
 	if s.ollamaRunning(context.Background()) {
 		return s.ensureOllamaContextLimit(context.Background())
 	}
-	if strs.Truthy(s.env("S46_TEST_START_OLLAMA_OK")) {
-		s.setEnv("S46_TEST_OLLAMA_RUNNING", "1")
-		return nil
+	if handled, err := s.seamStartOllama(); handled {
+		return err
 	}
 	path, ok := s.ollamaPath()
 	if !ok {
@@ -134,7 +130,7 @@ func (s Service) OllamaRuntime(ctx context.Context) OllamaRuntime {
 	} else if runtimeReport.Running {
 		runtimeReport.Server = "unknown"
 	}
-	if runtimeReport.Server == "macos-gui" || strings.TrimSpace(s.env("S46_TEST_LAUNCHCTL_ENV")) != "" {
+	if runtimeReport.Server == "macos-gui" || s.seamShouldUseLaunchctlEnv() {
 		if launchctlEnv, ok := s.launchctlOllamaEnv(ctx); ok {
 			runtimeReport.LaunchctlSupported = true
 			runtimeReport.LaunchctlKnown = true
@@ -216,9 +212,8 @@ func filterSettingEnv(values map[string]string, settings []OllamaEnvSetting) map
 
 func (s Service) ConfigureMacOSOllamaLaunchd(ctx context.Context) error {
 	settings := AirplaneOllamaSettings(s.Env)
-	if strs.Truthy(s.env("S46_TEST_CONFIGURE_LAUNCHCTL_OK")) {
-		s.setEnv("S46_TEST_LAUNCHCTL_ENV", joinSettings(settings))
-		return nil
+	if handled, err := s.seamConfigureLaunchctl(settings); handled {
+		return err
 	}
 	if runtime.GOOS != "darwin" {
 		return fmt.Errorf("launchctl Ollama configuration is only available on macOS")
@@ -235,19 +230,16 @@ func (s Service) ConfigureMacOSOllamaLaunchd(ctx context.Context) error {
 }
 
 func (s Service) ollamaPath() (string, bool) {
-	if path := strings.TrimSpace(s.env("S46_TEST_OLLAMA_PATH")); path != "" {
-		return path, path != "missing"
+	if path, installed, ok := s.seamOllamaPath(); ok {
+		return path, installed
 	}
 	path, err := exec.LookPath("ollama")
 	return path, err == nil
 }
 
 func (s Service) launchctlOllamaEnv(ctx context.Context) (map[string]string, bool) {
-	if raw := strings.TrimSpace(s.env("S46_TEST_LAUNCHCTL_ENV")); raw != "" {
-		if raw == "missing" {
-			return map[string]string{}, true
-		}
-		return parseEnvFields(raw), true
+	if values, available, ok := s.seamLaunchctlEnv(); ok {
+		return values, available
 	}
 	if runtime.GOOS != "darwin" {
 		return nil, false
@@ -264,19 +256,8 @@ func (s Service) launchctlOllamaEnv(ctx context.Context) (map[string]string, boo
 }
 
 func (s Service) ollamaServeProcess(ctx context.Context) (ollamaProcess, bool) {
-	if kind := strings.TrimSpace(s.env("S46_TEST_OLLAMA_PROCESS_KIND")); kind != "" {
-		if kind == "none" || kind == "missing" {
-			return ollamaProcess{}, false
-		}
-		pid, _ := strconv.Atoi(strs.FirstNonEmpty(s.env("S46_TEST_OLLAMA_PROCESS_PID"), "123"))
-		command := strings.TrimSpace(s.env("S46_TEST_OLLAMA_PROCESS_COMMAND"))
-		if command == "" {
-			command = testOllamaCommand(kind)
-		}
-		return ollamaProcess{PID: pid, Command: command}, true
-	}
-	if strings.TrimSpace(s.env("S46_TEST_OLLAMA_RUNNING")) != "" {
-		return ollamaProcess{}, false
+	if process, found, ok := s.seamOllamaServeProcess(); ok {
+		return process, found
 	}
 	output, err := exec.CommandContext(ctx, "ps", "-axo", "pid=,ppid=,args=").Output()
 	if err != nil {
@@ -327,11 +308,8 @@ func classifyOllamaServer(command string) string {
 }
 
 func (s Service) ollamaProcessEnv(ctx context.Context, pid int) (map[string]string, bool) {
-	if raw := strings.TrimSpace(s.env("S46_TEST_OLLAMA_PROCESS_ENV")); raw != "" {
-		if raw == "missing" {
-			return nil, false
-		}
-		return parseEnvFields(raw), true
+	if values, available, ok := s.seamOllamaProcessEnv(); ok {
+		return values, available
 	}
 	if pid <= 0 {
 		return nil, false
@@ -364,8 +342,8 @@ func parseEnvFields(raw string) map[string]string {
 }
 
 func (s Service) installedOllamaModels(ctx context.Context) []string {
-	if raw := strings.TrimSpace(s.env("S46_TEST_OLLAMA_LIST")); raw != "" {
-		return splitList(raw)
+	if models, ok := s.seamInstalledOllamaModels(); ok {
+		return models
 	}
 	type payload struct {
 		Models []struct {
@@ -386,15 +364,8 @@ func (s Service) installedOllamaModels(ctx context.Context) []string {
 }
 
 func (s Service) loadedOllamaModels(ctx context.Context) []OllamaLoadedModel {
-	if raw := strings.TrimSpace(s.env("S46_TEST_OLLAMA_PS")); raw != "" {
-		return parseLoadedModels(raw)
-	}
-	if value := strings.TrimSpace(s.env("S46_TEST_OLLAMA_LOADED_CONTEXT")); value != "" {
-		parsed, _ := strconv.Atoi(value)
-		if parsed > 0 {
-			return []OllamaLoadedModel{{Name: s.backendModel(), Model: s.backendModel(), ContextLength: parsed}}
-		}
-		return nil
+	if models, ok := s.seamLoadedOllamaModels(s.backendModel()); ok {
+		return models
 	}
 	type payload struct {
 		Models []struct {
@@ -449,9 +420,8 @@ func (s Service) ensureOllamaContextLimit(ctx context.Context) error {
 }
 
 func (s Service) loadedBackendModelContext(ctx context.Context) (int, bool) {
-	if value := strings.TrimSpace(s.env("S46_TEST_OLLAMA_LOADED_CONTEXT")); value != "" {
-		parsed, _ := strconv.Atoi(value)
-		return parsed, parsed > 0
+	if loaded, ok := s.seamLoadedBackendModelContext(); ok {
+		return loaded, loaded > 0
 	}
 	type payload struct {
 		Models []struct {
@@ -474,9 +444,8 @@ func (s Service) loadedBackendModelContext(ctx context.Context) (int, bool) {
 }
 
 func (s Service) stopLoadedBackendModel(ctx context.Context) error {
-	if strs.Truthy(s.env("S46_TEST_STOP_OLLAMA_MODEL_OK")) {
-		s.setEnv("S46_TEST_OLLAMA_LOADED_CONTEXT", strconv.Itoa(ContextWindow(s.Env)))
-		return nil
+	if handled, err := s.seamStopLoadedModel(); handled {
+		return err
 	}
 	path, ok := s.ollamaPath()
 	if !ok {
@@ -516,14 +485,14 @@ func (s Service) ensureOllamaDirs() error {
 }
 
 func (s Service) ollamaHomeDir() string {
-	if home := strings.TrimSpace(s.env("S46_HOST_HOME")); home != "" {
+	if home := strings.TrimSpace(strs.EnvValue(s.Env, "S46_HOST_HOME")); home != "" {
 		return home
 	}
 	return homeDir(s.Env)
 }
 
 func (s Service) ollamaModelsDir() string {
-	if models := strings.TrimSpace(s.env("OLLAMA_MODELS")); models != "" {
+	if models := strings.TrimSpace(strs.EnvValue(s.Env, "OLLAMA_MODELS")); models != "" {
 		return models
 	}
 	if home := s.ollamaHomeDir(); home != "" {
@@ -533,9 +502,9 @@ func (s Service) ollamaModelsDir() string {
 }
 
 func (s Service) ollamaURL() string {
-	return strs.FirstNonEmpty(s.env("S46_LOCAL_OLLAMA_URL"), LocalOllamaURL)
+	return strs.FirstNonEmpty(strs.EnvValue(s.Env, "S46_LOCAL_OLLAMA_URL"), LocalOllamaURL)
 }
 
 func (s Service) backendModel() string {
-	return strs.FirstNonEmpty(s.env("S46_LOCAL_MODEL"), BackendModel)
+	return strs.FirstNonEmpty(strs.EnvValue(s.Env, "S46_LOCAL_MODEL"), BackendModel)
 }

@@ -13,14 +13,23 @@ import (
 	"github.com/sovereign46/s46-cli/internal/harness"
 )
 
+// settingsRelPath is the location of the Claude Code settings file
+// relative to $HOME. Project-scoped writes use the same filename under
+// the working directory. Update this if Claude moves its config.
+var settingsRelPath = filepath.Join(".claude", "settings.json")
+
 type Adapter struct{}
 
 func New() Adapter { return Adapter{} }
 
 func (a Adapter) Name() string { return "claude-code" }
 
+func userSettingsPath(env map[string]string) string {
+	return filepath.Join(config.HomeDir(env), settingsRelPath)
+}
+
 func (a Adapter) Detect(ctx context.Context, env map[string]string) (harness.Detection, error) {
-	path := filepath.Join(config.HomeDir(env), ".claude", "settings.json")
+	path := userSettingsPath(env)
 	if _, err := os.Stat(path); err == nil {
 		return harness.Detection{Installed: true, Path: config.DisplayPath(path, env)}, nil
 	}
@@ -165,9 +174,9 @@ func (a Adapter) Status(ctx context.Context, req harness.StatusRequest) []harnes
 
 func settingsPath(env map[string]string, scope string) string {
 	if scope == "project" {
-		return filepath.Join(workDir(env), ".claude", "settings.json")
+		return filepath.Join(workDir(env), settingsRelPath)
 	}
-	return filepath.Join(config.HomeDir(env), ".claude", "settings.json")
+	return filepath.Join(config.HomeDir(env), settingsRelPath)
 }
 
 func workDir(env map[string]string) string {

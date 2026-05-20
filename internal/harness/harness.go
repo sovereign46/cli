@@ -80,8 +80,10 @@ type StatusCheck struct {
 	Message string `json:"message"`
 }
 
-// StatusRequest carries the workspace context an adapter needs to
-// validate that the on-disk harness config matches what s46 expects.
+// StatusRequest carries the slice of workspace context an adapter needs
+// to validate that the on-disk harness config matches what s46 expects.
+// It intentionally does not embed workspace.Context: harness adapters
+// have no business reading State, the full Config, or auth tokens.
 type StatusRequest struct {
 	Env          map[string]string
 	TeamName     string
@@ -237,7 +239,9 @@ func RestoreSnapshot(env map[string]string, snapshot config.HarnessSnapshot) err
 // did not exist beforehand. Files are processed in reverse order so the
 // last write is reverted first.
 func RollbackPlan(applied AppliedPlan) error {
-	var errs []string
+	var failures []string
+	var restored []string
+	var removed []string
 	for i := len(applied.Files) - 1; i >= 0; i-- {
 		file := applied.Files[i]
 		if file.RealPath == "" {
@@ -245,16 +249,30 @@ func RollbackPlan(applied AppliedPlan) error {
 		}
 		if file.RealBackupPath == "" {
 			if err := os.Remove(file.RealPath); err != nil && !os.IsNotExist(err) {
-				errs = append(errs, fmt.Sprintf("remove %s: %v", file.Path, err))
+				failures = append(failures, fmt.Sprintf("%s: could not remove (current content is the new content): %v", file.Path, err))
+				continue
 			}
+			removed = append(removed, file.Path)
 			continue
 		}
 		if err := os.Rename(file.RealBackupPath, file.RealPath); err != nil {
-			errs = append(errs, fmt.Sprintf("restore %s from %s: %v", file.Path, file.BackupPath, err))
+			failures = append(failures, fmt.Sprintf("%s: backup at %s could not be restored (current content is the new content): %v", file.Path, file.BackupPath, err))
+			continue
 		}
+		restored = append(restored, file.Path)
 	}
-	if len(errs) > 0 {
-		return fmt.Errorf("rollback: %s", strings.Join(errs, "; "))
+	if len(failures) == 0 {
+		return nil
 	}
-	return nil
+	// Build a per-file summary so the user can see exactly which files
+	// are in which state and reconcile manually.
+	parts := []string{fmt.Sprintf("rollback had %d failure(s):", len(failures))}
+	parts = append(parts, failures...)
+	if len(restored) > 0 {
+		parts = append(parts, "restored from backup: "+strings.Join(restored, ", "))
+	}
+	if len(removed) > 0 {
+		parts = append(parts, "removed (no prior backup): "+strings.Join(removed, ", "))
+	}
+	return fmt.Errorf("%s", strings.Join(parts, "\n"))
 }

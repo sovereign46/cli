@@ -19,15 +19,14 @@ type gatewayCommand struct {
 }
 
 func (s Service) StartGateway() error {
-	if strs.Truthy(s.env("S46_AIRPLANE_SKIP_SETUP_CHECKS")) {
+	if strs.Truthy(strs.EnvValue(s.Env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")) {
 		return nil
 	}
 	if s.gatewayReady(context.Background()) {
 		return nil
 	}
-	if strs.Truthy(s.env("S46_TEST_START_GATEWAY_OK")) {
-		s.setEnv("S46_TEST_GATEWAY_READY", "1")
-		return nil
+	if handled, err := s.seamStartGateway(); handled {
+		return err
 	}
 	if s.gatewayResponding(context.Background()) {
 		return fmt.Errorf("local S46 API at %s is running but is not airplane-ready; run `s46 airplane setup` to restart it in airplane mode", s.gatewayURL())
@@ -76,14 +75,14 @@ func (s Service) gatewayBinary() (string, bool) {
 }
 
 func (s Service) gatewayCommand() (gatewayCommand, bool) {
-	if path := strings.TrimSpace(s.env("S46_API_BINARY")); path != "" {
+	if path := strings.TrimSpace(strs.EnvValue(s.Env, "S46_API_BINARY")); path != "" {
 		if executableFile(path) {
 			return gatewayCommand{Path: path, Description: path}, true
 		}
 		return gatewayCommand{}, false
 	}
-	if path := strings.TrimSpace(s.env("S46_TEST_GATEWAY_BINARY")); path != "" {
-		if path == "missing" {
+	if path, installed, ok := s.seamGatewayBinary(); ok {
+		if !installed {
 			return gatewayCommand{}, false
 		}
 		return gatewayCommand{Path: path, Description: path}, true
@@ -101,7 +100,7 @@ func (s Service) gatewayCommand() (gatewayCommand, bool) {
 }
 
 func (s Service) gatewaySourceCommand() (gatewayCommand, bool) {
-	candidate := strings.TrimSpace(s.env("S46_API_REPO"))
+	candidate := strings.TrimSpace(strs.EnvValue(s.Env, "S46_API_REPO"))
 	goPath, goErr := exec.LookPath("go")
 	if candidate == "" || goErr != nil {
 		return gatewayCommand{}, false
@@ -114,7 +113,7 @@ func (s Service) gatewaySourceCommand() (gatewayCommand, bool) {
 }
 
 func (s Service) gatewayURL() string {
-	return strs.FirstNonEmpty(s.env("S46_AIRPLANE_GATEWAY_URL"), LocalGatewayURL)
+	return strs.FirstNonEmpty(strs.EnvValue(s.Env, "S46_AIRPLANE_GATEWAY_URL"), LocalGatewayURL)
 }
 
 func (s Service) gatewayMessage(ctx context.Context, ready bool, path string) string {

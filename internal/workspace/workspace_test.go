@@ -64,3 +64,42 @@ func TestResolveReturnsContextWithMode(t *testing.T) {
 		t.Fatalf("Team.Endpoint = %q", ctx.Team.Endpoint)
 	}
 }
+
+func TestResolveCloudTeamReportsCloudMode(t *testing.T) {
+	store := newTestStore(t)
+	team := api.Team{Name: "acme", Endpoint: "https://acme.s46.dev", Lane: "EU-OPO", DefaultModel: api.DefaultModel}
+	cfg := config.Config{ActiveTeam: "acme", Teams: map[string]config.TeamConfig{"acme": config.TeamConfigFromAPI(team, "standard", api.DefaultModel, config.ModeCloud)}}
+	if err := store.SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	ctx, err := Resolve(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ctx.IsAirplane() {
+		t.Fatalf("expected cloud mode, got %q", ctx.Mode)
+	}
+	if ctx.Mode != config.ModeCloud {
+		t.Fatalf("Mode = %q, want %q", ctx.Mode, config.ModeCloud)
+	}
+}
+
+func TestMissingTeamErrorMessageMentionsTeam(t *testing.T) {
+	t.Parallel()
+	err := &MissingTeamError{TeamName: "acme"}
+	if msg := err.Error(); msg == "" || msg == "<nil>" {
+		t.Fatalf("empty error message")
+	}
+	if !contains(err.Error(), "acme") {
+		t.Errorf("error should mention team name: %q", err.Error())
+	}
+}
+
+func contains(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}

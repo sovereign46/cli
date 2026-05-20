@@ -84,7 +84,7 @@ func resolveAirplaneLogFiles(env map[string]string, files []airplane.LogFile) []
 }
 
 func discoverAirplaneLogPath(env map[string]string, file airplane.LogFile) string {
-	if override := testAirplaneLogPath(env, file.Name); override != "" {
+	if override, ok := seamAirplaneLogPath(env, file.Name); ok && fileExists(override) {
 		return override
 	}
 	filename := filepath.Base(file.Path)
@@ -96,17 +96,6 @@ func discoverAirplaneLogPath(env map[string]string, file airplane.LogFile) strin
 	}
 	candidates = append(candidates, devShellLogCandidates(filename)...)
 	return newestExistingFile(candidates)
-}
-
-func testAirplaneLogPath(env map[string]string, name string) string {
-	if env == nil {
-		return ""
-	}
-	path := strings.TrimSpace(env["S46_TEST_LOG_"+strings.ToUpper(name)])
-	if fileExists(path) {
-		return path
-	}
-	return ""
 }
 
 func airplaneLogPort(env map[string]string, name string) string {

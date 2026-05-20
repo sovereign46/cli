@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -247,6 +248,47 @@ func TestListErrorsWhenNoActiveTeam(t *testing.T) {
 	if !strings.Contains(err.Error(), "no active team") {
 		t.Fatalf("expected no-active-team error, got: %v", err)
 	}
+}
+
+func TestRenderShareHTMLEscapesValues(t *testing.T) {
+	t.Parallel()
+	got := renderShareHTML(api.Session{ID: "<x>&y", State: "running", Harness: "claude-code", Location: "box-01", Model: "s46/kimi", Spent: "€4.20", Task: "<script>alert(1)</script>"})
+	for _, want := range []string{"&lt;x&gt;&amp;y", "running", "claude-code", "box-01", "s46/kimi", "€4.20", "&lt;script&gt;alert(1)&lt;/script&gt;"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("HTML missing %q:\n%s", want, got)
+		}
+	}
+	if !strings.HasPrefix(got, "<!doctype html>") {
+		t.Errorf("expected doctype prefix, got: %q", got[:32])
+	}
+}
+
+func TestLandReturnsAPIErrorUnchanged(t *testing.T) {
+	home := t.TempDir()
+	env := map[string]string{
+		"HOME":            home,
+		"XDG_CONFIG_HOME": home + "/.config",
+		"XDG_DATA_HOME":   home + "/.data",
+	}
+	store := config.NewStore(env, "")
+	team := api.Team{Name: "s46", Endpoint: "https://s46.s46.dev", Lane: "EU-OPO", DefaultModel: api.DefaultModel}
+	if err := store.SaveConfig(config.Config{ActiveTeam: "s46", Teams: map[string]config.TeamConfig{"s46": config.TeamConfigFromAPI(team, "standard", api.DefaultModel, config.ModeCloud)}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveState(config.State{Authenticated: true, CurrentUser: "nunojob@icloud.com"}); err != nil {
+		t.Fatal(err)
+	}
+	svc := Service{API: errLandAPI{MockClient: api.NewMockClient()}, Config: store}
+	_, err := svc.Land(context.Background(), "@nunojob/task", "Fix X")
+	if err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("expected propagated error, got %v", err)
+	}
+}
+
+type errLandAPI struct{ *api.MockClient }
+
+func (errLandAPI) Land(ctx context.Context, req api.LandRequest) (api.LandResult, error) {
+	return api.LandResult{}, errors.New("boom")
 }
 
 func TestIDForTaskUsesUserSlugAndFallback(t *testing.T) {
