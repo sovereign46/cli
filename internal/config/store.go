@@ -17,15 +17,29 @@ type Config struct {
 }
 
 type TeamConfig struct {
-	SchemaVersion  int      `json:"schemaVersion"`
-	Endpoint       string   `json:"endpoint"`
-	Lane           string   `json:"lane"`
-	Mode           string   `json:"mode"`
-	DefaultHarness string   `json:"defaultHarness"`
-	DefaultModel   string   `json:"defaultModel"`
-	Boxes          []string `json:"boxes,omitempty"`
-	Models         []string `json:"models,omitempty"`
-	APISnapshot    api.Team `json:"apiSnapshot"`
+	SchemaVersion   int              `json:"schemaVersion"`
+	Endpoint        string           `json:"endpoint"`
+	Lane            string           `json:"lane"`
+	Mode            string           `json:"mode"`
+	DefaultHarness  string           `json:"defaultHarness"`
+	DefaultModel    string           `json:"defaultModel"`
+	Boxes           []string         `json:"boxes,omitempty"`
+	Models          []string         `json:"models,omitempty"`
+	APISnapshot     api.Team         `json:"apiSnapshot"`
+	HarnessSnapshot *HarnessSnapshot `json:"harnessSnapshot,omitempty"`
+}
+
+type HarnessSnapshot struct {
+	Harness string                `json:"harness"`
+	Files   []HarnessFileSnapshot `json:"files,omitempty"`
+}
+
+type HarnessFileSnapshot struct {
+	Path        string `json:"path"`
+	DisplayPath string `json:"displayPath,omitempty"`
+	Existed     bool   `json:"existed"`
+	Content     string `json:"content,omitempty"`
+	Mode        uint32 `json:"mode,omitempty"`
 }
 
 type State struct {

@@ -23,6 +23,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Fixed `s46 airplane mode off` to restore harness files to their pre-airplane state instead of regenerating generic cloud config.
 - Fixed `s46 airplane setup` to offer restarting an existing `s46-api` listener in airplane mode when it owns the local gateway port but is not airplane-ready.
 - Fixed `s46 airplane logs` to discover log files attached to running Ollama/gateway processes started from another shell.
 - Fixed `make shell` to write S46 airplane logs to a stable host log directory via `S46_LOG_DIR` so logs survive temporary shell cleanup.

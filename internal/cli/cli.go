@@ -2848,6 +2848,7 @@ func airplaneModeOn(ctx context.Context, app *app) error {
 }
 
 func enableAirplaneMode(ctx context.Context, app *app, service airplane.Service, cfg config.Config, teamName string, teamConfig config.TeamConfig, report airplane.Report) error {
+	wasAirplane := activeMode(cfg) == airplane.ModeAirplane || teamConfig.Mode == airplane.ModeAirplane || isLocalEndpoint(teamConfig.Endpoint)
 	if app.options.dryRun {
 		if app.options.json {
 			return app.renderer.WriteJSON(map[string]any{"mode": airplane.ModeAirplane, "team": teamName, "endpoint": airplane.LocalGatewayURL, "model": airplane.LocalModelID, "dryRun": true})
@@ -2922,6 +2923,13 @@ func enableAirplaneMode(ctx context.Context, app *app, service airplane.Service,
 	if teamConfig.DefaultHarness == "" {
 		teamConfig.DefaultHarness = harness.DefaultName
 	}
+	adapter, plan, err := planHarnessConfig(ctx, app, teamName, teamConfig)
+	if err != nil {
+		return err
+	}
+	if !wasAirplane && teamConfig.HarnessSnapshot == nil {
+		teamConfig.HarnessSnapshot = snapshotHarnessPlan(plan)
+	}
 	if cfg.Teams == nil {
 		cfg.Teams = map[string]config.TeamConfig{}
 	}
@@ -2932,7 +2940,7 @@ func enableAirplaneMode(ctx context.Context, app *app, service airplane.Service,
 		if err := app.config.SaveConfig(cfg); err != nil {
 			return err
 		}
-		if err := applyHarnessConfig(ctx, app, teamName, teamConfig); err != nil {
+		if _, err := adapter.ApplyConnect(ctx, plan); err != nil {
 			return err
 		}
 	}
@@ -2953,14 +2961,20 @@ func airplaneModeOff(ctx context.Context, app *app) error {
 	if err != nil {
 		return err
 	}
+	snapshot := teamConfig.HarnessSnapshot
 	restored := restoreCloudTeamConfig(teamName, teamConfig)
+	restored.HarnessSnapshot = nil
 	cfg.Mode = airplane.ModeCloud
 	cfg.Teams[teamName] = restored
 	if !app.options.dryRun {
-		if err := app.config.SaveConfig(cfg); err != nil {
+		if snapshot != nil {
+			if err := restoreHarnessSnapshot(app.runtime.Env, *snapshot); err != nil {
+				return err
+			}
+		} else if err := applyHarnessConfig(ctx, app, teamName, restored); err != nil {
 			return err
 		}
-		if err := applyHarnessConfig(ctx, app, teamName, restored); err != nil {
+		if err := app.config.SaveConfig(cfg); err != nil {
 			return err
 		}
 	}
@@ -3060,12 +3074,7 @@ func restoreCloudTeamConfig(teamName string, teamConfig config.TeamConfig) confi
 }
 
 func applyHarnessConfig(ctx context.Context, app *app, teamName string, teamConfig config.TeamConfig) error {
-	adapter, err := app.harness.Get(firstNonEmpty(teamConfig.DefaultHarness, harness.DefaultName))
-	if err != nil {
-		return err
-	}
-	team := teamConfig.API(teamName)
-	plan, err := adapter.PlanConnect(ctx, harness.ConnectRequest{Env: app.runtime.Env, Team: team, Model: teamConfig.DefaultModel, Mode: teamConfig.Mode, Scope: "user", DryRun: app.options.dryRun})
+	adapter, plan, err := planHarnessConfig(ctx, app, teamName, teamConfig)
 	if err != nil {
 		return err
 	}
@@ -3074,6 +3083,67 @@ func applyHarnessConfig(ctx context.Context, app *app, teamName string, teamConf
 	}
 	_, err = adapter.ApplyConnect(ctx, plan)
 	return err
+}
+
+func planHarnessConfig(ctx context.Context, app *app, teamName string, teamConfig config.TeamConfig) (harness.Adapter, harness.Plan, error) {
+	adapter, err := app.harness.Get(firstNonEmpty(teamConfig.DefaultHarness, harness.DefaultName))
+	if err != nil {
+		return nil, harness.Plan{}, err
+	}
+	team := teamConfig.API(teamName)
+	plan, err := adapter.PlanConnect(ctx, harness.ConnectRequest{Env: app.runtime.Env, Team: team, Model: teamConfig.DefaultModel, Mode: teamConfig.Mode, Scope: "user", DryRun: app.options.dryRun})
+	if err != nil {
+		return nil, harness.Plan{}, err
+	}
+	return adapter, plan, nil
+}
+
+func snapshotHarnessPlan(plan harness.Plan) *config.HarnessSnapshot {
+	if len(plan.Files) == 0 {
+		return nil
+	}
+	snapshot := &config.HarnessSnapshot{Harness: plan.Harness, Files: make([]config.HarnessFileSnapshot, 0, len(plan.Files))}
+	for _, file := range plan.Files {
+		mode := file.Mode
+		existed := false
+		if info, err := os.Stat(file.Path); err == nil {
+			existed = true
+			mode = info.Mode().Perm()
+		}
+		if mode == 0 {
+			mode = 0o600
+		}
+		snapshot.Files = append(snapshot.Files, config.HarnessFileSnapshot{
+			Path:        file.Path,
+			DisplayPath: file.DisplayPath,
+			Existed:     existed,
+			Content:     string(file.OldContent),
+			Mode:        uint32(mode),
+		})
+	}
+	return snapshot
+}
+
+func restoreHarnessSnapshot(env map[string]string, snapshot config.HarnessSnapshot) error {
+	for _, file := range snapshot.Files {
+		if _, err := config.BackupIfExists(file.Path); err != nil {
+			return err
+		}
+		if !file.Existed {
+			if err := os.Remove(file.Path); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+			continue
+		}
+		mode := os.FileMode(file.Mode)
+		if mode == 0 {
+			mode = 0o600
+		}
+		if err := config.WriteFileAtomic(file.Path, []byte(file.Content), mode); err != nil {
+			return fmt.Errorf("restore %s: %w", config.DisplayPath(file.Path, env), err)
+		}
+	}
+	return nil
 }
 
 func promptYesNo(app *app, prompt string, fallback bool) (bool, error) {
