@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sovereign46/s46-cli/internal/airplane"
 )
 
 type commandResult struct {
@@ -37,6 +39,7 @@ func testEnv(t *testing.T) map[string]string {
 		"S46_SKIP_STARTUP_UPDATE_CHECK":  "1",
 		"S46_AIRPLANE_SKIP_SETUP_CHECKS": "1",
 		"S46_TEST_GATEWAY_RESPONDING":    "0",
+		"S46_TEST_OLLAMA_RUNNING":        "0",
 		"S46_TEST_LISTENER_DEFAULT":      "missing",
 	}
 }
@@ -483,6 +486,64 @@ func TestAirplaneSetupContinuesAfterInstallingOllama(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("setup output missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestStatusShowsOllamaRuntime(t *testing.T) {
+	env := testEnv(t)
+	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "connect", "acme", "--harness=standard"))
+	env["S46_TEST_OLLAMA_RUNNING"] = "1"
+	env["S46_TEST_OLLAMA_PROCESS_KIND"] = "manual"
+	env["S46_TEST_OLLAMA_PROCESS_ENV"] = "OLLAMA_CONTEXT_LENGTH=65536 OLLAMA_KEEP_ALIVE=10m OLLAMA_NUM_PARALLEL=1 OLLAMA_MAX_LOADED_MODELS=1 OLLAMA_FLASH_ATTENTION=1 OLLAMA_KV_CACHE_TYPE=q8_0"
+	env["S46_TEST_OLLAMA_LIST"] = airplane.BackendModel
+	env["S46_TEST_OLLAMA_PS"] = airplane.BackendModel + ":65536"
+
+	out := requireOK(t, run(t, env, "status"))
+	for _, want := range []string{
+		"[s46] Ollama server: manual",
+		"[s46] ollama list: devstral-small-2:24b-instruct-2512-q4_K_M",
+		"[s46] ollama ps: devstral-small-2:24b-instruct-2512-q4_K_M · context 65536",
+		"[s46] Ollama OLLAMA_CONTEXT_LENGTH: want 65536 · process 65536 (ok)",
+		"[s46] Ollama OLLAMA_KV_CACHE_TYPE: want q8_0 · process q8_0 (ok)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("status output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestAirplaneSetupConfiguresMacOSGUIOllamaLaunchctl(t *testing.T) {
+	env := testEnv(t)
+	delete(env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")
+	env["S46_TEST_MEMORY_BYTES"] = "68000000000"
+	env["S46_TEST_FREE_DISK_BYTES"] = "61000000000"
+	env["S46_TEST_OLLAMA_PATH"] = "/opt/homebrew/bin/ollama"
+	env["S46_TEST_OLLAMA_RUNNING"] = "1"
+	env["S46_TEST_MODEL_DOWNLOADED"] = "1"
+	env["S46_TEST_MODEL_PROBE"] = "1"
+	env["S46_TEST_GATEWAY_BINARY"] = "/tmp/s46-api"
+	env["S46_TEST_GATEWAY_READY"] = "1"
+	env["S46_TEST_OLLAMA_PROCESS_KIND"] = "macos-gui"
+	env["S46_TEST_LAUNCHCTL_ENV"] = "OLLAMA_CONTEXT_LENGTH=262144 OLLAMA_KEEP_ALIVE=60s OLLAMA_NUM_PARALLEL=4 OLLAMA_MAX_LOADED_MODELS=3 OLLAMA_FLASH_ATTENTION=0 OLLAMA_KV_CACHE_TYPE=f16"
+	env["S46_TEST_OLLAMA_PROCESS_ENV"] = env["S46_TEST_LAUNCHCTL_ENV"]
+	env["S46_TEST_CONFIGURE_LAUNCHCTL_OK"] = "1"
+
+	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\nn\n"), "airplane", "setup"))
+	for _, want := range []string{
+		"[s46] macOS GUI Ollama is running without the recommended airplane settings.",
+		"[s46] Configure macOS Ollama launchd settings now? [Y/n]",
+		"[s46] updated macOS Ollama launchd settings.",
+		"[s46] Fully quit and restart Ollama so the GUI app picks up the new settings.",
+		"[s46] airplane setup: ready",
+		"[s46] Airplane mode was not offered because Ollama needs to be restarted with airplane settings.",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("setup output missing %q:\n%s", want, out)
+		}
+	}
+	if !strings.Contains(env["S46_TEST_LAUNCHCTL_ENV"], "OLLAMA_CONTEXT_LENGTH=65536") {
+		t.Fatalf("expected launchctl env to be updated: %s", env["S46_TEST_LAUNCHCTL_ENV"])
 	}
 }
 

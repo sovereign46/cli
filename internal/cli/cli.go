@@ -1429,6 +1429,7 @@ func statusCommand(runtime Runtime, opts *options) *cobra.Command {
 				}
 			}
 			localServers := statusLocalServers(app.runtime.Env, team)
+			ollamaRuntime := airplane.Service{Env: app.runtime.Env}.OllamaRuntime(cmd.Context())
 			result := map[string]any{
 				"authenticated": state.Authenticated,
 				"user":          state.CurrentUser,
@@ -1439,6 +1440,7 @@ func statusCommand(runtime Runtime, opts *options) *cobra.Command {
 				"statePath":     config.DisplayPath(app.config.StatePath, runtime.Env),
 				"checks":        checks,
 				"localServers":  localServers,
+				"ollama":        ollamaRuntime,
 				"mock":          true,
 			}
 			if opts.json {
@@ -1466,12 +1468,14 @@ func statusCommand(runtime Runtime, opts *options) *cobra.Command {
 				for _, server := range localServers {
 					lines = append(lines, renderLocalServerStatus(server))
 				}
+				lines = append(lines, renderOllamaRuntime(ollamaRuntime)...)
 				lines = append(lines, renderStatusChecks(checks)...)
 			} else {
 				lines = append(lines, "[s46] team:    none")
 				for _, server := range localServers {
 					lines = append(lines, renderLocalServerStatus(server))
 				}
+				lines = append(lines, renderOllamaRuntime(ollamaRuntime)...)
 				lines = append(lines, renderStatusChecks(checks)...)
 			}
 			lines = append(lines, fmt.Sprintf("[s46] sessions:%2d", len(state.Sessions)))
@@ -2310,6 +2314,11 @@ func runAirplaneSetup(ctx context.Context, app *app, allowPrompts bool) (airplan
 	}
 
 	changed := false
+	if configured, err := offerOllamaLaunchctlConfig(ctx, app, service); err != nil {
+		return report, err
+	} else if configured {
+		changed = true
+	}
 	if missingCheck(report, "ollama-installed") && service.HomebrewAvailable() {
 		if yes, err := promptYesNo(app, "[s46] Ollama is not installed.\n[s46] Install with Homebrew? [Y/n] ", true); err != nil {
 			return report, err
@@ -2410,6 +2419,76 @@ func runAirplaneSetup(ctx context.Context, app *app, allowPrompts bool) (airplan
 		}
 	}
 	return report, nil
+}
+
+func offerOllamaLaunchctlConfig(ctx context.Context, app *app, service airplane.Service) (bool, error) {
+	runtimeReport := service.OllamaRuntime(ctx)
+	if !runtimeReport.NeedsLaunchctlUpdate() {
+		return false, renderOllamaRestartGuidance(app, runtimeReport)
+	}
+	lines := []string{
+		"[s46] macOS GUI Ollama is running without the recommended airplane settings.",
+		"[s46] Recommended launchd settings:",
+	}
+	for _, setting := range airplane.AirplaneOllamaSettings(app.runtime.Env) {
+		lines = append(lines, fmt.Sprintf("[s46]   %s=%s", setting.Key, setting.Value))
+	}
+	if err := app.renderer.Lines(lines...); err != nil {
+		return false, err
+	}
+	if app.runtime.Stdin == nil {
+		return false, app.renderer.Lines("[s46] Run `s46 airplane setup` interactively to apply them with launchctl.")
+	}
+	if yes, err := promptYesNo(app, "[s46] Configure macOS Ollama launchd settings now? [Y/n] ", true); err != nil {
+		return false, err
+	} else if !yes {
+		return false, nil
+	}
+	if app.options.dryRun {
+		return false, app.renderer.Lines("[s46] dry-run: would run launchctl setenv for Ollama airplane settings")
+	}
+	if err := service.ConfigureMacOSOllamaLaunchd(ctx); err != nil {
+		return false, fmt.Errorf("failed to configure macOS Ollama launchd settings: %w", err)
+	}
+	return true, app.renderer.Lines(
+		"[s46] updated macOS Ollama launchd settings.",
+		"[s46] Fully quit and restart Ollama so the GUI app picks up the new settings.",
+	)
+}
+
+func ensureOllamaRuntimeSettings(ctx context.Context, app *app, service airplane.Service) error {
+	if truthy(app.runtime.Env["S46_AIRPLANE_SKIP_SETUP_CHECKS"]) {
+		return nil
+	}
+	runtimeReport := service.OllamaRuntime(ctx)
+	if runtimeReport.NeedsLaunchctlUpdate() {
+		return fmt.Errorf("macOS GUI Ollama launchd settings differ; run `s46 airplane setup` to apply them")
+	}
+	if runtimeReport.NeedsProcessRestart() {
+		if err := renderOllamaRestartGuidance(app, runtimeReport); err != nil {
+			return err
+		}
+		return fmt.Errorf("Ollama is running with different airplane settings")
+	}
+	return nil
+}
+
+func renderOllamaRestartGuidance(app *app, runtimeReport airplane.OllamaRuntime) error {
+	if !runtimeReport.NeedsProcessRestart() {
+		return nil
+	}
+	switch runtimeReport.Server {
+	case "macos-gui":
+		return app.renderer.Lines("[s46] Fully quit and restart Ollama so the GUI app picks up launchd settings.")
+	case "manual":
+		return app.renderer.Lines(
+			"[s46] Manual Ollama is running without the recommended airplane settings.",
+			"[s46] Restart it with:",
+			"[s46]   "+strings.Join(airplane.AirplaneOllamaEnv(app.runtime.Env), " ")+" ollama serve",
+		)
+	default:
+		return nil
+	}
 }
 
 func offerAirplaneGatewayRestart(ctx context.Context, app *app, service airplane.Service, report airplane.Report) (airplane.Report, bool, error) {
@@ -2594,6 +2673,10 @@ func offerAirplaneModeOnAfterSetup(ctx context.Context, app *app, report airplan
 	if !report.Ready {
 		return app.renderer.Lines("[s46] Airplane mode was not offered because setup is incomplete.")
 	}
+	service := airplane.Service{Env: app.runtime.Env, Stdin: app.runtime.Stdin, Stdout: app.runtime.Stdout, Stderr: app.runtime.Stderr, LogPrefix: "[s46]"}
+	if airplaneRuntimeNeedsRestart(ctx, app, service) {
+		return app.renderer.Lines("[s46] Airplane mode was not offered because Ollama needs to be restarted with airplane settings.")
+	}
 	cfg, teamName, teamConfig, err := airplaneModeTargetConfig(app)
 	if err != nil {
 		return err
@@ -2620,13 +2703,24 @@ func offerAirplaneModeOnAfterSetup(ctx context.Context, app *app, report airplan
 		return err
 	}
 	teamConfig.DefaultHarness = harnessName
-	service := airplane.Service{Env: app.runtime.Env, Stdin: app.runtime.Stdin, Stdout: app.runtime.Stdout, Stderr: app.runtime.Stderr, LogPrefix: "[s46]"}
 	return enableAirplaneMode(ctx, app, service, cfg, teamName, teamConfig, report)
 }
 
+func airplaneRuntimeNeedsRestart(ctx context.Context, app *app, service airplane.Service) bool {
+	if truthy(app.runtime.Env["S46_AIRPLANE_SKIP_SETUP_CHECKS"]) {
+		return false
+	}
+	runtimeReport := service.OllamaRuntime(ctx)
+	return runtimeReport.NeedsLaunchctlUpdate() || runtimeReport.NeedsProcessRestart()
+}
+
 func renderAirplaneReport(report airplane.Report) []string {
+	return renderAirplaneReportWithTitle(report, "airplane setup")
+}
+
+func renderAirplaneReportWithTitle(report airplane.Report, title string) []string {
 	lines := []string{
-		"[s46] airplane setup: checking local runtime",
+		fmt.Sprintf("[s46] %s: checking local runtime", title),
 		fmt.Sprintf("[s46] model: %s -> %s", report.Model, report.BackendModel),
 	}
 	for _, check := range report.Checks {
@@ -2650,11 +2744,94 @@ func renderAirplaneReport(report airplane.Report) []string {
 		)
 	}
 	if report.Ready {
-		lines = append(lines, "[s46] airplane setup: ready")
+		lines = append(lines, fmt.Sprintf("[s46] %s: ready", title))
 	} else {
-		lines = append(lines, "[s46] airplane setup: incomplete")
+		lines = append(lines, fmt.Sprintf("[s46] %s: incomplete", title))
 	}
 	return lines
+}
+
+func renderOllamaRuntime(runtimeReport airplane.OllamaRuntime) []string {
+	lines := []string{fmt.Sprintf("[s46] Ollama server: %s", renderOllamaServer(runtimeReport))}
+	if !runtimeReport.Running {
+		return lines
+	}
+	if len(runtimeReport.InstalledModels) > 0 {
+		lines = append(lines, fmt.Sprintf("[s46] ollama list: %s", strings.Join(runtimeReport.InstalledModels, ", ")))
+	}
+	if len(runtimeReport.LoadedModels) == 0 {
+		lines = append(lines, "[s46] ollama ps: no models loaded")
+	} else {
+		for _, model := range runtimeReport.LoadedModels {
+			contextText := "context unknown"
+			if model.ContextLength > 0 {
+				contextText = fmt.Sprintf("context %d", model.ContextLength)
+			}
+			until := ""
+			if model.ExpiresAt != "" {
+				until = " · expires " + model.ExpiresAt
+			}
+			lines = append(lines, fmt.Sprintf("[s46] ollama ps: %s · %s%s", firstNonEmpty(model.Name, model.Model), contextText, until))
+		}
+	}
+	lines = append(lines, renderOllamaSettings(runtimeReport)...)
+	if runtimeReport.NeedsLaunchctlUpdate() {
+		lines = append(lines, "[s46] macOS Ollama launchd settings differ; run `s46 airplane setup` to apply them.")
+	}
+	if runtimeReport.NeedsProcessRestart() {
+		switch runtimeReport.Server {
+		case "macos-gui":
+			lines = append(lines, "[s46] Fully quit and restart Ollama so the GUI app picks up launchd settings.")
+		case "manual":
+			lines = append(lines, "[s46] Restart manual `ollama serve` with the shown OLLAMA_* settings.")
+		}
+	}
+	return lines
+}
+
+func renderOllamaServer(runtimeReport airplane.OllamaRuntime) string {
+	if !runtimeReport.Running {
+		return "not running"
+	}
+	parts := []string{runtimeReport.Server}
+	if runtimeReport.PID > 0 {
+		parts = append(parts, fmt.Sprintf("pid %d", runtimeReport.PID))
+	}
+	if runtimeReport.Command != "" {
+		parts = append(parts, runtimeReport.Command)
+	}
+	return strings.Join(parts, " · ")
+}
+
+func renderOllamaSettings(runtimeReport airplane.OllamaRuntime) []string {
+	lines := []string{}
+	for _, setting := range runtimeReport.Settings {
+		parts := []string{fmt.Sprintf("want %s", setting.Expected)}
+		if runtimeReport.LaunchctlKnown {
+			parts = append(parts, fmt.Sprintf("launchctl %s", renderSettingValue(setting.Launchctl, setting.LaunchctlOK)))
+		}
+		if setting.ProcessKnown {
+			parts = append(parts, fmt.Sprintf("process %s", renderSettingValue(setting.Process, setting.ProcessOK)))
+		}
+		lines = append(lines, fmt.Sprintf("[s46] Ollama %s: %s", setting.Key, strings.Join(parts, " · ")))
+	}
+	if runtimeReport.LaunchctlSupported && !runtimeReport.LaunchctlKnown {
+		lines = append(lines, "[s46] Ollama launchctl env: unavailable")
+	}
+	if runtimeReport.Running && !runtimeReport.ProcessEnvKnown {
+		lines = append(lines, "[s46] Ollama process env: unavailable")
+	}
+	return lines
+}
+
+func renderSettingValue(value string, ok bool) string {
+	if value == "" {
+		value = "unset"
+	}
+	if ok {
+		return value + " (ok)"
+	}
+	return value + " (differs)"
 }
 
 func airplaneModeOn(ctx context.Context, app *app) error {
@@ -2719,6 +2896,9 @@ func enableAirplaneMode(ctx context.Context, app *app, service airplane.Service,
 		if !report.Ready {
 			return fmt.Errorf("airplane setup is still incomplete")
 		}
+	}
+	if err := ensureOllamaRuntimeSettings(ctx, app, service); err != nil {
+		return err
 	}
 	if err := service.StartOllama(); err != nil {
 		return fmt.Errorf("could not start Ollama: %w", err)

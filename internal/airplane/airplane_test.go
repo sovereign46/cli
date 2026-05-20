@@ -97,18 +97,20 @@ func TestHTTPClientUsesRequestedTimeout(t *testing.T) {
 }
 
 func TestAirplaneRuntimeEnvDefaultsAndOverrides(t *testing.T) {
-	if ContextWindow(nil) != 32768 || MaxTokens(nil) != 4096 || KeepAlive(nil) != "10m" || GatewayWriteTimeout(nil) != "10m" || NumParallel(nil) != 1 || MaxLoadedModels(nil) != 1 {
+	if ContextWindow(nil) != 65536 || MaxTokens(nil) != 4096 || KeepAlive(nil) != "10m" || GatewayWriteTimeout(nil) != "10m" || NumParallel(nil) != 1 || MaxLoadedModels(nil) != 1 || FlashAttention(nil) != "1" || KVCacheType(nil) != "q8_0" {
 		t.Fatalf("unexpected defaults")
 	}
 	env := map[string]string{
-		"S46_AIRPLANE_CONTEXT":           "65536",
+		"S46_AIRPLANE_CONTEXT":           "32768",
 		"S46_AIRPLANE_MAX_TOKENS":        "8192",
 		"S46_AIRPLANE_KEEP_ALIVE":        "5m",
 		"S46_AIRPLANE_NUM_PARALLEL":      "2",
 		"S46_AIRPLANE_MAX_LOADED_MODELS": "3",
 		"S46_WRITE_TIMEOUT":              "7m",
+		"OLLAMA_FLASH_ATTENTION":         "0",
+		"OLLAMA_KV_CACHE_TYPE":           "q4_0",
 	}
-	if ContextWindow(env) != 65536 || MaxTokens(env) != 8192 || KeepAlive(env) != "5m" || GatewayWriteTimeout(env) != "7m" || NumParallel(env) != 2 || MaxLoadedModels(env) != 3 {
+	if ContextWindow(env) != 32768 || MaxTokens(env) != 8192 || KeepAlive(env) != "5m" || GatewayWriteTimeout(env) != "7m" || NumParallel(env) != 2 || MaxLoadedModels(env) != 3 || FlashAttention(env) != "0" || KVCacheType(env) != "q4_0" {
 		t.Fatalf("unexpected overrides")
 	}
 }
@@ -146,8 +148,38 @@ func TestStartOllamaStopsLoadedModelWhenContextIsTooLarge(t *testing.T) {
 	if err := (Service{Env: env}).StartOllama(); err != nil {
 		t.Fatal(err)
 	}
-	if env["S46_TEST_OLLAMA_LOADED_CONTEXT"] != "32768" {
+	if env["S46_TEST_OLLAMA_LOADED_CONTEXT"] != "65536" {
 		t.Fatalf("expected loaded model context to be reset, env=%#v", env)
+	}
+}
+
+func TestOllamaRuntimeReportsGUISettings(t *testing.T) {
+	env := map[string]string{
+		"S46_TEST_OLLAMA_RUNNING":      "1",
+		"S46_TEST_OLLAMA_PROCESS_KIND": "macos-gui",
+		"S46_TEST_LAUNCHCTL_ENV":       "OLLAMA_FLASH_ATTENTION=0 OLLAMA_KV_CACHE_TYPE=q8_0 OLLAMA_NUM_PARALLEL=1 OLLAMA_CONTEXT_LENGTH=65536 OLLAMA_KEEP_ALIVE=10m OLLAMA_MAX_LOADED_MODELS=1",
+		"S46_TEST_OLLAMA_PROCESS_ENV":  "OLLAMA_FLASH_ATTENTION=0 OLLAMA_KV_CACHE_TYPE=f16 OLLAMA_NUM_PARALLEL=2 OLLAMA_CONTEXT_LENGTH=262144 OLLAMA_KEEP_ALIVE=60s OLLAMA_MAX_LOADED_MODELS=3",
+		"S46_TEST_OLLAMA_LIST":         BackendModel,
+		"S46_TEST_OLLAMA_PS":           BackendModel + ":262144",
+	}
+	runtimeReport := Service{Env: env}.OllamaRuntime(context.Background())
+	if runtimeReport.Server != "macos-gui" || !runtimeReport.NeedsLaunchctlUpdate() || !runtimeReport.NeedsProcessRestart() {
+		t.Fatalf("unexpected runtime report: %#v", runtimeReport)
+	}
+	if len(runtimeReport.LoadedModels) != 1 || runtimeReport.LoadedModels[0].ContextLength != 262144 {
+		t.Fatalf("unexpected loaded models: %#v", runtimeReport.LoadedModels)
+	}
+}
+
+func TestConfigureMacOSOllamaLaunchdUsesAirplaneSettings(t *testing.T) {
+	env := map[string]string{"S46_TEST_CONFIGURE_LAUNCHCTL_OK": "1", "S46_AIRPLANE_CONTEXT": "32768"}
+	if err := (Service{Env: env}).ConfigureMacOSOllamaLaunchd(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"OLLAMA_CONTEXT_LENGTH=32768", "OLLAMA_FLASH_ATTENTION=1", "OLLAMA_KV_CACHE_TYPE=q8_0", "OLLAMA_NUM_PARALLEL=1", "OLLAMA_MAX_LOADED_MODELS=1"} {
+		if !strings.Contains(env["S46_TEST_LAUNCHCTL_ENV"], want) {
+			t.Fatalf("launchctl env missing %q: %s", want, env["S46_TEST_LAUNCHCTL_ENV"])
+		}
 	}
 }
 

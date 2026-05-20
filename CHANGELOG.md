@@ -15,7 +15,8 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Changed airplane gateway setup to use the `sovereign46/api` repository and fall back to cloning and building it when no gateway release archive is available.
 - Changed interactive harness selection to default to `claude-code`.
 - Changed `s46 airplane setup` to prompt for the harness to configure when enabling airplane mode interactively.
-- Changed airplane mode to configure local Ollama and supported harnesses with 32k context, 4096 max output tokens, one parallel request, one loaded model, 10m keep-alive, and 10m gateway write-timeout defaults, overridable with environment variables.
+- Changed airplane mode to configure local Ollama and supported harnesses with 64k context, 4096 max output tokens, one parallel request, one loaded model, Flash Attention, q8_0 KV cache, 10m keep-alive, and 10m gateway write-timeout defaults, overridable with environment variables.
+- Changed `s46 status` to include local Ollama runtime diagnostics and changed `s46 airplane setup` to detect macOS GUI Ollama and offer to apply recommended `launchctl` settings before local coding.
 - Moved active-team switching from `s46 use <team>` to `s46 teams use <team>`.
 - Renamed airplane model IDs from role-style names to concrete model names (`s46/devstral-small-2-24b`, `s46/qwen3-coder-30b`).
 - Changed Claude Code harness config to set the active model (`model` and `ANTHROPIC_MODEL`) in addition to alias defaults so airplane demos use the local S46 model.
