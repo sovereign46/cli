@@ -190,9 +190,13 @@ func SnapshotPlan(plan Plan) *config.HarnessSnapshot {
 	for _, file := range plan.Files {
 		mode := file.Mode
 		existed := false
+		content := file.OldContent
 		if info, err := os.Stat(file.Path); err == nil {
 			existed = true
 			mode = info.Mode().Perm()
+			if raw, err := os.ReadFile(file.Path); err == nil {
+				content = raw
+			}
 		}
 		if mode == 0 {
 			mode = 0o600
@@ -201,25 +205,39 @@ func SnapshotPlan(plan Plan) *config.HarnessSnapshot {
 			Path:        file.Path,
 			DisplayPath: file.DisplayPath,
 			Existed:     existed,
-			Content:     string(file.OldContent),
+			Content:     string(content),
 			Mode:        uint32(mode),
 		})
 	}
 	return snapshot
 }
 
-// RestoreSnapshot walks a HarnessSnapshot and either rewrites the
-// captured content or removes a file that didn't exist before. Existing
-// content is backed up first so a botched restore still leaves a copy
-// on disk.
-func RestoreSnapshot(env map[string]string, snapshot config.HarnessSnapshot) error {
+// ApplySnapshot walks a HarnessSnapshot and either rewrites the captured
+// content or removes a file that didn't exist before. Existing content is
+// backed up first and returned as an AppliedPlan, so callers can RollbackPlan
+// if a later file fails and they need to restore the pre-restore harness state.
+func ApplySnapshot(env map[string]string, snapshot config.HarnessSnapshot) (AppliedPlan, error) {
+	applied := AppliedPlan{Plan: Plan{Harness: snapshot.Harness}}
 	for _, file := range snapshot.Files {
-		if _, err := config.BackupIfExists(file.Path); err != nil {
-			return err
+		displayPath := file.DisplayPath
+		if displayPath == "" {
+			displayPath = config.DisplayPath(file.Path, env)
 		}
+		backup, err := config.BackupIfExists(file.Path)
+		if err != nil {
+			return applied, err
+		}
+		applied.Files = append(applied.Files, AppliedFile{
+			Path:           displayPath,
+			DisplayPath:    displayPath,
+			Kind:           "snapshot",
+			BackupPath:     config.DisplayPath(backup, env),
+			RealPath:       file.Path,
+			RealBackupPath: backup,
+		})
 		if !file.Existed {
 			if err := os.Remove(file.Path); err != nil && !os.IsNotExist(err) {
-				return err
+				return applied, err
 			}
 			continue
 		}
@@ -228,10 +246,17 @@ func RestoreSnapshot(env map[string]string, snapshot config.HarnessSnapshot) err
 			mode = 0o600
 		}
 		if err := config.WriteFileAtomic(file.Path, []byte(file.Content), mode); err != nil {
-			return fmt.Errorf("restore %s: %w", config.DisplayPath(file.Path, env), err)
+			return applied, fmt.Errorf("restore %s: %w", displayPath, err)
 		}
 	}
-	return nil
+	return applied, nil
+}
+
+// RestoreSnapshot restores a snapshot and leaves a backup of the replaced
+// harness state. Use ApplySnapshot directly when the caller needs rollback.
+func RestoreSnapshot(env map[string]string, snapshot config.HarnessSnapshot) error {
+	_, err := ApplySnapshot(env, snapshot)
+	return err
 }
 
 // RollbackPlan reverts an AppliedPlan: for each file it either restores

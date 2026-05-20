@@ -568,7 +568,7 @@ func airplaneModeOn(ctx context.Context, app *app) error {
 }
 
 func enableAirplaneMode(ctx context.Context, app *app, service airplane.Service, cfg config.Config, teamName string, teamConfig config.TeamConfig, report airplane.Report) error {
-	wasAirplane := cfg.ActiveMode() == config.ModeAirplane || isLocalEndpoint(teamConfig.Endpoint)
+	wasAirplane := cfg.ActiveMode() == config.ModeAirplane
 	if app.options.dryRun {
 		return renderAirplaneModeOnDryRun(app, teamName)
 	}
@@ -707,27 +707,20 @@ func airplaneModeOff(ctx context.Context, app *app) error {
 	}
 	snapshot := teamConfig.HarnessSnapshot
 	restored, hasCloudConfig := restoreCloudTeamConfig(teamName, teamConfig)
-	cfg.Mode = config.ModeCloud
+	cfgBefore := cfg.Clone()
+	cfgAfter := cfg.Clone()
+	cfgAfter.Mode = config.ModeCloud
 	if hasCloudConfig {
 		restored.HarnessSnapshot = nil
-		cfg.Teams[teamName] = restored
+		cfgAfter.Teams[teamName] = restored
 	} else {
-		delete(cfg.Teams, teamName)
-		if cfg.ActiveTeam == teamName {
-			cfg.ActiveTeam = ""
+		delete(cfgAfter.Teams, teamName)
+		if cfgAfter.ActiveTeam == teamName {
+			cfgAfter.ActiveTeam = ""
 		}
 	}
 	if !app.options.dryRun {
-		if snapshot != nil {
-			if err := harness.RestoreSnapshot(app.runtime.Env, *snapshot); err != nil {
-				return err
-			}
-		} else if hasCloudConfig {
-			if err := applyHarnessConfig(ctx, app, teamName, restored, config.ModeCloud); err != nil {
-				return err
-			}
-		}
-		if err := app.config.SaveConfig(cfg); err != nil {
+		if err := applyAtomicModeOff(ctx, app, cfgBefore, cfgAfter, teamName, teamConfig.DefaultHarness, restored, hasCloudConfig, snapshot); err != nil {
 			return err
 		}
 	}
@@ -756,6 +749,47 @@ func airplaneModeOff(ctx context.Context, app *app) error {
 		lines = append(lines, fmt.Sprintf("[s46] removed local airplane team: %s", teamName))
 	}
 	return app.renderer.Lines(lines...)
+}
+
+func applyAtomicModeOff(ctx context.Context, app *app, before, after config.Config, teamName string, harnessName string, restored config.TeamConfig, hasCloudConfig bool, snapshot *config.HarnessSnapshot) error {
+	if snapshot != nil {
+		return applyAtomicConfigAndSnapshot(app, before, after, *snapshot, "airplane mode off")
+	}
+	if hasCloudConfig {
+		adapter, plan, err := planHarnessConfig(ctx, app, teamName, restored, config.ModeCloud)
+		if err != nil {
+			return err
+		}
+		if len(plan.Files) > 0 {
+			return missingHarnessSnapshotError(plan.Harness)
+		}
+		_, err = applyAtomicConfigAndHarness(ctx, app, before, after, adapter, plan, "airplane mode off")
+		return err
+	}
+	if strs.FirstNonEmpty(harnessName, harness.DefaultName) != "standard" {
+		return missingHarnessSnapshotError(strs.FirstNonEmpty(harnessName, harness.DefaultName))
+	}
+	if err := app.config.SaveConfig(after); err != nil {
+		return fmt.Errorf("airplane mode off: save config: %w", err)
+	}
+	return nil
+}
+
+func missingHarnessSnapshotError(harnessName string) error {
+	return fmt.Errorf("airplane mode off: missing pre-airplane harness snapshot for %s; refusing to rewrite harness config without an exact backup", harnessName)
+}
+
+func applyAtomicConfigAndSnapshot(app *app, before, after config.Config, snapshot config.HarnessSnapshot, op string) error {
+	if err := app.config.SaveConfig(after); err != nil {
+		return fmt.Errorf("%s: save config: %w", op, err)
+	}
+	applied, err := harness.ApplySnapshot(app.runtime.Env, snapshot)
+	if err == nil {
+		return nil
+	}
+	rollbackErr := harness.RollbackPlan(applied)
+	saveErr := app.config.SaveConfig(before)
+	return joinAtomicErrors(op, err, rollbackErr, saveErr)
 }
 
 func activeTeamConfig(app *app) (config.Config, string, config.TeamConfig, error) {

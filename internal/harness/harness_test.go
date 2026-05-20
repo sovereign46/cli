@@ -140,7 +140,7 @@ func TestSnapshotAndRestorePlan(t *testing.T) {
 	plan := Plan{
 		Harness: "test",
 		Files: []FilePlan{
-			{Path: existing, Content: []byte(`new`), OldContent: []byte(`old`), Mode: 0o600},
+			{Path: existing, Content: []byte(`new`), OldContent: []byte(`stale-plan-content`), Mode: 0o600},
 			{Path: missing, Content: []byte(`new`), Mode: 0o600},
 		},
 	}

@@ -45,6 +45,85 @@ func (a *failingAdapter) Apply(ctx context.Context, plan harness.Plan) (harness.
 	return partial, errors.New("inject: apply failed on second file")
 }
 
+func TestApplyAtomicConfigAndSnapshotDoesNotTouchHarnessWhenConfigSaveFails(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	if err := os.MkdirAll(configPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store := config.NewStore(map[string]string{"HOME": dir}, configPath)
+	before := config.DefaultConfig()
+	after := config.DefaultConfig()
+	after.Mode = config.ModeCloud
+
+	target := filepath.Join(dir, "settings.json")
+	if err := os.WriteFile(target, []byte("AIRPLANE"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := config.HarnessSnapshot{Harness: "test", Files: []config.HarnessFileSnapshot{{Path: target, Existed: true, Content: "CLOUD", Mode: 0o600}}}
+	app := &app{config: store, runtime: Runtime{Env: map[string]string{"HOME": dir}}, options: &options{}}
+
+	err := applyAtomicConfigAndSnapshot(app, before, after, snapshot, "test")
+	if err == nil || !strings.Contains(err.Error(), "save config") {
+		t.Fatalf("expected config save failure, got %v", err)
+	}
+	contents, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "AIRPLANE" {
+		t.Fatalf("harness changed despite config save failure: %q", contents)
+	}
+}
+
+func TestApplyAtomicConfigAndSnapshotRollsBackHarnessAndConfig(t *testing.T) {
+	dir := t.TempDir()
+	env := map[string]string{"HOME": dir, "XDG_CONFIG_HOME": filepath.Join(dir, ".config"), "XDG_DATA_HOME": filepath.Join(dir, ".data")}
+	store := config.NewStore(env, "")
+	before := config.DefaultConfig()
+	before.Mode = config.ModeAirplane
+	before.ActiveTeam = "acme"
+	before.Teams["acme"] = config.TeamConfig{Endpoint: "http://127.0.0.1:8080"}
+	if err := store.SaveConfig(before); err != nil {
+		t.Fatal(err)
+	}
+	after := before.Clone()
+	after.Mode = config.ModeCloud
+
+	target := filepath.Join(dir, "settings.json")
+	if err := os.WriteFile(target, []byte("AIRPLANE"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	blockingParent := filepath.Join(dir, "not-a-directory")
+	if err := os.WriteFile(blockingParent, []byte("block"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := config.HarnessSnapshot{Harness: "test", Files: []config.HarnessFileSnapshot{
+		{Path: target, Existed: true, Content: "CLOUD", Mode: 0o600},
+		{Path: filepath.Join(blockingParent, "settings.json"), Existed: true, Content: "CLOUD", Mode: 0o600},
+	}}
+	app := &app{config: store, runtime: Runtime{Env: env}, options: &options{}}
+
+	err := applyAtomicConfigAndSnapshot(app, before, after, snapshot, "test")
+	if err == nil || !strings.Contains(err.Error(), "test failed") {
+		t.Fatalf("expected restore failure, got %v", err)
+	}
+	contents, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "AIRPLANE" {
+		t.Fatalf("harness rollback failed: %q", contents)
+	}
+	got, err := store.LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ActiveMode() != config.ModeAirplane || got.ActiveTeam != "acme" {
+		t.Fatalf("config rollback failed: %#v", got)
+	}
+}
+
 func TestApplyAtomicConfigAndHarnessRollsBackBoth(t *testing.T) {
 	dir := t.TempDir()
 	env := map[string]string{

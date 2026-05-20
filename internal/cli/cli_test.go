@@ -648,6 +648,48 @@ func TestAirplaneSetupCanTurnOnAirplaneModeWithoutLogin(t *testing.T) {
 	if !strings.Contains(teams, "[s46] no connected teams") {
 		t.Fatalf("expected local-only airplane team to be removed, got:\n%s", teams)
 	}
+	settingsPath := filepath.Join(env["HOME"], ".claude", "settings.json")
+	if _, err := os.Stat(settingsPath); !os.IsNotExist(err) {
+		t.Fatalf("expected local-only harness config to be removed, stat err=%v", err)
+	}
+}
+
+func TestAirplaneModeOffRefusesExternalHarnessWithoutSnapshot(t *testing.T) {
+	env := testEnv(t)
+	store := config.NewStore(env, "")
+	cfg := config.DefaultConfig()
+	cfg.Mode = config.ModeAirplane
+	cfg.ActiveTeam = "local"
+	cfg.Teams["local"] = config.TeamConfig{Endpoint: airplane.LocalGatewayURL, DefaultHarness: "claude-code", DefaultModel: airplane.LocalModelID}
+	if err := store.SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(env["HOME"], ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, []byte("AIRPLANE"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result := run(t, env, "airplane", "mode", "off")
+	if result.err == nil || !strings.Contains(result.err.Error(), "missing pre-airplane harness snapshot") {
+		t.Fatalf("expected missing snapshot error, got err=%v stdout=%q", result.err, result.stdout)
+	}
+	contents, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "AIRPLANE" {
+		t.Fatalf("harness changed without snapshot: %q", contents)
+	}
+	got, err := store.LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ActiveMode() != config.ModeAirplane || got.ActiveTeam != "local" {
+		t.Fatalf("config changed without snapshot: %#v", got)
+	}
 }
 
 func TestAirplaneModeOffRestoresPiModelsJSON(t *testing.T) {
@@ -679,6 +721,82 @@ func TestAirplaneSetupHarnessSelectionRestoresPiModelsJSON(t *testing.T) {
 
 	requireOK(t, run(t, env, "airplane", "mode", "off"))
 	assertRestoredPiConfig(t, env, modelsPath, originalRaw)
+}
+
+func TestAirplaneModeOffRestoresManagedHarnessesExactly(t *testing.T) {
+	cases := []struct {
+		name     string
+		harness  string
+		path     func(map[string]string) string
+		content  string
+		contains string
+	}{
+		{
+			name:     "claude-code",
+			harness:  "claude-code",
+			path:     func(env map[string]string) string { return filepath.Join(env["HOME"], ".claude", "settings.json") },
+			content:  "{\n  \"apiKeyHelper\": \"custom-helper\",\n  \"model\": \"custom-model\",\n  \"env\": {\n    \"ANTHROPIC_BASE_URL\": \"https://custom.example/anthropic\",\n    \"CUSTOM\": \"keep\"\n  },\n  \"unrelated\": true\n}\n",
+			contains: airplane.LocalGatewayURL + "/anthropic",
+		},
+		{
+			name:     "codex",
+			harness:  "codex",
+			path:     func(env map[string]string) string { return filepath.Join(env["HOME"], ".codex", "config.toml") },
+			content:  "[profiles.default]\nmodel = \"gpt-4\"\napproval_policy = \"never\"\n\n[custom]\nkeep = true\n",
+			contains: airplane.LocalGatewayURL + "/codex",
+		},
+		{
+			name:     "pi",
+			harness:  "pi",
+			path:     func(env map[string]string) string { return filepath.Join(env["HOME"], ".pi", "agent", "models.json") },
+			content:  "{\n  \"providers\": {\n    \"custom\": {\n      \"baseUrl\": \"http://localhost:11434/v1\"\n    },\n    \"s46\": {\n      \"baseUrl\": \"https://custom.example/v1\",\n      \"api\": \"custom\"\n    }\n  },\n  \"unrelated\": true\n}\n",
+			contains: airplane.LocalGatewayURL + "/v1",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := testEnv(t)
+			requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+			requireOK(t, run(t, env, "connect", "acme", "--harness="+tc.harness))
+			path := tc.path(env)
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			originalRaw := []byte(tc.content)
+			if err := os.WriteFile(path, originalRaw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(path, 0o640); err != nil {
+				t.Fatal(err)
+			}
+
+			requireOK(t, run(t, env, "airplane", "mode", "on"))
+			airplaneRaw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(airplaneRaw) == string(originalRaw) || !strings.Contains(string(airplaneRaw), tc.contains) {
+				t.Fatalf("expected airplane config for %s, got:\n%s", tc.harness, airplaneRaw)
+			}
+
+			requireOK(t, run(t, env, "airplane", "mode", "off"))
+			restoredRaw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(restoredRaw) != string(originalRaw) {
+				t.Fatalf("%s config was not restored exactly\n--- got ---\n%s\n--- want ---\n%s", tc.harness, restoredRaw, originalRaw)
+			}
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Mode().Perm() != 0o640 {
+				t.Fatalf("%s config mode = %s, want 0640", tc.harness, info.Mode().Perm())
+			}
+			assertNoHarnessSnapshot(t, env)
+		})
+	}
 }
 
 func prepareCustomPiConfig(t *testing.T, env map[string]string) (string, []byte) {
@@ -725,6 +843,11 @@ func assertRestoredPiConfig(t *testing.T, env map[string]string, modelsPath stri
 	if string(restoredRaw) != string(originalRaw) {
 		t.Fatalf("Pi config was not restored\n--- got ---\n%s\n--- want ---\n%s", restoredRaw, originalRaw)
 	}
+	assertNoHarnessSnapshot(t, env)
+}
+
+func assertNoHarnessSnapshot(t *testing.T, env map[string]string) {
+	t.Helper()
 	configRaw, err := os.ReadFile(filepath.Join(env["XDG_CONFIG_HOME"], "s46", "config.json"))
 	if err != nil {
 		t.Fatal(err)
