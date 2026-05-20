@@ -18,7 +18,7 @@ type offlineSuggestionClient struct {
 }
 
 func withOfflineSuggestion(client api.Client, env map[string]string) api.Client {
-	if env != nil && env["S46_API_MODE"] == "mock" {
+	if env != nil && env["S46_API_MODE"] == "mock" && env["S46_API_BASE_URL"] == "" {
 		return client
 	}
 	return offlineSuggestionClient{delegate: client, env: env}

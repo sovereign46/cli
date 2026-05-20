@@ -82,6 +82,37 @@ func DefaultConfig() Config {
 	return Config{Teams: map[string]TeamConfig{}}
 }
 
+func (c Config) Clone() Config {
+	clone := Config{
+		ActiveTeam: c.ActiveTeam,
+		Mode:       c.Mode,
+		Teams:      make(map[string]TeamConfig, len(c.Teams)),
+	}
+	for name, team := range c.Teams {
+		clone.Teams[name] = team.Clone()
+	}
+	return clone
+}
+
+func (tc TeamConfig) Clone() TeamConfig {
+	clone := tc
+	clone.Boxes = append([]string(nil), tc.Boxes...)
+	clone.Models = append([]string(nil), tc.Models...)
+	clone.APISnapshot = cloneAPITeam(tc.APISnapshot)
+	if tc.HarnessSnapshot != nil {
+		snapshot := *tc.HarnessSnapshot
+		snapshot.Files = append([]HarnessFileSnapshot(nil), tc.HarnessSnapshot.Files...)
+		clone.HarnessSnapshot = &snapshot
+	}
+	return clone
+}
+
+func cloneAPITeam(team api.Team) api.Team {
+	team.Boxes = append([]string(nil), team.Boxes...)
+	team.Models = append([]string(nil), team.Models...)
+	return team
+}
+
 // ActiveMode returns the workspace mode. Mode is a workspace-level
 // setting; it is not per-team. Defaults to cloud when unset.
 func (c Config) ActiveMode() string {

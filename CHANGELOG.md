@@ -12,7 +12,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
-- Changed airplane gateway setup to use the `sovereign46/api` repository and fall back to cloning and building it when no gateway release archive is available.
+- Changed airplane gateway setup to install verified release archives from the `sovereign46/api` repository.
 - Changed interactive harness selection to default to `claude-code`.
 - Changed `s46 airplane setup` to prompt for the harness to configure when enabling airplane mode interactively.
 - Changed airplane mode to configure local Ollama and supported harnesses with 64k context, 4096 max output tokens, one parallel request, one loaded model, Flash Attention, q8_0 KV cache, 10m keep-alive, and 10m gateway write-timeout defaults, overridable with environment variables.
@@ -27,6 +27,12 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Fixed `s46 airplane setup` to offer restarting an existing `s46-api` listener in airplane mode when it owns the local gateway port but is not airplane-ready.
 - Fixed `s46 airplane logs` to discover log files attached to running Ollama/gateway processes started from another shell.
 - Fixed `make shell` to write S46 airplane logs to a stable host log directory via `S46_LOG_DIR` so logs survive temporary shell cleanup.
+
+### Security
+
+- Required SHA-256 verification before installing downloaded S46 gateway release archives.
+- Disabled the gateway source clone fallback in release builds.
+- Prevented unavailable mock API mode from falling through to production API traffic.
 
 ## [0.1.1] - 2026-05-19
 

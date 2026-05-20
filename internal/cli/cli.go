@@ -206,13 +206,13 @@ func activeOutputPrefix(store *config.Store) string {
 	return output.DefaultPrefix
 }
 
-func apiClientForMode(env map[string]string, store *config.Store) api.Client {
+func apiClientForMode(env map[string]string, store *config.Store) (api.Client, error) {
 	if env != nil && (env["S46_API_BASE_URL"] != "" || env["S46_API_MODE"] == "mock") {
 		return api.NewClientFromEnv(env)
 	}
 	cfg, err := store.LoadConfig()
 	if err == nil && cfg.ActiveMode() == config.ModeAirplane {
-		return api.NewHTTPClient(airplane.LocalGatewayURL)
+		return api.NewHTTPClient(airplane.LocalGatewayURL), nil
 	}
 	return api.NewClientFromEnv(env)
 }
@@ -232,12 +232,16 @@ func newApp(runtime Runtime, opts *options) (*app, error) {
 	if err != nil {
 		return nil, err
 	}
+	client, err := apiClientForMode(runtime.Env, store)
+	if err != nil {
+		return nil, err
+	}
 	app := &app{
 		runtime: runtime,
 		options: opts,
 		config:  store,
 		keyring: keyringStore,
-		api:     withOfflineSuggestion(apiClientForMode(runtime.Env, store), runtime.Env),
+		api:     withOfflineSuggestion(client, runtime.Env),
 		harness: harness.NewRegistry(claude.New(), codex.New(), pi.New(), standard.New()),
 		renderer: output.Renderer{
 			JSON:   opts.json,
@@ -736,12 +740,8 @@ func connectResult(team api.Team, harnessName, model, mode string, plan harness.
 }
 
 func buildConnectConfigs(cfg config.Config, team api.Team, harnessName, model, mode string, existing config.TeamConfig) (config.Config, config.Config) {
-	before := cfg
-	after := cfg
-	after.Teams = make(map[string]config.TeamConfig, len(cfg.Teams)+1)
-	for k, v := range cfg.Teams {
-		after.Teams[k] = v
-	}
+	before := cfg.Clone()
+	after := cfg.Clone()
 	after.ActiveTeam = team.Name
 	if mode == config.ModeAirplane {
 		after.Mode = config.ModeAirplane
@@ -937,12 +937,8 @@ func runDisconnect(ctx context.Context, app *app, teamName string, harnessName s
 		lines = append(lines, "", "[s46] dry-run: no files written")
 		return app.renderer.Lines(lines...)
 	}
-	cfgBefore := cfg
-	cfgAfter := cfg
-	cfgAfter.Teams = make(map[string]config.TeamConfig, len(cfg.Teams))
-	for k, v := range cfg.Teams {
-		cfgAfter.Teams[k] = v
-	}
+	cfgBefore := cfg.Clone()
+	cfgAfter := cfg.Clone()
 	delete(cfgAfter.Teams, teamName)
 	if cfgAfter.ActiveTeam == teamName {
 		cfgAfter.ActiveTeam = ""

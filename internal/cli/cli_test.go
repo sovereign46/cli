@@ -887,7 +887,7 @@ func TestAirplaneSetupInstallsMissingGateway(t *testing.T) {
 	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\nY\nn\n"), "airplane", "setup"))
 	for _, want := range []string{
 		"[s46] Local S46 gateway is not installed.",
-		"Install from GitHub release or git clone sovereign46/api",
+		"Install from verified GitHub release or git clone sovereign46/api",
 		"[s46] installing local S46 gateway...",
 		"[s46] Start local gateway now? [Y/n]",
 		"[s46] airplane setup: ready",

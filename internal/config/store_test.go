@@ -53,6 +53,39 @@ func TestDisplayPath(t *testing.T) {
 	}
 }
 
+func TestConfigCloneDoesNotShareMutableState(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ActiveTeam = "acme"
+	cfg.Teams["acme"] = TeamConfig{
+		Endpoint: "https://acme.s46.dev",
+		Boxes:    []string{"box-01"},
+		Models:   []string{"model-01"},
+		APISnapshot: api.Team{
+			Boxes:  []string{"api-box-01"},
+			Models: []string{"api-model-01"},
+		},
+		HarnessSnapshot: &HarnessSnapshot{Files: []HarnessFileSnapshot{{Path: "settings.json"}}},
+	}
+
+	clone := cfg.Clone()
+	team := clone.Teams["acme"]
+	team.Boxes[0] = "box-02"
+	team.Models[0] = "model-02"
+	team.APISnapshot.Boxes[0] = "api-box-02"
+	team.APISnapshot.Models[0] = "api-model-02"
+	team.HarnessSnapshot.Files[0].Path = "other.json"
+	clone.Teams["acme"] = team
+	delete(clone.Teams, "acme")
+
+	original := cfg.Teams["acme"]
+	if _, ok := cfg.Teams["acme"]; !ok {
+		t.Fatalf("clone map shared with original")
+	}
+	if original.Boxes[0] != "box-01" || original.Models[0] != "model-01" || original.APISnapshot.Boxes[0] != "api-box-01" || original.APISnapshot.Models[0] != "api-model-01" || original.HarnessSnapshot.Files[0].Path != "settings.json" {
+		t.Fatalf("clone shared nested mutable state: %#v", original)
+	}
+}
+
 func TestConfigActiveMode(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

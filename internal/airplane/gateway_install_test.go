@@ -3,6 +3,7 @@ package airplane
 import (
 	"fmt"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -32,6 +33,33 @@ func TestSelectGatewayAssetPrefersExactName(t *testing.T) {
 	}
 	if got := selectGatewayAsset(assets, "1.2.3"); got.BrowserDownloadURL != "exact" {
 		t.Fatalf("expected exact match, got %q", got.BrowserDownloadURL)
+	}
+}
+
+func TestParseGatewayChecksumMatchesArchive(t *testing.T) {
+	checksum := strings.Repeat("a", 64)
+	content := []byte(strings.Join([]string{
+		strings.Repeat("b", 64) + "  other.tar.gz",
+		checksum + "  " + GatewayBinaryName + "_1.2.3_" + runtime.GOOS + "_" + runtime.GOARCH + ".tar.gz",
+	}, "\n"))
+	got, err := parseGatewayChecksum(content, GatewayBinaryName+"_1.2.3_"+runtime.GOOS+"_"+runtime.GOARCH+".tar.gz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != checksum {
+		t.Fatalf("checksum = %q, want %q", got, checksum)
+	}
+}
+
+func TestParseGatewayChecksumSupportsBSDFormat(t *testing.T) {
+	checksum := strings.Repeat("c", 64)
+	archive := GatewayBinaryName + "_1.2.3_" + runtime.GOOS + "_" + runtime.GOARCH + ".tar.gz"
+	got, err := parseGatewayChecksum([]byte("SHA256 ("+archive+") = "+checksum), archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != checksum {
+		t.Fatalf("checksum = %q, want %q", got, checksum)
 	}
 }
 

@@ -5,11 +5,14 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -202,6 +205,35 @@ func TestGatewaySourceUsesExplicitRepo(t *testing.T) {
 	}
 }
 
+func TestInstallGatewayDownloadsReleaseAssetWithDigest(t *testing.T) {
+	archive := gatewayArchive(t)
+	assetName := GatewayBinaryName + "_1.2.3_" + runtime.GOOS + "_" + runtime.GOARCH + ".tar.gz"
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/latest":
+			_ = json.NewEncoder(w).Encode(gatewayRelease{TagName: "v1.2.3", Assets: []gatewayAsset{{Name: assetName, BrowserDownloadURL: server.URL + "/archive", Digest: "sha256:" + sha256Hex(archive)}}})
+		case "/archive":
+			_, _ = w.Write(archive)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	home := t.TempDir()
+	service := Service{Env: map[string]string{
+		"XDG_DATA_HOME":              filepath.Join(home, ".data"),
+		"S46_API_GATEWAY_LATEST_URL": server.URL + "/latest",
+	}}
+	if err := service.InstallGateway(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(service.managedGatewayBinaryPath()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestInstallGatewayDownloadsArchive(t *testing.T) {
 	archive := gatewayArchive(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -213,6 +245,7 @@ func TestInstallGatewayDownloadsArchive(t *testing.T) {
 	service := Service{Env: map[string]string{
 		"XDG_DATA_HOME":                filepath.Join(home, ".data"),
 		"S46_API_GATEWAY_DOWNLOAD_URL": server.URL,
+		"S46_API_GATEWAY_SHA256":       sha256Hex(archive),
 	}}
 	if err := service.InstallGateway(context.Background()); err != nil {
 		t.Fatal(err)
@@ -227,7 +260,27 @@ func TestInstallGatewayDownloadsArchive(t *testing.T) {
 	}
 }
 
+func TestInstallGatewayRejectsChecksumMismatch(t *testing.T) {
+	archive := gatewayArchive(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(archive)
+	}))
+	defer server.Close()
+
+	service := Service{Env: map[string]string{
+		"XDG_DATA_HOME":                filepath.Join(t.TempDir(), ".data"),
+		"S46_API_GATEWAY_DOWNLOAD_URL": server.URL,
+		"S46_API_GATEWAY_SHA256":       strings.Repeat("0", sha256.Size*2),
+	}}
+	if err := service.InstallGateway(context.Background()); err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("expected checksum mismatch, got %v", err)
+	}
+}
+
 func TestInstallGatewayFallsBackToGitClone(t *testing.T) {
+	if !gatewaySourceFallbackEnabled() {
+		t.Skip("source fallback is disabled in this build")
+	}
 	bin := t.TempDir()
 	logPath := filepath.Join(t.TempDir(), "commands.log")
 	writeExecutable(t, filepath.Join(bin, "git"), `#!/bin/sh
@@ -379,6 +432,11 @@ func writeExecutable(t *testing.T, path string, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func sha256Hex(content []byte) string {
+	sum := sha256.Sum256(content)
+	return hex.EncodeToString(sum[:])
 }
 
 func gatewayArchive(t *testing.T) []byte {

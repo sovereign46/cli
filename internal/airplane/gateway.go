@@ -43,7 +43,10 @@ func (s Service) StartGateway() error {
 }
 
 func (s Service) GatewayInstallDescription() string {
-	return fmt.Sprintf("from GitHub release or git clone %s into %s", s.gatewayGitHubRepo(), s.gatewayInstallDir())
+	if gatewaySourceFallbackEnabled() {
+		return fmt.Sprintf("from verified GitHub release or git clone %s into %s", s.gatewayGitHubRepo(), s.gatewayInstallDir())
+	}
+	return fmt.Sprintf("from verified GitHub release into %s", s.gatewayInstallDir())
 }
 
 func (s Service) GatewayStartDescription() (string, bool) {

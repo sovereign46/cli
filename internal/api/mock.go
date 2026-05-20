@@ -17,8 +17,8 @@ import (
 
 // init wires the mock client factory into the api package on non-release
 // builds. The release build excludes this file (see the //go:build tag at
-// the top), leaving mockClientFactory nil and so S46_API_MODE=mock has
-// no effect in release binaries. This is a deliberate compile-time choice;
+// the top), leaving mockClientFactory nil so S46_API_MODE=mock fails closed
+// instead of selecting production. This is a deliberate compile-time choice;
 // callers cannot opt-in to the mock at runtime in a release build.
 //
 // The factory must not depend on package-level state that's initialized
