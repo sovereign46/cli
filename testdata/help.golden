@@ -1,4 +1,4 @@
-s46 is the Sovereign46 CLI control plane for coding-agent harnesses.
+s46 is a control plane for coding-agent harnesses.
 
 Start here:
   s46 ask "I just installed this; what should I do?"

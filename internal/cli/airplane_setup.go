@@ -21,7 +21,27 @@ import (
 	"github.com/sovereign46/s46-cli/internal/workspace"
 )
 
+type airplaneSetupOptions struct {
+	AllowPrompts bool
+	AssumeYes    bool
+}
+
+type airplaneSetupCommandOptions struct {
+	AssumeYes bool
+	Mode      string
+	Harness   string
+}
+
+type airplaneModeOptions struct {
+	Harness   string
+	AssumeYes bool
+}
+
 func runAirplaneSetup(ctx context.Context, app *app, allowPrompts bool) (airplane.Report, error) {
+	return runAirplaneSetupWithOptions(ctx, app, airplaneSetupOptions{AllowPrompts: allowPrompts})
+}
+
+func runAirplaneSetupWithOptions(ctx context.Context, app *app, options airplaneSetupOptions) (airplane.Report, error) {
 	var progress io.Writer
 	if !app.options.machineReadable() {
 		progress = app.runtime.Stdout
@@ -34,18 +54,18 @@ func runAirplaneSetup(ctx context.Context, app *app, allowPrompts bool) (airplan
 	if err := app.renderer.Lines(renderAirplaneReport(report)...); err != nil {
 		return report, err
 	}
-	if !allowPrompts || !checkOK(report, "memory") || !checkOK(report, "disk") {
+	if !options.AllowPrompts || !checkOK(report, "memory") || !checkOK(report, "disk") {
 		return report, nil
 	}
 
 	changed := false
-	if configured, err := offerOllamaLaunchctlConfig(ctx, app, service); err != nil {
+	if configured, err := offerOllamaLaunchctlConfig(ctx, app, service, options); err != nil {
 		return report, err
 	} else if configured {
 		changed = true
 	}
 	if missingCheck(report, "ollama-installed") && service.HomebrewAvailable() {
-		if yes, err := promptYesNo(app, "[s46] Ollama is not installed.\n[s46] Install with Homebrew? [Y/n] ", true); err != nil {
+		if yes, err := confirmAirplaneSetup(app, options, "[s46] Ollama is not installed.\n[s46] Install with Homebrew? [Y/n] ", true); err != nil {
 			return report, err
 		} else if yes {
 			if err := app.renderer.Lines("[s46] installing Ollama with Homebrew..."); err != nil {
@@ -59,7 +79,7 @@ func runAirplaneSetup(ctx context.Context, app *app, allowPrompts bool) (airplan
 		}
 	}
 	if checkOK(report, "ollama-installed") && missingCheck(report, "ollama-running") {
-		if yes, err := promptYesNo(app, "[s46] Ollama is installed but not running.\n[s46] Start Ollama now? [Y/n] ", true); err != nil {
+		if yes, err := confirmAirplaneSetup(app, options, "[s46] Ollama is installed but not running.\n[s46] Start Ollama now? [Y/n] ", true); err != nil {
 			return report, err
 		} else if yes {
 			if err := app.renderer.Lines("[s46] starting Ollama..."); err != nil {
@@ -73,7 +93,7 @@ func runAirplaneSetup(ctx context.Context, app *app, allowPrompts bool) (airplan
 		}
 	}
 	if checkOK(report, "ollama-running") && missingCheck(report, "model-downloaded") {
-		if yes, err := promptYesNo(app, fmt.Sprintf("[s46] Download %s (~15 GB)? [Y/n] ", airplane.BackendModel), true); err != nil {
+		if yes, err := confirmAirplaneSetup(app, options, fmt.Sprintf("[s46] Download %s (~15 GB)? [Y/n] ", airplane.BackendModel), true); err != nil {
 			return report, err
 		} else if yes {
 			if err := service.PullModel(ctx); err != nil {
@@ -85,7 +105,7 @@ func runAirplaneSetup(ctx context.Context, app *app, allowPrompts bool) (airplan
 	}
 	if missingCheck(report, "local-gateway") && service.GatewayResponding(ctx) && !service.GatewayReady(ctx) {
 		var err error
-		report, changed, err = offerAirplaneGatewayRestart(ctx, app, service, report)
+		report, changed, err = offerAirplaneGatewayRestart(ctx, app, service, report, options)
 		if err != nil {
 			return report, err
 		}
@@ -101,7 +121,7 @@ func runAirplaneSetup(ctx context.Context, app *app, allowPrompts bool) (airplan
 	}
 	if missingCheck(report, "local-gateway") {
 		if _, ok := service.GatewayStartDescription(); !ok && service.GatewayDownloadAvailable() {
-			if yes, err := promptYesNo(app, fmt.Sprintf("[s46] Local S46 gateway is not installed.\n[s46] Install %s? [Y/n] ", service.GatewayInstallDescription()), true); err != nil {
+			if yes, err := confirmAirplaneSetup(app, options, fmt.Sprintf("[s46] Local S46 gateway is not installed.\n[s46] Install %s? [Y/n] ", service.GatewayInstallDescription()), true); err != nil {
 				return report, err
 			} else if yes {
 				if err := app.renderer.Lines("[s46] installing local S46 gateway..."); err != nil {
@@ -117,7 +137,7 @@ func runAirplaneSetup(ctx context.Context, app *app, allowPrompts bool) (airplan
 	}
 	if missingCheck(report, "local-gateway") {
 		if description, ok := service.GatewayStartDescription(); ok {
-			if yes, err := promptYesNo(app, fmt.Sprintf("[s46] Local S46 gateway is available as %s.\n[s46] Start local gateway now? [Y/n] ", description), true); err != nil {
+			if yes, err := confirmAirplaneSetup(app, options, fmt.Sprintf("[s46] Local S46 gateway is available as %s.\n[s46] Start local gateway now? [Y/n] ", description), true); err != nil {
 				return report, err
 			} else if yes {
 				if err := app.renderer.Lines("[s46] starting local S46 gateway..."); err != nil {
@@ -146,7 +166,14 @@ func runAirplaneSetup(ctx context.Context, app *app, allowPrompts bool) (airplan
 	return report, nil
 }
 
-func offerOllamaLaunchctlConfig(ctx context.Context, app *app, service airplane.Service) (bool, error) {
+func confirmAirplaneSetup(app *app, options airplaneSetupOptions, prompt string, fallback bool) (bool, error) {
+	if options.AssumeYes {
+		return true, nil
+	}
+	return promptYesNo(app, prompt, fallback)
+}
+
+func offerOllamaLaunchctlConfig(ctx context.Context, app *app, service airplane.Service, options airplaneSetupOptions) (bool, error) {
 	runtimeReport := service.OllamaRuntime(ctx)
 	if !runtimeReport.NeedsLaunchctlUpdate() {
 		return false, renderOllamaRestartGuidance(app, runtimeReport)
@@ -161,10 +188,10 @@ func offerOllamaLaunchctlConfig(ctx context.Context, app *app, service airplane.
 	if err := app.renderer.Lines(lines...); err != nil {
 		return false, err
 	}
-	if !app.canPrompt() {
+	if !options.AssumeYes && !app.canPrompt() {
 		return false, app.renderer.Lines("[s46] Run `s46 airplane setup` in a terminal to apply them with launchctl.")
 	}
-	if yes, err := promptYesNo(app, "[s46] Configure macOS Ollama launchd settings now? [Y/n] ", true); err != nil {
+	if yes, err := confirmAirplaneSetup(app, options, "[s46] Configure macOS Ollama launchd settings now? [Y/n] ", true); err != nil {
 		return false, err
 	} else if !yes {
 		return false, nil
@@ -213,7 +240,7 @@ func renderOllamaRestartGuidance(app *app, runtimeReport airplane.OllamaRuntime)
 	}
 }
 
-func offerAirplaneGatewayRestart(ctx context.Context, app *app, service airplane.Service, report airplane.Report) (airplane.Report, bool, error) {
+func offerAirplaneGatewayRestart(ctx context.Context, app *app, service airplane.Service, report airplane.Report, options airplaneSetupOptions) (airplane.Report, bool, error) {
 	listener := gatewayListeningProcess(app.runtime.Env, report.GatewayURL)
 	if err := app.renderer.Lines(renderAirplaneGatewayConflict(report.GatewayURL, listener)...); err != nil {
 		return report, false, err
@@ -224,13 +251,13 @@ func offerAirplaneGatewayRestart(ctx context.Context, app *app, service airplane
 		}
 		return report, false, nil
 	}
-	if !app.canPrompt() {
+	if !options.AssumeYes && !app.canPrompt() {
 		if err := app.renderer.Lines("[s46] Run `s46 airplane setup` in a terminal to restart it automatically."); err != nil {
 			return report, false, err
 		}
 		return report, false, nil
 	}
-	if yes, err := promptYesNo(app, "[s46] Restart the local S46 API in airplane mode now? [Y/n] ", true); err != nil {
+	if yes, err := confirmAirplaneSetup(app, options, "[s46] Restart the local S46 API in airplane mode now? [Y/n] ", true); err != nil {
 		return report, false, err
 	} else if !yes {
 		return report, false, nil
@@ -385,6 +412,10 @@ func waitForGatewayReady(ctx context.Context, service airplane.Service, timeout 
 }
 
 func offerAirplaneModeOnAfterSetup(ctx context.Context, app *app, report airplane.Report) error {
+	return offerAirplaneModeOnAfterSetupWithOptions(ctx, app, report, airplaneSetupCommandOptions{})
+}
+
+func offerAirplaneModeOnAfterSetupWithOptions(ctx context.Context, app *app, report airplane.Report, options airplaneSetupCommandOptions) error {
 	if !report.Ready {
 		return app.renderer.Lines("[s46] Airplane mode was not offered because setup is incomplete.")
 	}
@@ -399,6 +430,12 @@ func offerAirplaneModeOnAfterSetup(ctx context.Context, app *app, report airplan
 	if cfg.ActiveMode() == config.ModeAirplane {
 		return nil
 	}
+	if options.Harness != "" {
+		teamConfig.DefaultHarness = options.Harness
+	}
+	if options.Mode == "on" || options.AssumeYes {
+		return enableAirplaneMode(ctx, app, service, cfg, teamName, teamConfig, report, airplaneModeOptions{Harness: options.Harness, AssumeYes: options.AssumeYes}, options.Harness == "")
+	}
 	if !app.canPrompt() {
 		return app.renderer.Lines("[s46] Airplane mode is ready. Run `s46 airplane mode on` to enable it.")
 	}
@@ -409,7 +446,22 @@ func offerAirplaneModeOnAfterSetup(ctx context.Context, app *app, report airplan
 	if !yes {
 		return nil
 	}
-	return enableAirplaneMode(ctx, app, service, cfg, teamName, teamConfig, report, true)
+	return enableAirplaneMode(ctx, app, service, cfg, teamName, teamConfig, report, airplaneModeOptions{}, true)
+}
+
+func validateAirplaneSetupCommandOptions(app *app, options airplaneSetupCommandOptions) error {
+	if options.Mode != "" && options.Mode != "on" {
+		return fmt.Errorf("unknown airplane setup --mode %q; expected on", options.Mode)
+	}
+	if options.Harness != "" {
+		if _, err := app.harness.Get(options.Harness); err != nil {
+			return err
+		}
+		if options.Mode == "" && !options.AssumeYes {
+			return fmt.Errorf("--harness requires --mode=on or --yes")
+		}
+	}
+	return nil
 }
 
 func airplaneRuntimeNeedsRestart(ctx context.Context, app *app, service airplane.Service) bool {
@@ -541,19 +593,29 @@ func renderSettingValue(value string, ok bool) string {
 }
 
 func airplaneModeOn(ctx context.Context, app *app) error {
+	return airplaneModeOnWithOptions(ctx, app, airplaneModeOptions{})
+}
+
+func airplaneModeOnWithOptions(ctx context.Context, app *app, options airplaneModeOptions) error {
 	cfg, teamName, teamConfig, err := airplaneModeTargetConfig(app)
 	if err != nil {
 		return err
+	}
+	if options.Harness != "" {
+		if _, err := app.harness.Get(options.Harness); err != nil {
+			return err
+		}
+		teamConfig.DefaultHarness = options.Harness
 	}
 	service := airplane.Service{Env: app.runtime.Env, Stdin: app.runtime.Stdin, Stdout: app.runtime.Stdout, Stderr: app.runtime.Stderr, LogPrefix: "[s46]"}
 	report, err := runAirplaneSetup(ctx, app, false)
 	if err != nil {
 		return err
 	}
-	return enableAirplaneMode(ctx, app, service, cfg, teamName, teamConfig, report, true)
+	return enableAirplaneMode(ctx, app, service, cfg, teamName, teamConfig, report, options, options.Harness == "")
 }
 
-func enableAirplaneMode(ctx context.Context, app *app, service airplane.Service, cfg config.Config, teamName string, teamConfig config.TeamConfig, report airplane.Report, promptForHarness bool) error {
+func enableAirplaneMode(ctx context.Context, app *app, service airplane.Service, cfg config.Config, teamName string, teamConfig config.TeamConfig, report airplane.Report, options airplaneModeOptions, promptForHarness bool) error {
 	if err := prepareAirplaneRuntime(ctx, app, service, report); err != nil {
 		return err
 	}
@@ -567,7 +629,7 @@ func enableAirplaneMode(ctx context.Context, app *app, service airplane.Service,
 			return err
 		}
 	}
-	setHarnessDefault, err := shouldSetAirplaneHarnessDefault(app, teamConfig)
+	setHarnessDefault, err := shouldSetAirplaneHarnessDefault(app, teamConfig, options)
 	if err != nil {
 		return err
 	}
@@ -626,11 +688,11 @@ func promptAirplaneModeHarness(app *app, teamConfig config.TeamConfig) (config.T
 	return teamConfig, nil
 }
 
-func shouldSetAirplaneHarnessDefault(app *app, teamConfig config.TeamConfig) (bool, error) {
+func shouldSetAirplaneHarnessDefault(app *app, teamConfig config.TeamConfig, options airplaneModeOptions) (bool, error) {
 	if teamConfig.DefaultHarness != "pi" {
 		return false, nil
 	}
-	if !app.canPrompt() {
+	if options.AssumeYes || !app.canPrompt() {
 		return true, nil
 	}
 	provider, model, err := pi.CurrentDefault(app.runtime.Env)

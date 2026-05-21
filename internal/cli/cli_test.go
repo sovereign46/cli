@@ -198,10 +198,12 @@ func TestJSONErrorsAreStructured(t *testing.T) {
 
 func TestAskPlansAndRunsConfirmedS46Commands(t *testing.T) {
 	env := testEnv(t)
+	calls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/chat/completions" {
 			t.Fatalf("unexpected ask request: %s %s", r.Method, r.URL.Path)
 		}
+		calls++
 		var body map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatal(err)
@@ -209,7 +211,15 @@ func TestAskPlansAndRunsConfirmedS46Commands(t *testing.T) {
 		if body["model"] != airplane.LocalModelID || body["stream"] != false {
 			t.Fatalf("unexpected ask body: %#v", body)
 		}
-		content := `{"answer":"Yes. Enable airplane mode after checking setup.","commands":[{"command":"s46 version","reason":"Verify the CLI is runnable before changing setup."}]}`
+		messages := body["messages"].([]any)
+		system := messages[0].(map[string]any)["content"].(string)
+		if calls == 1 && (!strings.Contains(system, "s46 airplane setup --mode=on --harness=pi --yes") || !strings.Contains(system, "s46 run <task>")) {
+			t.Fatalf("ask command manual missing key guidance:\n%s", system)
+		}
+		content := `{"action":"proceed"}`
+		if calls == 1 {
+			content = `{"answer":"Yes. Enable airplane mode after checking setup.","commands":[{"command":"s46 version","reason":"Verify the CLI is runnable before changing setup."}]}`
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": content}}}})
 	}))
 	defer server.Close()
@@ -217,14 +227,14 @@ func TestAskPlansAndRunsConfirmedS46Commands(t *testing.T) {
 
 	out := requireOK(t, runWithStdin(t, env, strings.NewReader("y\n"), "ask", "can I code offline?"))
 	for _, want := range []string{
-		"[s46] Answer:",
 		"Yes. Enable airplane mode after checking setup.",
-		"[s46] Plan:",
+		"Plan",
 		"1. s46 version",
 		"Verify the CLI is runnable before changing setup.",
-		"[s46] Run this plan? [Y/n] ",
-		"[s46] running: s46 version",
-		"[s46] done",
+		"Proceed?\n> ",
+		"Running",
+		"s46 version",
+		"Done.",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("ask output missing %q:\n%s", want, out)
@@ -234,15 +244,20 @@ func TestAskPlansAndRunsConfirmedS46Commands(t *testing.T) {
 
 func TestAskCanDeclinePlan(t *testing.T) {
 	env := testEnv(t)
+	calls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		content := `{"answer":"Check status first.","commands":[{"command":"s46 status --verbose"}]}`
+		calls++
+		content := `{"answer":"Initialize the CLI.","commands":[{"command":"s46 init"}]}`
+		if calls > 1 {
+			content = `{"action":"cancel"}`
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": content}}}})
 	}))
 	defer server.Close()
 	env["S46_AIRPLANE_GATEWAY_URL"] = server.URL
 
 	out := requireOK(t, runWithStdin(t, env, strings.NewReader("n\n"), "ask", "am I ready?"))
-	if !strings.Contains(out, "[s46] plan not run") || strings.Contains(out, "[s46] running:") {
+	if !strings.Contains(out, "s46 init") || !strings.Contains(out, "Stopped.") || strings.Contains(out, "Running") {
 		t.Fatalf("unexpected declined ask output:\n%s", out)
 	}
 }
@@ -266,21 +281,25 @@ func TestAskJSONPrintsPlanWithoutPrompting(t *testing.T) {
 	}
 }
 
-func TestAskRejectsUnsafeModelCommands(t *testing.T) {
+func TestAskRunsShellCommandsAfterConfirmation(t *testing.T) {
 	env := testEnv(t)
+	calls := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		content := `{"answer":"Use lsof.","commands":[{"command":"lsof -ti :8080 | xargs kill"}]}`
+		calls++
+		content := `{"answer":"List the current folder.","commands":[{"command":"printf ask-shell","reason":"Print a shell marker from the approved command."}]}`
+		if calls > 1 {
+			content = `{"action":"proceed"}`
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": content}}}})
 	}))
 	defer server.Close()
 	env["S46_AIRPLANE_GATEWAY_URL"] = server.URL
 
-	result := runWithStdin(t, env, strings.NewReader("y\n"), "ask", "kill the api server")
-	if result.err == nil || !strings.Contains(result.err.Error(), "unsupported shell syntax") {
-		t.Fatalf("expected unsafe ask command to fail, got err=%v stdout=%q", result.err, result.stdout)
-	}
-	if strings.Contains(result.stdout, "Run this plan") {
-		t.Fatalf("unsafe plan prompted for execution:\n%s", result.stdout)
+	out := requireOK(t, runWithStdin(t, env, strings.NewReader("y\n"), "ask", "any files in this folder"))
+	for _, want := range []string{"printf ask-shell", "Running", "ask-shell", "Done."} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("shell ask output missing %q:\n%s", want, out)
+		}
 	}
 }
 
@@ -775,6 +794,32 @@ func TestAirplaneModeOnAndCloudModeRestoreEndpoint(t *testing.T) {
 	off := requireOK(t, run(t, env, "airplane", "mode", "off"))
 	if !strings.Contains(off, "[s46] mode: cloud") || !strings.Contains(off, "[s46] endpoint: https://acme.s46.dev") || strings.Contains(off, "[s46✈]") {
 		t.Fatalf("unexpected cloud output:\n%s", off)
+	}
+}
+
+func TestAirplaneSetupModeOnHarnessIsNonInteractive(t *testing.T) {
+	env := testEnv(t)
+	settingsPath := filepath.Join(env["HOME"], ".pi", "agent", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, []byte("{\n  \"defaultProvider\": \"openai-codex\",\n  \"defaultModel\": \"gpt-5.5\"\n}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out := requireOK(t, run(t, env, "airplane", "setup", "--mode=on", "--harness=pi", "--yes"))
+	for _, want := range []string{"[s46] airplane setup: ready", "[s46✈] mode: airplane", "[s46✈] team: local"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("setup output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "Make Pi use") {
+		t.Fatalf("--yes setup prompted for Pi default:\n%s", out)
+	}
+	assertPiDefaultSettings(t, settingsPath, "s46", airplane.LocalModelID)
+	status := requireOK(t, run(t, env, "status"))
+	if !strings.Contains(status, "[s46✈] harness: pi · s46/devstral-small-2-24b") {
+		t.Fatalf("setup did not configure pi harness:\n%s", status)
 	}
 }
 

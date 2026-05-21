@@ -44,8 +44,8 @@ s46 share [session] [--ttl=1d|7d|30d|365d|never]
 s46 share revoke <session-or-share-id>
 s46 session land [session]
 s46 mode [cloud|airplane]
-s46 airplane setup
-s46 airplane mode on|off
+s46 airplane setup [--yes] [--mode=on] [--harness=pi|claude-code|codex|standard]
+s46 airplane mode on|off [--harness=pi|claude-code|codex|standard]
 s46 airplane logs [ollama|gateway|all] [--follow]
 s46 ask "request"
 s46 run "task"
