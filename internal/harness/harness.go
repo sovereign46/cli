@@ -114,6 +114,7 @@ type LocalSession struct {
 	CWD       string
 	Model     string
 	Task      string
+	CostUSD   float64
 	UpdatedAt time.Time
 }
 

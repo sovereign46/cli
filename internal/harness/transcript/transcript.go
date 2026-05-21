@@ -25,6 +25,7 @@ type Source struct {
 	Model           string
 	Harness         string
 	Task            string
+	CostUSD         float64
 	Steps           []share.Step
 	Files           []share.File
 	Usage           share.Usage
@@ -44,6 +45,7 @@ type SessionMetadata struct {
 	CWD       string
 	Model     string
 	Task      string
+	CostUSD   float64
 	UpdatedAt time.Time
 }
 
@@ -178,7 +180,7 @@ func ListJSONLSessions(ctx context.Context, root string, parse func(string) (Sou
 			return nil
 		}
 		harnessName := First(source.Harness, "unknown")
-		sessions = append(sessions, SessionMetadata{ID: id, Harness: harnessName, Path: path, CWD: source.CWD, Model: source.Model, Task: source.Task, UpdatedAt: info.ModTime()})
+		sessions = append(sessions, SessionMetadata{ID: id, Harness: harnessName, Path: path, CWD: source.CWD, Model: source.Model, Task: source.Task, CostUSD: source.CostUSD, UpdatedAt: info.ModTime()})
 		return nil
 	}); err != nil {
 		return nil, err

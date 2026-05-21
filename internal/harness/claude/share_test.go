@@ -18,7 +18,7 @@ func TestShareArtifactIngestsClaudeJSONL(t *testing.T) {
 	path := filepath.Join(home, ".claude", "projects", "-Users-nuno-dev-app", sessionID+".jsonl")
 	writeJSONL(t, path, `
 {"type":"user","timestamp":"2026-05-21T10:00:00.000Z","sessionId":"04a19a97-88b4-4e37-b81e-80359e5447c9","cwd":"$HOME/dev/app","message":{"role":"user","content":"fix the failing test"}}
-{"type":"assistant","timestamp":"2026-05-21T10:00:01.000Z","sessionId":"04a19a97-88b4-4e37-b81e-80359e5447c9","cwd":"$HOME/dev/app","message":{"role":"assistant","model":"claude-opus-4-7","content":[{"type":"thinking","thinking":"private reasoning","signature":"encrypted"},{"type":"text","text":"I'll inspect it."},{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"go test ./..."}}],"usage":{"input_tokens":3,"cache_read_input_tokens":7,"output_tokens":5}}}
+{"type":"assistant","timestamp":"2026-05-21T10:00:01.000Z","sessionId":"04a19a97-88b4-4e37-b81e-80359e5447c9","cwd":"$HOME/dev/app","costUSD":0.75,"message":{"role":"assistant","model":"claude-opus-4-7","content":[{"type":"thinking","thinking":"private reasoning","signature":"encrypted"},{"type":"text","text":"I'll inspect it."},{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"go test ./..."}}],"usage":{"input_tokens":3,"cache_read_input_tokens":7,"output_tokens":5}}}
 {"type":"user","timestamp":"2026-05-21T10:00:03.000Z","sessionId":"04a19a97-88b4-4e37-b81e-80359e5447c9","cwd":"$HOME/dev/app","message":{"role":"user","content":[{"tool_use_id":"toolu_1","type":"tool_result","content":"FAIL ./pkg\nExit code 1","is_error":true}]}}
 {"type":"assistant","timestamp":"2026-05-21T10:00:04.000Z","sessionId":"04a19a97-88b4-4e37-b81e-80359e5447c9","cwd":"$HOME/dev/app","message":{"role":"assistant","model":"claude-opus-4-7","content":[{"type":"tool_use","id":"toolu_2","name":"Read","input":{"file_path":"$HOME/dev/app/pkg/foo.go"}}]}}
 {"type":"user","timestamp":"2026-05-21T10:00:05.000Z","sessionId":"04a19a97-88b4-4e37-b81e-80359e5447c9","cwd":"$HOME/dev/app","message":{"role":"user","content":[{"tool_use_id":"toolu_2","type":"tool_result","content":"package pkg\nconst token = \"ok\"","is_error":false}]}}
@@ -46,6 +46,13 @@ func TestShareArtifactIngestsClaudeJSONL(t *testing.T) {
 	}
 	if artifact.Steps[2].Exit != 1 || artifact.Steps[2].Dur != 2 {
 		t.Fatalf("unexpected bash step: %#v", artifact.Steps[2])
+	}
+	sessions, err := New().ListSessions(context.Background(), map[string]string{"HOME": home})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].CostUSD != 0.75 {
+		t.Fatalf("unexpected session cost: %#v", sessions)
 	}
 }
 

@@ -192,7 +192,7 @@ func (s Service) localSessionEntries(ctx context.Context, ctxState workspaceCont
 				Lane:     firstNonEmpty(ctxState.Team.Lane, "local"),
 				Model:    firstNonEmpty(local.Model, ctxState.Team.DefaultModel, ctxState.TeamConfig.DefaultModel, api.DefaultModel),
 				Age:      ageSince(updatedAt, now),
-				Spent:    "€0.00",
+				Spent:    formatCostUSD(local.CostUSD),
 				Task:     local.Task,
 			},
 			Source:         "local",
@@ -609,12 +609,51 @@ func addListedSession(entries *[]ListedSession, seen map[string]int, candidate L
 	}
 	if idx, ok := seen[candidate.ID]; ok {
 		if listedSessionPreferred(candidate, (*entries)[idx]) {
-			(*entries)[idx] = candidate
+			(*entries)[idx] = mergeListedSession(candidate, (*entries)[idx])
+		} else {
+			(*entries)[idx] = mergeListedSession((*entries)[idx], candidate)
 		}
 		return
 	}
 	seen[candidate.ID] = len(*entries)
 	*entries = append(*entries, candidate)
+}
+
+func mergeListedSession(preferred, fallback ListedSession) ListedSession {
+	if preferred.State == "" {
+		preferred.State = fallback.State
+	}
+	if preferred.Harness == "" {
+		preferred.Harness = fallback.Harness
+	}
+	if preferred.Location == "" {
+		preferred.Location = fallback.Location
+	}
+	if preferred.Lane == "" {
+		preferred.Lane = fallback.Lane
+	}
+	if preferred.Model == "" {
+		preferred.Model = fallback.Model
+	}
+	if preferred.Age == "" {
+		preferred.Age = fallback.Age
+	}
+	if preferred.Spent == "" {
+		preferred.Spent = fallback.Spent
+	}
+	if preferred.Task == "" {
+		preferred.Task = fallback.Task
+	}
+	if preferred.TranscriptPath == "" {
+		preferred.TranscriptPath = fallback.TranscriptPath
+	}
+	if preferred.UpdatedAt == "" {
+		preferred.UpdatedAt = fallback.UpdatedAt
+	}
+	if preferred.updatedAt.IsZero() {
+		preferred.updatedAt = fallback.updatedAt
+	}
+	return preferred
 }
 
 func listedSessionPreferred(candidate, existing ListedSession) bool {
@@ -676,6 +715,16 @@ func ageSince(at time.Time, now time.Time) string {
 		return fmt.Sprintf("%dh", int(duration.Hours()))
 	}
 	return fmt.Sprintf("%dd", int(duration.Hours()/24))
+}
+
+func formatCostUSD(cost float64) string {
+	if cost <= 0 {
+		return ""
+	}
+	if cost < 0.01 {
+		return fmt.Sprintf("$%.4f", cost)
+	}
+	return fmt.Sprintf("$%.2f", cost)
 }
 
 func currentProjectRoot(ctx context.Context, env map[string]string) string {

@@ -274,6 +274,7 @@ func defaultMockSession(team Team) Session {
 		Model:    team.DefaultModel,
 		Age:      "14h",
 		Spent:    DefaultMockFixtures.DefaultSpend,
+		Task:     DefaultMockFixtures.DefaultTask,
 	}
 }
 

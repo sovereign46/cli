@@ -1115,13 +1115,100 @@ func sessionsCommand(runtime Runtime, opts *options) *cobra.Command {
 			if opts.json {
 				return app.renderer.WriteJSON(map[string]any{"sessions": sessions})
 			}
+			sessionIDs := displaySessionIDs(sessions)
 			rows := make([][]string, 0, len(sessions))
-			for _, session := range sessions {
-				rows = append(rows, []string{session.ID, session.State, session.Harness, session.Location, strs.FirstNonEmpty(session.Age, "0m"), strs.FirstNonEmpty(session.Spent, "€0.00")})
+			for i, session := range sessions {
+				rows = append(rows, []string{sessionIDs[i], session.State, session.Harness, displayTableCell(session.Model), strs.FirstNonEmpty(session.Age, "0m"), displayTableCell(session.Spent), displaySessionTask(session.Task)})
 			}
-			return app.renderer.Lines(output.Table([]string{"NAME", "STATE", "HARNESS", "LOCATION", "AGE", "SPENT"}, rows)...)
+			return app.renderer.Lines(output.Table([]string{"ID", "STATE", "HARNESS", "MODEL", "AGE", "SPENT", "TASK"}, rows)...)
 		},
 	}
+}
+
+func displaySessionIDs(sessions []sessioncmd.ListedSession) []string {
+	ids := make([]string, len(sessions))
+	for i, session := range sessions {
+		ids[i] = uniqueSessionIDPrefix(session.ID, sessions)
+	}
+	return ids
+}
+
+func uniqueSessionIDPrefix(id string, sessions []sessioncmd.ListedSession) string {
+	id = strings.TrimSpace(id)
+	if !looksLikeUUID(id) {
+		return id
+	}
+	for length := 8; length < len(id); length++ {
+		prefix := id[:length]
+		if sessionIDPrefixUnique(id, prefix, sessions) {
+			return prefix
+		}
+	}
+	return id
+}
+
+func sessionIDPrefixUnique(id string, prefix string, sessions []sessioncmd.ListedSession) bool {
+	for _, session := range sessions {
+		other := strings.TrimSpace(session.ID)
+		if other != id && strings.HasPrefix(other, prefix) {
+			return false
+		}
+	}
+	return true
+}
+
+func displaySessionID(id string) string {
+	id = strings.TrimSpace(id)
+	if looksLikeUUID(id) {
+		return id[:8]
+	}
+	return id
+}
+
+func looksLikeUUID(value string) bool {
+	if len(value) != 36 {
+		return false
+	}
+	for _, idx := range []int{8, 13, 18, 23} {
+		if value[idx] != '-' {
+			return false
+		}
+	}
+	for _, r := range value {
+		if r == '-' {
+			continue
+		}
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') && (r < 'A' || r > 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+func displayTableCell(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "—"
+	}
+	return value
+}
+
+func displaySessionTask(task string) string {
+	return displayTableCell(compactSessionTask(task, 72))
+}
+
+func compactSessionTask(task string, limit int) string {
+	task = strings.Join(strings.Fields(task), " ")
+	if task == "" || limit <= 0 {
+		return task
+	}
+	runes := []rune(task)
+	if len(runes) <= limit {
+		return task
+	}
+	if limit == 1 {
+		return "…"
+	}
+	return string(runes[:limit-1]) + "…"
 }
 
 func detachCommand(runtime Runtime, opts *options) *cobra.Command {
@@ -1314,11 +1401,16 @@ func inferredShareLines(session *sessioncmd.ListedSession) []string {
 	if session.Source == "local" {
 		label = "latest local session"
 	}
-	parts := []string{session.ID}
+	parts := []string{displaySessionID(session.ID)}
 	if session.Harness != "" {
 		parts = append(parts, session.Harness)
 	}
-	if session.Location != "" {
+	if session.Model != "" {
+		parts = append(parts, session.Model)
+	}
+	if task := compactSessionTask(session.Task, 48); task != "" {
+		parts = append(parts, task)
+	} else if session.Source != "local" && session.Location != "" {
 		parts = append(parts, session.Location)
 	}
 	return []string{fmt.Sprintf("[s46] sharing %s: %s", label, strings.Join(parts, " · "))}

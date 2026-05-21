@@ -19,7 +19,7 @@ func TestShareArtifactIngestsPiJSONL(t *testing.T) {
 {"type":"session","version":3,"id":"019e4ad2-ba3a-71f7-b34a-205e84be280e","timestamp":"2026-05-21T10:00:00.000Z","cwd":"$HOME/dev/app"}
 {"type":"model_change","timestamp":"2026-05-21T10:00:01.000Z","provider":"openai-codex","modelId":"gpt-5.5"}
 {"type":"message","timestamp":"2026-05-21T10:00:02.000Z","message":{"role":"user","content":[{"type":"text","text":"fix the failing test"}],"timestamp":1779357602000}}
-{"type":"message","timestamp":"2026-05-21T10:00:03.000Z","message":{"role":"assistant","model":"gpt-5.5","usage":{"input":10,"output":4},"content":[{"type":"thinking","thinking":"private chain of thought"},{"type":"text","text":"I'll inspect it."},{"type":"toolCall","id":"call_1","name":"bash","arguments":{"command":"go test ./...","cwd":"$HOME/dev/app"}}],"timestamp":"2026-05-21T10:00:03.000Z"}}
+{"type":"message","timestamp":"2026-05-21T10:00:03.000Z","message":{"role":"assistant","model":"gpt-5.5","usage":{"input":10,"output":4,"cost":{"input":1,"output":0.25,"total":1.25}},"content":[{"type":"thinking","thinking":"private chain of thought"},{"type":"text","text":"I'll inspect it."},{"type":"toolCall","id":"call_1","name":"bash","arguments":{"command":"go test ./...","cwd":"$HOME/dev/app"}}],"timestamp":"2026-05-21T10:00:03.000Z"}}
 {"type":"message","timestamp":"2026-05-21T10:00:05.000Z","message":{"role":"toolResult","toolCallId":"call_1","toolName":"bash","content":[{"type":"text","text":"FAIL ./pkg\nCommand exited with code 1"}],"timestamp":"2026-05-21T10:00:05.000Z"}}
 {"type":"message","timestamp":"2026-05-21T10:00:06.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"call_2","name":"read","arguments":{"path":"$HOME/dev/app/pkg/foo.go","offset":1,"limit":20}}],"timestamp":"2026-05-21T10:00:06.000Z"}}
 {"type":"message","timestamp":"2026-05-21T10:00:07.000Z","message":{"role":"toolResult","toolCallId":"call_2","toolName":"read","content":[{"type":"text","text":"package pkg\nconst token = \"ok\""}],"timestamp":"2026-05-21T10:00:07.000Z"}}
@@ -50,6 +50,13 @@ func TestShareArtifactIngestsPiJSONL(t *testing.T) {
 	}
 	if len(artifact.Files) != 1 || artifact.Files[0].Path != "~/dev/app/pkg/foo.go" {
 		t.Fatalf("unexpected files: %#v", artifact.Files)
+	}
+	sessions, err := New().ListSessions(context.Background(), map[string]string{"HOME": home})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].CostUSD != 1.25 {
+		t.Fatalf("unexpected session cost: %#v", sessions)
 	}
 }
 

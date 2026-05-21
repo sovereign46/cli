@@ -10,9 +10,12 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Added `s46 teams list` for discovering connected team configurations and the active team.
 - Added current-project local Pi, Claude Code, and Codex transcript discovery to `s46 sessions`.
+- Added local transcript cost extraction from Pi, Claude Code, and Codex harness metadata when available.
 
 ### Changed
 
+- Changed `s46 sessions` human output to show unique short IDs, model, prompt, and unknown spend instead of full transcript IDs and repeated local paths.
+- Changed inferred `s46 share` output to show the short session ID, harness, model, and prompt for latest local sessions.
 - Changed `s46 share` with no session argument to share the latest listed session.
 - Changed airplane gateway setup to install verified release archives from the `sovereign46/api` repository.
 - Changed interactive harness selection to default to `claude-code`.

@@ -46,7 +46,7 @@ func (a Adapter) ListSessions(ctx context.Context, env map[string]string) ([]har
 func localSessionsFromMetadata(metas []transcript.SessionMetadata) []harness.LocalSession {
 	sessions := make([]harness.LocalSession, 0, len(metas))
 	for _, meta := range metas {
-		sessions = append(sessions, harness.LocalSession{ID: meta.ID, Harness: meta.Harness, Path: meta.Path, CWD: meta.CWD, Model: meta.Model, Task: meta.Task, UpdatedAt: meta.UpdatedAt})
+		sessions = append(sessions, harness.LocalSession{ID: meta.ID, Harness: meta.Harness, Path: meta.Path, CWD: meta.CWD, Model: meta.Model, Task: meta.Task, CostUSD: meta.CostUSD, UpdatedAt: meta.UpdatedAt})
 	}
 	return sessions
 }
@@ -67,6 +67,7 @@ type claudeEvent struct {
 	Timestamp transcript.Timestamp `json:"timestamp"`
 	SessionID string               `json:"sessionId"`
 	CWD       string               `json:"cwd"`
+	CostUSD   float64              `json:"costUSD"`
 	Message   *claudeMessage       `json:"message"`
 }
 
@@ -138,6 +139,7 @@ type claudeJSONLParser struct {
 	end       time.Time
 	steps     []share.Step
 	usage     share.Usage
+	costUSD   float64
 	calls     map[string]claudeToolCall
 	files     map[string]share.File
 	fileOrder []string
@@ -156,6 +158,9 @@ func (p *claudeJSONLParser) consumeLine(line []byte) error {
 	}
 	eventTime := event.Timestamp.Time
 	p.noteTime(eventTime)
+	if event.CostUSD > 0 {
+		p.costUSD += event.CostUSD
+	}
 	if event.Message == nil {
 		return nil
 	}
@@ -300,7 +305,7 @@ func (p *claudeJSONLParser) session() transcript.Source {
 			duration = 0
 		}
 	}
-	return transcript.Source{ID: p.id, CWD: p.cwd, Model: p.model, Harness: "claude-code", Task: p.task, Steps: p.steps, Files: transcript.OrderedFiles(p.files, p.fileOrder), Usage: usage, DurationSeconds: duration}
+	return transcript.Source{ID: p.id, CWD: p.cwd, Model: p.model, Harness: "claude-code", Task: p.task, CostUSD: p.costUSD, Steps: p.steps, Files: transcript.OrderedFiles(p.files, p.fileOrder), Usage: usage, DurationSeconds: duration}
 }
 
 func decodeClaudeContent(raw json.RawMessage) []claudeContent {

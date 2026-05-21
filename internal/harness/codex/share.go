@@ -46,7 +46,7 @@ func (a Adapter) ListSessions(ctx context.Context, env map[string]string) ([]har
 func localSessionsFromMetadata(metas []transcript.SessionMetadata) []harness.LocalSession {
 	sessions := make([]harness.LocalSession, 0, len(metas))
 	for _, meta := range metas {
-		sessions = append(sessions, harness.LocalSession{ID: meta.ID, Harness: meta.Harness, Path: meta.Path, CWD: meta.CWD, Model: meta.Model, Task: meta.Task, UpdatedAt: meta.UpdatedAt})
+		sessions = append(sessions, harness.LocalSession{ID: meta.ID, Harness: meta.Harness, Path: meta.Path, CWD: meta.CWD, Model: meta.Model, Task: meta.Task, CostUSD: meta.CostUSD, UpdatedAt: meta.UpdatedAt})
 	}
 	return sessions
 }
@@ -77,6 +77,9 @@ type codexEvent struct {
 	Timestamp transcript.Timestamp `json:"timestamp"`
 	Type      string               `json:"type"`
 	Payload   codexPayload         `json:"payload"`
+	Usage     codexUsage           `json:"usage"`
+	CostUSD   float64              `json:"cost_usd"`
+	CostUSD2  float64              `json:"costUSD"`
 }
 
 type codexPayload struct {
@@ -98,6 +101,24 @@ type codexPayload struct {
 	AggregatedOutput string           `json:"aggregated_output"`
 	ExitCode         int              `json:"exit_code"`
 	Duration         codexDuration    `json:"duration"`
+	Usage            codexUsage       `json:"usage"`
+	CostUSD          float64          `json:"cost_usd"`
+	CostUSD2         float64          `json:"costUSD"`
+}
+
+type codexUsage struct {
+	Cost      codexCost `json:"cost"`
+	TotalCost float64   `json:"total_cost"`
+	CostUSD   float64   `json:"cost_usd"`
+	CostUSD2  float64   `json:"costUSD"`
+}
+
+type codexCost struct {
+	Input      float64 `json:"input"`
+	Output     float64 `json:"output"`
+	CacheRead  float64 `json:"cacheRead"`
+	CacheWrite float64 `json:"cacheWrite"`
+	Total      float64 `json:"total"`
 }
 
 type codexContent struct {
@@ -159,6 +180,7 @@ type codexJSONLParser struct {
 	start     time.Time
 	end       time.Time
 	steps     []share.Step
+	costUSD   float64
 	calls     map[string]codexToolCall
 	files     map[string]share.File
 	fileOrder []string
@@ -171,6 +193,7 @@ func (p *codexJSONLParser) consumeLine(line []byte) error {
 	}
 	eventTime := event.Timestamp.Time
 	p.noteTime(eventTime)
+	p.costUSD += event.costUSD()
 	switch event.Type {
 	case "session_meta":
 		p.id = event.Payload.ID
@@ -344,7 +367,31 @@ func (p *codexJSONLParser) session() transcript.Source {
 			duration = 0
 		}
 	}
-	return transcript.Source{ID: p.id, CWD: p.cwd, Model: p.model, Harness: "codex", Task: p.task, Steps: p.steps, Files: transcript.OrderedFiles(p.files, p.fileOrder), Usage: share.Usage{ToolCalls: transcript.CountToolSteps(p.steps)}, DurationSeconds: duration}
+	return transcript.Source{ID: p.id, CWD: p.cwd, Model: p.model, Harness: "codex", Task: p.task, CostUSD: p.costUSD, Steps: p.steps, Files: transcript.OrderedFiles(p.files, p.fileOrder), Usage: share.Usage{ToolCalls: transcript.CountToolSteps(p.steps)}, DurationSeconds: duration}
+}
+
+func (e codexEvent) costUSD() float64 {
+	return firstPositive(e.CostUSD, e.CostUSD2, e.Usage.total(), e.Payload.CostUSD, e.Payload.CostUSD2, e.Payload.Usage.total())
+}
+
+func (u codexUsage) total() float64 {
+	return firstPositive(u.CostUSD, u.CostUSD2, u.TotalCost, u.Cost.total())
+}
+
+func (c codexCost) total() float64 {
+	if c.Total > 0 {
+		return c.Total
+	}
+	return c.Input + c.Output + c.CacheRead + c.CacheWrite
+}
+
+func firstPositive(values ...float64) float64 {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
 }
 
 func decodeCodexArguments(raw json.RawMessage) map[string]any {

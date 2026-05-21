@@ -21,7 +21,7 @@ func TestShareArtifactIngestsCodexJSONL(t *testing.T) {
 {"timestamp":"2026-05-21T10:00:00.000Z","type":"turn_context","payload":{"cwd":"$HOME/dev/app","model":"gpt-5.5"}}
 {"timestamp":"2026-05-21T10:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for $HOME/dev/app\nsecret instructions"}]}}
 {"timestamp":"2026-05-21T10:00:02.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"do an architectural review"}]}}
-{"timestamp":"2026-05-21T10:00:03.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"I'll inspect the code."}]}}
+{"timestamp":"2026-05-21T10:00:03.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"I'll inspect the code."}],"usage":{"cost":{"input":0.25,"output":0.25,"total":0.5}}}}
 {"timestamp":"2026-05-21T10:00:04.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"go test ./...\",\"workdir\":\"$HOME/dev/app\"}","call_id":"call_test"}}
 {"timestamp":"2026-05-21T10:00:06.000Z","type":"event_msg","payload":{"type":"exec_command_end","call_id":"call_test","command":["/bin/zsh","-lc","go test ./..."],"cwd":"$HOME/dev/app","stdout":"","stderr":"","aggregated_output":"FAIL ./pkg","exit_code":1,"duration":{"secs":2,"nanos":0},"status":"failed"}}
 {"timestamp":"2026-05-21T10:00:07.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"sed -n '1,20p' pkg/foo.go\",\"workdir\":\"$HOME/dev/app\"}","call_id":"call_read"}}
@@ -47,6 +47,13 @@ func TestShareArtifactIngestsCodexJSONL(t *testing.T) {
 	}
 	if artifact.Steps[2].Exit != 1 || artifact.Steps[2].Dur != 2 || artifact.Steps[3].Lines != 2 {
 		t.Fatalf("unexpected tool steps: %#v %#v", artifact.Steps[2], artifact.Steps[3])
+	}
+	sessions, err := New().ListSessions(context.Background(), map[string]string{"HOME": home})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].CostUSD != 0.5 {
+		t.Fatalf("unexpected session cost: %#v", sessions)
 	}
 }
 

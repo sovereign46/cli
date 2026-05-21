@@ -46,7 +46,7 @@ func (a Adapter) ListSessions(ctx context.Context, env map[string]string) ([]har
 func localSessionsFromMetadata(metas []transcript.SessionMetadata) []harness.LocalSession {
 	sessions := make([]harness.LocalSession, 0, len(metas))
 	for _, meta := range metas {
-		sessions = append(sessions, harness.LocalSession{ID: meta.ID, Harness: meta.Harness, Path: meta.Path, CWD: meta.CWD, Model: meta.Model, Task: meta.Task, UpdatedAt: meta.UpdatedAt})
+		sessions = append(sessions, harness.LocalSession{ID: meta.ID, Harness: meta.Harness, Path: meta.Path, CWD: meta.CWD, Model: meta.Model, Task: meta.Task, CostUSD: meta.CostUSD, UpdatedAt: meta.UpdatedAt})
 	}
 	return sessions
 }
@@ -95,8 +95,17 @@ type piContent struct {
 }
 
 type piUsage struct {
-	Input  int `json:"input"`
-	Output int `json:"output"`
+	Input  int    `json:"input"`
+	Output int    `json:"output"`
+	Cost   piCost `json:"cost"`
+}
+
+type piCost struct {
+	Input      float64 `json:"input"`
+	Output     float64 `json:"output"`
+	CacheRead  float64 `json:"cacheRead"`
+	CacheWrite float64 `json:"cacheWrite"`
+	Total      float64 `json:"total"`
 }
 
 type piToolCall struct {
@@ -142,6 +151,7 @@ type piJSONLParser struct {
 	end       time.Time
 	steps     []share.Step
 	usage     share.Usage
+	costUSD   float64
 	calls     map[string]piToolCall
 	files     map[string]share.File
 	fileOrder []string
@@ -180,6 +190,7 @@ func (p *piJSONLParser) consumeMessage(message *piMessage, eventTime time.Time) 
 	}
 	p.usage.TokensIn += message.Usage.Input
 	p.usage.TokensOut += message.Usage.Output
+	p.costUSD += message.Usage.Cost.total()
 	switch message.Role {
 	case "user":
 		text := piContentText(message.Content)
@@ -303,7 +314,14 @@ func (p *piJSONLParser) session() piParsedSession {
 			duration = 0
 		}
 	}
-	return piParsedSession{ID: p.id, CWD: p.cwd, Model: p.model, Harness: "pi", Task: p.task, Steps: p.steps, Files: transcript.OrderedFiles(p.files, p.fileOrder), Usage: usage, DurationSeconds: duration}
+	return piParsedSession{ID: p.id, CWD: p.cwd, Model: p.model, Harness: "pi", Task: p.task, CostUSD: p.costUSD, Steps: p.steps, Files: transcript.OrderedFiles(p.files, p.fileOrder), Usage: usage, DurationSeconds: duration}
+}
+
+func (c piCost) total() float64 {
+	if c.Total > 0 {
+		return c.Total
+	}
+	return c.Input + c.Output + c.CacheRead + c.CacheWrite
 }
 
 func piContentText(items []piContent) string {

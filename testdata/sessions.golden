@@ -1,2 +1,2 @@
-NAME                       STATE    HARNESS   LOCATION             AGE  SPENT
-@dscape/auth-redirect-fix  running  standard  box-04.acme.s46.dev  14h  €4.20
+ID                         STATE    HARNESS   MODEL          AGE  SPENT    TASK
+@dscape/auth-redirect-fix  running  standard  s46/kimi-k2.6  14h  €4.20  Fix auth redirect handling

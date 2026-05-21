@@ -423,6 +423,9 @@ func TestListReturnsLocalSessionsWithoutActiveTeam(t *testing.T) {
 	if len(listed) != 1 || listed[0].ID != sessionID || listed[0].Source != "local" || listed[0].Harness != "pi" {
 		t.Fatalf("listed = %#v", listed)
 	}
+	if listed[0].Spent != "" {
+		t.Fatalf("local session without harness cost should not report fake spend: %#v", listed[0])
+	}
 }
 
 func TestLandReturnsAPIErrorUnchanged(t *testing.T) {
