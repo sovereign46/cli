@@ -207,13 +207,13 @@ func (s Service) localSessionEntries(ctx context.Context, ctxState workspaceCont
 func (s Service) sessionsForbiddenError(ctx context.Context, ctxState workspaceContext, accessToken string) error {
 	parts := []string{fmt.Sprintf("could not list sessions for active team %s: API denied access", ctxState.TeamName)}
 	if accessToken == "" {
-		parts = append(parts, "no local bearer token was found; run `s46 login --user <email>`")
+		parts = append(parts, "no local bearer token was found; run `s46 login --email <email>`")
 		return errors.New(strings.Join(parts, ". "))
 	}
 	user, err := s.API.Me(ctx, accessToken)
 	if err != nil {
 		parts = append(parts, fmt.Sprintf("could not verify the token with /v1/me: %v", err))
-		parts = append(parts, "run `s46 logout` and then `s46 login --user <email>`")
+		parts = append(parts, "run `s46 logout` and then `s46 login --email <email>`")
 		return errors.New(strings.Join(parts, ". "))
 	}
 	if user.Email != "" {

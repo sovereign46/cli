@@ -366,7 +366,7 @@ func TestNoInputDoesNotPrompt(t *testing.T) {
 
 func TestTokenJSONAndAirplaneLogsJSONL(t *testing.T) {
 	env := testEnv(t)
-	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
 	token := requireOK(t, run(t, env, "token", "--refresh", "--json"))
 	var tokenPayload struct {
 		Token string `json:"token"`
@@ -537,7 +537,7 @@ func TestLoginTellsUserToCheckEmail(t *testing.T) {
 	defer server.Close()
 	env["S46_API_BASE_URL"] = server.URL
 
-	out := requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev", "--device-id", "dev-laptop", "--device-name", "Dev laptop"))
+	out := requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev", "--device-id", "dev-laptop", "--device-name", "Dev laptop"))
 	if !strings.Contains(out, "check your email at dscape@acme.s46.dev") || strings.Contains(out, "magic-link endpoint") || strings.Contains(out, "API server") {
 		t.Fatalf("unexpected login output: %s", out)
 	}
@@ -610,7 +610,7 @@ func TestInteractiveLoginPromptsForRequiredInputs(t *testing.T) {
 	env["HOSTNAME"] = "dev-laptop"
 	out := requireOK(t, runWithStdin(t, env, strings.NewReader("dscape@acme.s46.dev\n\n\n"), "login"))
 	for _, want := range []string{
-		"[s46] interactive login: waiting for input (use --user/--device-id for non-interactive runs)",
+		"[s46] interactive login: waiting for input (use --email/--device-id for non-interactive runs)",
 		"Email: ",
 		"Device ID [dev-laptop]: ",
 		"Device name [dev-laptop]: ",
@@ -662,7 +662,7 @@ func TestLoginLocalAPIConnectionRefusedExplainsServerNotRunning(t *testing.T) {
 	env["S46_API_BASE_URL"] = baseURL
 	env["S46_API_REPO"] = "/tmp/s46-api"
 
-	result := run(t, env, "login", "--user", "dscape@acme.s46.dev", "--device-id", "dev-laptop")
+	result := run(t, env, "login", "--email", "dscape@acme.s46.dev", "--device-id", "dev-laptop")
 	if result.err == nil {
 		t.Fatal("expected login to fail")
 	}
@@ -680,7 +680,7 @@ func TestLoginLocalAPIConnectionRefusedExplainsServerNotRunning(t *testing.T) {
 
 func TestLoginTokenWhoamiLogout(t *testing.T) {
 	env := testEnv(t)
-	out := requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	out := requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
 	if !strings.Contains(out, "authenticated as dscape@acme.s46.dev") {
 		t.Fatalf("unexpected login output: %s", out)
 	}
@@ -714,7 +714,7 @@ func TestInteractiveConnectRequiresLoginBeforePrompt(t *testing.T) {
 
 func TestInteractiveConnectPromptsForRequiredInputs(t *testing.T) {
 	env := testEnv(t)
-	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
 	out := requireOK(t, runWithStdin(t, env, strings.NewReader("\n\n\n"), "connect"))
 	for _, want := range []string{
 		"[s46] interactive connect: waiting for input (use <team>/--harness for non-interactive runs)",
@@ -731,7 +731,7 @@ func TestInteractiveConnectPromptsForRequiredInputs(t *testing.T) {
 
 func TestInteractiveConnectCanBeCanceledWithEscapeInput(t *testing.T) {
 	env := testEnv(t)
-	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
 	result := runWithStdin(t, env, strings.NewReader("\x1b\n"), "connect")
 	if !errors.Is(result.err, errInteractiveCanceled) {
 		t.Fatalf("expected interactive cancel, got err=%v stdout=%q stderr=%q", result.err, result.stdout, result.stderr)
@@ -740,7 +740,7 @@ func TestInteractiveConnectCanBeCanceledWithEscapeInput(t *testing.T) {
 
 func TestConnectWithTeamPromptsForMissingAmbiguousHarness(t *testing.T) {
 	env := testEnv(t)
-	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
 	piConfig := filepath.Join(env["HOME"], ".pi", "agent", "models.json")
 	if err := os.MkdirAll(filepath.Dir(piConfig), 0o755); err != nil {
 		t.Fatal(err)
@@ -773,7 +773,7 @@ func TestConnectWithTeamPromptsForMissingAmbiguousHarness(t *testing.T) {
 
 func TestAirplaneModeOnAndCloudModeRestoreEndpoint(t *testing.T) {
 	env := testEnv(t)
-	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
 	requireOK(t, run(t, env, "connect", "acme", "--harness=standard"))
 
 	on := requireOK(t, run(t, env, "mode", "airplane"))
@@ -921,7 +921,7 @@ func TestAirplaneSetupContinuesAfterInstallingOllama(t *testing.T) {
 
 func TestStatusShowsOllamaRuntime(t *testing.T) {
 	env := testEnv(t)
-	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
 	requireOK(t, run(t, env, "connect", "acme", "--harness=standard"))
 	env["S46_TEST_OLLAMA_RUNNING"] = "1"
 	env["S46_TEST_OLLAMA_PROCESS_KIND"] = "manual"
@@ -1201,7 +1201,7 @@ func TestAirplaneModeOffRestoresManagedHarnessesExactly(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			env := testEnv(t)
-			requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+			requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
 			requireOK(t, run(t, env, "connect", "acme", "--harness="+tc.harness))
 			path := tc.path(env)
 			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -1246,7 +1246,7 @@ func TestAirplaneModeOffRestoresManagedHarnessesExactly(t *testing.T) {
 
 func prepareCustomPiConfig(t *testing.T, env map[string]string) (string, []byte) {
 	t.Helper()
-	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
 	requireOK(t, run(t, env, "connect", "acme", "--harness=pi"))
 
 	modelsPath := filepath.Join(env["HOME"], ".pi", "agent", "models.json")
@@ -1313,7 +1313,7 @@ func assertNoHarnessSnapshot(t *testing.T, env map[string]string) {
 
 func TestAirplaneSetupOffersToTurnOnAirplaneMode(t *testing.T) {
 	env := testEnv(t)
-	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
 	requireOK(t, run(t, env, "connect", "acme", "--harness=standard"))
 
 	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\n\n"), "airplane", "setup"))
@@ -1337,7 +1337,7 @@ func TestAirplaneSetupOffersToTurnOnAirplaneMode(t *testing.T) {
 func TestAirplaneTokenHelperUsesLocalToken(t *testing.T) {
 	env := testEnv(t)
 	env["S46_AIRPLANE_TOKEN"] = "local-airplane-token"
-	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
 	requireOK(t, run(t, env, "connect", "acme", "--harness=standard"))
 	requireOK(t, run(t, env, "mode", "airplane"))
 
@@ -1371,12 +1371,12 @@ func TestAirplaneHelpShowsUnavailableCloudCommandsAndModeOff(t *testing.T) {
 
 func TestAirplaneCloudCommandsFailFast(t *testing.T) {
 	env := testEnv(t)
-	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
 	requireOK(t, run(t, env, "connect", "acme", "--harness=standard"))
 	requireOK(t, run(t, env, "mode", "airplane"))
 
 	commands := map[string][]string{
-		"login":             {"login", "--user", "dscape@acme.s46.dev"},
+		"login":             {"login", "--email", "dscape@acme.s46.dev"},
 		"devices":           {"devices"},
 		"device revocation": {"devices", "delete", "dev-laptop"},
 		"update":            {"update"},
@@ -1504,7 +1504,7 @@ func TestAirplaneSetupReportsInsufficientHardware(t *testing.T) {
 
 func TestConnectClaudeWritesHarnessConfig(t *testing.T) {
 	env := testEnv(t)
-	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
 	settingsPath := filepath.Join(env["HOME"], ".claude", "settings.json")
 	requireOK(t, run(t, env, "connect", "acme", "--harness=claude-code"))
 	settings := map[string]any{}
@@ -1520,7 +1520,7 @@ func TestConnectClaudeWritesHarnessConfig(t *testing.T) {
 
 func TestConnectCodexAndPi(t *testing.T) {
 	env := testEnv(t)
-	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
 	requireOK(t, run(t, env, "connect", "acme", "--harness=codex"))
 	codexConfig, err := os.ReadFile(filepath.Join(env["HOME"], ".codex", "config.toml"))
 	if err != nil {
@@ -1548,7 +1548,7 @@ func TestConnectCodexAndPi(t *testing.T) {
 
 func TestStatusModeSessionsAndShare(t *testing.T) {
 	env := testEnv(t)
-	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
 	requireOK(t, run(t, env, "connect", "acme", "--harness=standard"))
 	requireOK(t, run(t, env, "mode", "cloud"))
 	assertGolden(t, "status.golden", requireOK(t, run(t, env, "status")))
@@ -1586,7 +1586,7 @@ func TestStatusModeSessionsAndShare(t *testing.T) {
 
 func TestTeamsListShowsConnectedTeamsAndActiveTeam(t *testing.T) {
 	env := testEnv(t)
-	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
 	requireOK(t, run(t, env, "connect", "acme", "--harness=standard"))
 	requireOK(t, run(t, env, "connect", "beta", "--harness=standard", "--model=s46/qwen3-coder"))
 
@@ -1621,7 +1621,7 @@ func TestTeamsListShowsConnectedTeamsAndActiveTeam(t *testing.T) {
 
 func TestSessionLifecycleAndRunSlug(t *testing.T) {
 	env := testEnv(t)
-	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
 	if out := requireOK(t, run(t, env, "detach", "@dscape/auth-redirect-fix")); !strings.Contains(out, "detached standard session") {
 		t.Fatalf("unexpected detach: %s", out)
 	}
@@ -1645,7 +1645,7 @@ func TestSessionLifecycleAndRunSlug(t *testing.T) {
 
 func TestBackupsBeforeOverwriteAndIdempotency(t *testing.T) {
 	env := testEnv(t)
-	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
 	requireOK(t, run(t, env, "connect", "acme", "--harness=claude-code"))
 	settingsPath := filepath.Join(env["HOME"], ".claude", "settings.json")
 	first, err := os.ReadFile(settingsPath)
@@ -1678,7 +1678,7 @@ func TestBackupsBeforeOverwriteAndIdempotency(t *testing.T) {
 
 func TestStatusAfterLoginDoesNotRequireHarnessConnect(t *testing.T) {
 	env := testEnv(t)
-	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
 	out := requireOK(t, run(t, env, "--verbose", "status"))
 	if !strings.Contains(out, "[ok] standard") || strings.Contains(out, "claude-config") {
 		t.Fatalf("unexpected status output: %s", out)
@@ -1715,7 +1715,7 @@ func TestDisconnectTeamsUseStatusAndModeRequireActiveTeam(t *testing.T) {
 		t.Fatalf("expected airplane mode without active team to create local team:\n%s", airplaneOut)
 	}
 	requireOK(t, run(t, env, "airplane", "mode", "off"))
-	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
 	requireOK(t, run(t, env, "connect", "acme", "--harness=claude-code"))
 	if out := requireOK(t, run(t, env, "--verbose", "status")); !strings.Contains(out, "[ok] tenant") || !strings.Contains(out, "[ok] harness") {
 		t.Fatalf("unexpected status output: %s", out)

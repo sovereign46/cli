@@ -17,7 +17,7 @@ go test ./...
 For local mock/test runs, swap the OS keychain for a file backend:
 
 ```sh
-S46_KEYRING_BACKEND=file go run ./cmd/s46 login --user dscape@acme.s46.dev --device-id dev-laptop
+S46_KEYRING_BACKEND=file go run ./cmd/s46 login --email dscape@acme.s46.dev --device-id dev-laptop
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the sandboxed `make shell` flow.
@@ -25,7 +25,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the sandboxed `make shell` flow.
 ## Commands
 
 ```sh
-s46 login --user <email> --device-id <id> [--device-name <name>]
+s46 login --email <email> --device-id <id> [--device-name <name>]
 s46 logout
 s46 whoami
 s46 token --refresh

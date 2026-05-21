@@ -12,11 +12,13 @@ import (
 	"github.com/sovereign46/s46-cli/internal/strs"
 )
 
+var errInteractiveCanceled = errors.New("interactive prompt canceled")
+
 // promptLoginRequest fills a LoginRequest from interactive stdin input,
 // using existing local state and env vars as defaults.
 func promptLoginRequest(app *app, req auth.LoginRequest) (auth.LoginRequest, error) {
 	if !app.canPrompt() {
-		return auth.LoginRequest{}, fmt.Errorf("interactive login requires a terminal; pass --user <email> --device-id <id>")
+		return auth.LoginRequest{}, fmt.Errorf("interactive login requires a terminal; pass --email <email> --device-id <id>")
 	}
 	out := app.runtime.Stdout
 	if out == nil {
@@ -29,7 +31,7 @@ func promptLoginRequest(app *app, req auth.LoginRequest) (auth.LoginRequest, err
 	defaultID := strs.FirstNonEmpty(app.runtime.Env["S46_DEVICE_ID"], state.CurrentDeviceID, app.runtime.Env["HOSTNAME"], hostname(), "default-device")
 	defaultName := strs.FirstNonEmpty(app.runtime.Env["S46_DEVICE_NAME"], state.CurrentDeviceName, app.runtime.Env["HOSTNAME"], hostname(), defaultID)
 	reader := app.stdinReader()
-	if _, err := fmt.Fprintln(out, "[s46] interactive login: waiting for input (use --user/--device-id for non-interactive runs)"); err != nil {
+	if _, err := fmt.Fprintln(out, "[s46] interactive login: waiting for input (use --email/--device-id for non-interactive runs)"); err != nil {
 		return auth.LoginRequest{}, err
 	}
 	if err := writeInteractiveCancelHint(out); err != nil {
