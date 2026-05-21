@@ -2,6 +2,7 @@ package transcript
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,6 +35,16 @@ type Candidate struct {
 	Path    string
 	ModTime time.Time
 	Exact   bool
+}
+
+type SessionMetadata struct {
+	ID        string
+	Harness   string
+	Path      string
+	CWD       string
+	Model     string
+	Task      string
+	UpdatedAt time.Time
 }
 
 type Timestamp struct {
@@ -131,6 +142,48 @@ func ResolveJSONL(home string, rootRel string, sessionRef string, idFromFilename
 		return candidates[i].ModTime.After(candidates[j].ModTime)
 	})
 	return candidates[0].Path, true, nil
+}
+
+func ListJSONLSessions(ctx context.Context, root string, parse func(string) (Source, error)) ([]SessionMetadata, error) {
+	if _, err := os.Stat(root); err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	sessions := []SessionMetadata{}
+	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if entry.IsDir() || filepath.Ext(path) != ".jsonl" {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		source, err := parse(path)
+		if err != nil {
+			if errors.Is(err, ErrUnrecognized) {
+				return nil
+			}
+			return err
+		}
+		id := strings.TrimSpace(source.ID)
+		if id == "" {
+			return nil
+		}
+		harnessName := First(source.Harness, "unknown")
+		sessions = append(sessions, SessionMetadata{ID: id, Harness: harnessName, Path: path, CWD: source.CWD, Model: source.Model, Task: source.Task, UpdatedAt: info.ModTime()})
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return sessions, nil
 }
 
 func ResolveExplicitPath(home string, ref string) (string, bool, error) {

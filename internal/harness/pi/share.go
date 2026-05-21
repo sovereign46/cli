@@ -34,6 +34,23 @@ func (a Adapter) ShareArtifact(ctx context.Context, req harness.ShareRequest) (s
 	return transcript.BuildArtifact(source, req.Session, share.BuildOptions{TeamName: req.TeamName, User: req.User, Home: config.HomeDir(req.Env)}), true, nil
 }
 
+func (a Adapter) ListSessions(ctx context.Context, env map[string]string) ([]harness.LocalSession, error) {
+	root := filepath.Join(config.HomeDir(env), sessionsRelPath)
+	metas, err := transcript.ListJSONLSessions(ctx, root, parsePiSessionJSONL)
+	if err != nil {
+		return nil, err
+	}
+	return localSessionsFromMetadata(metas), nil
+}
+
+func localSessionsFromMetadata(metas []transcript.SessionMetadata) []harness.LocalSession {
+	sessions := make([]harness.LocalSession, 0, len(metas))
+	for _, meta := range metas {
+		sessions = append(sessions, harness.LocalSession{ID: meta.ID, Harness: meta.Harness, Path: meta.Path, CWD: meta.CWD, Model: meta.Model, Task: meta.Task, UpdatedAt: meta.UpdatedAt})
+	}
+	return sessions
+}
+
 func piHeaderID(path string) (string, error) {
 	var event piEvent
 	return transcript.HeaderID(path, &event, func(value any) string {

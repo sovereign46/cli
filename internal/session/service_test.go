@@ -401,21 +401,27 @@ func newTestService(t *testing.T, team api.Team, mode string, extraEnv map[strin
 	return Service{API: mockClient, Auth: authService, Config: store, Harness: harness.NewRegistry(pi.New())}, store
 }
 
-func TestListErrorsWhenNoActiveTeam(t *testing.T) {
+func TestListReturnsLocalSessionsWithoutActiveTeam(t *testing.T) {
 	home := t.TempDir()
 	env := map[string]string{
 		"HOME":            home,
 		"XDG_CONFIG_HOME": home + "/.config",
 		"XDG_DATA_HOME":   home + "/.data",
+		"PWD":             "/Users/nuno/dev/app",
 	}
 	store := config.NewStore(env, "")
-	service := Service{API: api.NewMockClient(), Config: store}
-	_, err := service.List(context.Background())
-	if err == nil {
-		t.Fatal("expected error when no active team is configured")
+	const sessionID = "019e4ad2-ba3a-71f7-b34a-205e84be280e"
+	writeSessionJSONL(t, filepath.Join(home, ".pi", "agent", "sessions", "--Users-nuno-dev-app--", "2026-05-21T10-00-00-000Z_"+sessionID+".jsonl"), `
+{"type":"session","id":"019e4ad2-ba3a-71f7-b34a-205e84be280e","timestamp":"2026-05-21T10:00:00.000Z","cwd":"/Users/nuno/dev/app"}
+{"type":"message","timestamp":"2026-05-21T10:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"actual pi prompt"}],"timestamp":"2026-05-21T10:00:01.000Z"}}
+`)
+	service := Service{API: api.NewMockClient(), Config: store, Harness: harness.NewRegistry(pi.New())}
+	listed, err := service.ListEntries(context.Background())
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(err.Error(), "no active team") {
-		t.Fatalf("expected no-active-team error, got: %v", err)
+	if len(listed) != 1 || listed[0].ID != sessionID || listed[0].Source != "local" || listed[0].Harness != "pi" {
+		t.Fatalf("listed = %#v", listed)
 	}
 }
 

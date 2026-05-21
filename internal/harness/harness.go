@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/sovereign46/s46-cli/internal/api"
 	"github.com/sovereign46/s46-cli/internal/config"
@@ -103,6 +104,26 @@ type ShareRequest struct {
 	User     string
 }
 
+// LocalSession is a discovered transcript-backed coding session from a
+// harness's own local storage. It is intentionally separate from api.Session:
+// local discovery carries filesystem metadata that the remote API does not.
+type LocalSession struct {
+	ID        string
+	Harness   string
+	Path      string
+	CWD       string
+	Model     string
+	Task      string
+	UpdatedAt time.Time
+}
+
+// SessionLister is an optional adapter capability. Adapters that store local
+// transcripts implement it so `s46 sessions` and default `s46 share` can use
+// the same ids that the share parser accepts.
+type SessionLister interface {
+	ListSessions(ctx context.Context, env map[string]string) ([]LocalSession, error)
+}
+
 type Adapter interface {
 	Name() string
 	Detect(ctx context.Context, env map[string]string) (Detection, error)
@@ -166,6 +187,26 @@ func (r *Registry) ShareArtifact(ctx context.Context, req ShareRequest) (share.A
 		return share.Artifact{}, false, fmt.Errorf("no harness adapter recognized transcript path %q", req.Session.ID)
 	}
 	return share.Artifact{}, false, nil
+}
+
+func (r *Registry) ListSessions(ctx context.Context, env map[string]string) ([]LocalSession, error) {
+	sessions := []LocalSession{}
+	for _, name := range r.Names() {
+		adapter, ok := r.adapters[name]
+		if !ok {
+			continue
+		}
+		lister, ok := adapter.(SessionLister)
+		if !ok {
+			continue
+		}
+		listed, err := lister.ListSessions(ctx, env)
+		if err != nil {
+			return nil, fmt.Errorf("%s sessions: %w", name, err)
+		}
+		sessions = append(sessions, listed...)
+	}
+	return sessions, nil
 }
 
 func looksLikeTranscriptPath(ref string) bool {

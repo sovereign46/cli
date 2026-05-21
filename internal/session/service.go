@@ -6,10 +6,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/sovereign46/s46-cli/internal/api"
 	"github.com/sovereign46/s46-cli/internal/config"
@@ -81,39 +84,127 @@ type RunResult struct {
 	DryRun   bool   `json:"dryRun"`
 }
 
+type ListedSession struct {
+	api.Session
+	Source         string `json:"source,omitempty"`
+	TranscriptPath string `json:"transcriptPath,omitempty"`
+	UpdatedAt      string `json:"updatedAt,omitempty"`
+
+	updatedAt time.Time
+}
+
 func (s Service) List(ctx context.Context) ([]api.Session, error) {
-	ctxState, err := s.contextState()
+	entries, err := s.ListEntries(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if len(ctxState.State.Sessions) > 0 {
-		sessions := make([]api.Session, 0, len(ctxState.State.Sessions))
-		for _, session := range ctxState.State.Sessions {
-			sessions = append(sessions, session)
-		}
-		sort.Slice(sessions, func(i, j int) bool { return sessions[i].ID < sessions[j].ID })
-		return sessions, nil
-	}
-	if ctxState.Config.ActiveMode() == config.ModeAirplane {
-		return []api.Session{}, nil
-	}
-	accessToken, tokenErr := s.accessToken(ctx, ctxState)
-	if tokenErr != nil {
-		return nil, fmt.Errorf("could not obtain s46 access token: %w; run `s46 login` if your session expired", tokenErr)
-	}
-	sessions, err := s.API.Sessions(ctx, ctxState.Team, accessToken)
-	if err != nil {
-		if errors.Is(err, api.ErrForbidden) {
-			return nil, s.sessionsForbiddenError(ctx, ctxState, accessToken)
-		}
-		return nil, err
-	}
-	for i := range sessions {
-		if ctxState.TeamConfig.DefaultHarness != "" {
-			sessions[i].Harness = ctxState.TeamConfig.DefaultHarness
-		}
+	sessions := make([]api.Session, 0, len(entries))
+	for _, entry := range entries {
+		sessions = append(sessions, entry.Session)
 	}
 	return sessions, nil
+}
+
+func (s Service) ListEntries(ctx context.Context) ([]ListedSession, error) {
+	ctxState, hasActiveTeam, err := s.relaxedContextState()
+	if err != nil {
+		return nil, err
+	}
+	entries := []ListedSession{}
+	seen := map[string]int{}
+	for _, session := range ctxState.State.Sessions {
+		addListedSession(&entries, seen, ListedSession{Session: session, Source: "state"})
+	}
+	localEntries, err := s.localSessionEntries(ctx, ctxState)
+	if err != nil {
+		return nil, err
+	}
+	for _, entry := range localEntries {
+		addListedSession(&entries, seen, entry)
+	}
+	if hasActiveTeam && ctxState.Config.ActiveMode() != config.ModeAirplane {
+		accessToken, tokenErr := s.accessToken(ctx, ctxState)
+		if tokenErr != nil {
+			if len(entries) > 0 {
+				sortListedSessions(entries)
+				return entries, nil
+			}
+			return nil, fmt.Errorf("could not obtain s46 access token: %w; run `s46 login` if your session expired", tokenErr)
+		}
+		remote, err := s.API.Sessions(ctx, ctxState.Team, accessToken)
+		if err != nil {
+			if len(entries) > 0 {
+				sortListedSessions(entries)
+				return entries, nil
+			}
+			if errors.Is(err, api.ErrForbidden) {
+				return nil, s.sessionsForbiddenError(ctx, ctxState, accessToken)
+			}
+			return nil, err
+		}
+		for _, session := range remote {
+			if ctxState.TeamConfig.DefaultHarness != "" {
+				session.Harness = ctxState.TeamConfig.DefaultHarness
+			}
+			addListedSession(&entries, seen, ListedSession{Session: session, Source: "remote"})
+		}
+	}
+	sortListedSessions(entries)
+	return entries, nil
+}
+
+func (s Service) LatestSession(ctx context.Context) (ListedSession, bool, error) {
+	entries, err := s.ListEntries(ctx)
+	if err != nil {
+		return ListedSession{}, false, err
+	}
+	if len(entries) == 0 {
+		return ListedSession{}, false, nil
+	}
+	return entries[0], true, nil
+}
+
+func (s Service) localSessionEntries(ctx context.Context, ctxState workspaceContext) ([]ListedSession, error) {
+	lister, ok := s.Harness.(interface {
+		ListSessions(context.Context, map[string]string) ([]harness.LocalSession, error)
+	})
+	if !ok {
+		return nil, nil
+	}
+	locals, err := lister.ListSessions(ctx, s.Config.Env)
+	if err != nil {
+		return nil, err
+	}
+	projectRoot := currentProjectRoot(ctx, s.Config.Env)
+	now := time.Now()
+	entries := make([]ListedSession, 0, len(locals))
+	for _, local := range locals {
+		if strings.TrimSpace(local.ID) == "" || !sessionInProject(projectRoot, local.CWD, s.Config.Env) {
+			continue
+		}
+		updatedAt := local.UpdatedAt
+		entry := ListedSession{
+			Session: api.Session{
+				ID:       local.ID,
+				State:    "local",
+				Harness:  firstNonEmpty(local.Harness, ctxState.TeamConfig.DefaultHarness, harness.DefaultName),
+				Location: firstNonEmpty(local.CWD, "local"),
+				Lane:     firstNonEmpty(ctxState.Team.Lane, "local"),
+				Model:    firstNonEmpty(local.Model, ctxState.Team.DefaultModel, ctxState.TeamConfig.DefaultModel, api.DefaultModel),
+				Age:      ageSince(updatedAt, now),
+				Spent:    "€0.00",
+				Task:     local.Task,
+			},
+			Source:         "local",
+			TranscriptPath: config.DisplayPath(local.Path, s.Config.Env),
+			updatedAt:      updatedAt,
+		}
+		if !updatedAt.IsZero() {
+			entry.UpdatedAt = updatedAt.UTC().Format(time.RFC3339)
+		}
+		entries = append(entries, entry)
+	}
+	return entries, nil
 }
 
 func (s Service) sessionsForbiddenError(ctx context.Context, ctxState workspaceContext, accessToken string) error {
@@ -210,7 +301,18 @@ func (s Service) Resume(ctx context.Context, sessionID string, dryRun bool) (api
 }
 
 func (s Service) Share(ctx context.Context, sessionID string, ttl string, dryRun bool) (ShareResult, error) {
-	ctxState, err := s.contextState()
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		latest, ok, err := s.LatestSession(ctx)
+		if err != nil {
+			return ShareResult{}, err
+		}
+		if !ok {
+			return ShareResult{}, fmt.Errorf("no sessions found; start a coding session or pass a session id")
+		}
+		sessionID = latest.ID
+	}
+	ctxState, _, err := s.relaxedContextState()
 	if err != nil {
 		return ShareResult{}, err
 	}
@@ -243,7 +345,7 @@ func (s Service) Share(ctx context.Context, sessionID string, ttl string, dryRun
 }
 
 func (s Service) RevokeShare(ctx context.Context, target string, dryRun bool) (RevokeResult, error) {
-	ctxState, err := s.contextState()
+	ctxState, _, err := s.relaxedContextState()
 	if err != nil {
 		return RevokeResult{}, err
 	}
@@ -477,6 +579,177 @@ type workspaceContext = workspace.Context
 
 func (s Service) contextState() (workspaceContext, error) {
 	return workspace.Resolve(s.Config)
+}
+
+func (s Service) relaxedContextState() (workspaceContext, bool, error) {
+	ctxState, err := s.contextState()
+	if err == nil {
+		return ctxState, true, nil
+	}
+	var missingTeam *workspace.MissingTeamError
+	if !errors.Is(err, workspace.ErrNoActiveTeam) && !errors.As(err, &missingTeam) {
+		return workspaceContext{}, false, err
+	}
+	cfg, cfgErr := s.Config.LoadConfig()
+	if cfgErr != nil {
+		return workspaceContext{}, false, cfgErr
+	}
+	state, stateErr := s.Config.LoadState()
+	if stateErr != nil {
+		return workspaceContext{}, false, stateErr
+	}
+	teamConfig := config.TeamConfig{Lane: "local", DefaultModel: api.DefaultModel}
+	team := api.Team{Name: cfg.ActiveTeam, Lane: "local", DefaultModel: api.DefaultModel}
+	return workspaceContext{Config: cfg, State: state, TeamName: cfg.ActiveTeam, TeamConfig: teamConfig, Team: team, Mode: cfg.ActiveMode()}, false, nil
+}
+
+func addListedSession(entries *[]ListedSession, seen map[string]int, candidate ListedSession) {
+	if strings.TrimSpace(candidate.ID) == "" {
+		return
+	}
+	if idx, ok := seen[candidate.ID]; ok {
+		if listedSessionPreferred(candidate, (*entries)[idx]) {
+			(*entries)[idx] = candidate
+		}
+		return
+	}
+	seen[candidate.ID] = len(*entries)
+	*entries = append(*entries, candidate)
+}
+
+func listedSessionPreferred(candidate, existing ListedSession) bool {
+	candidateRank := sessionSourceRank(candidate.Source)
+	existingRank := sessionSourceRank(existing.Source)
+	if candidateRank != existingRank {
+		return candidateRank > existingRank
+	}
+	if !candidate.updatedAt.IsZero() && !existing.updatedAt.IsZero() {
+		return candidate.updatedAt.After(existing.updatedAt)
+	}
+	return !candidate.updatedAt.IsZero() && existing.updatedAt.IsZero()
+}
+
+func sessionSourceRank(source string) int {
+	switch source {
+	case "local":
+		return 3
+	case "state":
+		return 2
+	case "remote":
+		return 1
+	default:
+		return 0
+	}
+}
+
+func sortListedSessions(entries []ListedSession) {
+	sort.SliceStable(entries, func(i, j int) bool {
+		left := entries[i]
+		right := entries[j]
+		if left.updatedAt.IsZero() != right.updatedAt.IsZero() {
+			return !left.updatedAt.IsZero()
+		}
+		if !left.updatedAt.IsZero() && !left.updatedAt.Equal(right.updatedAt) {
+			return left.updatedAt.After(right.updatedAt)
+		}
+		leftRank := sessionSourceRank(left.Source)
+		rightRank := sessionSourceRank(right.Source)
+		if leftRank != rightRank {
+			return leftRank > rightRank
+		}
+		return left.ID < right.ID
+	})
+}
+
+func ageSince(at time.Time, now time.Time) string {
+	if at.IsZero() {
+		return "0m"
+	}
+	duration := now.Sub(at)
+	if duration < 0 {
+		duration = 0
+	}
+	if duration < time.Hour {
+		return fmt.Sprintf("%dm", int(duration.Minutes()))
+	}
+	if duration < 48*time.Hour {
+		return fmt.Sprintf("%dh", int(duration.Hours()))
+	}
+	return fmt.Sprintf("%dd", int(duration.Hours()/24))
+}
+
+func currentProjectRoot(ctx context.Context, env map[string]string) string {
+	wd := currentWorkDir(env)
+	if root := gitRoot(ctx, wd); root != "" {
+		return cleanAbsPath(root, env)
+	}
+	return cleanAbsPath(wd, env)
+}
+
+func currentWorkDir(env map[string]string) string {
+	if strings.TrimSpace(env["PWD"]) != "" {
+		return env["PWD"]
+	}
+	wd, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+	return wd
+}
+
+func gitRoot(ctx context.Context, wd string) string {
+	cmd := exec.CommandContext(ctx, "git", "-C", wd, "rev-parse", "--show-toplevel")
+	raw, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(raw))
+}
+
+func sessionInProject(projectRoot string, sessionCWD string, env map[string]string) bool {
+	if strings.TrimSpace(projectRoot) == "" || strings.TrimSpace(sessionCWD) == "" {
+		return false
+	}
+	root := cleanAbsPath(projectRoot, env)
+	cwd := cleanAbsPath(sessionCWD, env)
+	if root == "" || cwd == "" {
+		return false
+	}
+	if cwd == root {
+		return true
+	}
+	rel, err := filepath.Rel(root, cwd)
+	if err != nil || filepath.IsAbs(rel) {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+func cleanAbsPath(path string, env map[string]string) string {
+	path = expandSessionPath(strings.TrimSpace(path), env)
+	if path == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	return filepath.Clean(path)
+}
+
+func expandSessionPath(path string, env map[string]string) string {
+	home := config.HomeDir(env)
+	switch {
+	case path == "$HOME" || path == "${HOME}" || path == "~":
+		return home
+	case strings.HasPrefix(path, "$HOME/"):
+		return filepath.Join(home, strings.TrimPrefix(path, "$HOME/"))
+	case strings.HasPrefix(path, "${HOME}/"):
+		return filepath.Join(home, strings.TrimPrefix(path, "${HOME}/"))
+	case strings.HasPrefix(path, "~/"):
+		return filepath.Join(home, strings.TrimPrefix(path, "~/"))
+	default:
+		return path
+	}
 }
 
 // accessToken returns the bearer to use for cloud API calls. In airplane

@@ -1108,7 +1108,7 @@ func sessionsCommand(runtime Runtime, opts *options) *cobra.Command {
 				return err
 			}
 			service := app.sessionService()
-			sessions, err := service.List(cmd.Context())
+			sessions, err := service.ListEntries(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -1219,15 +1219,19 @@ func runResume(ctx context.Context, app *app, sessionID string) error {
 func shareCommand(runtime Runtime, opts *options) *cobra.Command {
 	var ttl string
 	cmd := &cobra.Command{
-		Use:   "share <session>",
+		Use:   "share [session]",
 		Short: "share a session as an encrypted static page",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := newApp(runtime, opts)
 			if err != nil {
 				return err
 			}
-			return runShare(cmd.Context(), app, args[0], ttl)
+			sessionID := ""
+			if len(args) == 1 {
+				sessionID = args[0]
+			}
+			return runShare(cmd.Context(), app, sessionID, ttl)
 		},
 	}
 	cmd.Flags().StringVar(&ttl, "ttl", "30d", "share expiration: 1d, 7d, 30d, 365d, never")
@@ -1247,10 +1251,25 @@ func shareCommand(runtime Runtime, opts *options) *cobra.Command {
 }
 
 func runShare(ctx context.Context, app *app, sessionID string, ttl string) error {
+	service := app.sessionService()
+	var inferred *sessioncmd.ListedSession
+	if strings.TrimSpace(sessionID) == "" {
+		latest, ok, err := service.LatestSession(ctx)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("no sessions found; start a coding session or pass a session id")
+		}
+		sessionID = latest.ID
+		inferred = &latest
+	}
 	if err := app.requireCloudFeature("share"); err != nil {
+		if inferred != nil {
+			return fmt.Errorf("latest session is %s; %w", inferred.ID, err)
+		}
 		return err
 	}
-	service := app.sessionService()
 	var result sessioncmd.ShareResult
 	if err := app.withLock(ctx, func() error {
 		var err error
@@ -1262,12 +1281,14 @@ func runShare(ctx context.Context, app *app, sessionID string, ttl string) error
 	if app.options.json {
 		return app.renderer.WriteJSON(result)
 	}
+	lines := inferredShareLines(inferred)
 	if app.options.dryRun {
-		return app.renderer.Lines(
-			fmt.Sprintf("[s46] dry-run: would sanitize and encrypt %s locally", sessionID),
+		lines = append(lines,
+			fmt.Sprintf("[s46] dry-run: would sanitize and encrypt %s locally", result.SessionID),
 			fmt.Sprintf("[s46] dry-run: would upload ciphertext to s46-gist with ttl=%s", result.TTL),
 			fmt.Sprintf("[s46] dry-run: viewer would be %s", result.ViewerURL),
 		)
+		return app.renderer.Lines(lines...)
 	}
 	verb := "created"
 	if result.Updated {
@@ -1277,11 +1298,30 @@ func runShare(ctx context.Context, app *app, sessionID string, ttl string) error
 	if result.Mock {
 		provider += " (mock)"
 	}
-	return app.renderer.Lines(
+	lines = append(lines,
 		fmt.Sprintf("[s46] Share URL: %s", result.ViewerURL),
 		fmt.Sprintf("[s46] Blob:      %s", result.BlobURL),
 		fmt.Sprintf("[s46] %s encrypted share · TTL: %s · Provider: %s", verb, result.TTL, provider),
 	)
+	return app.renderer.Lines(lines...)
+}
+
+func inferredShareLines(session *sessioncmd.ListedSession) []string {
+	if session == nil {
+		return nil
+	}
+	label := "latest session"
+	if session.Source == "local" {
+		label = "latest local session"
+	}
+	parts := []string{session.ID}
+	if session.Harness != "" {
+		parts = append(parts, session.Harness)
+	}
+	if session.Location != "" {
+		parts = append(parts, session.Location)
+	}
+	return []string{fmt.Sprintf("[s46] sharing %s: %s", label, strings.Join(parts, " · "))}
 }
 
 func runShareRevoke(ctx context.Context, app *app, target string) error {
