@@ -13,6 +13,7 @@ import (
 
 	"github.com/sovereign46/s46-cli/internal/api"
 	"github.com/sovereign46/s46-cli/internal/config"
+	"github.com/sovereign46/s46-cli/internal/harness"
 	"github.com/sovereign46/s46-cli/internal/keyring"
 	sharepkg "github.com/sovereign46/s46-cli/internal/share"
 	"github.com/sovereign46/s46-cli/internal/strs"
@@ -32,12 +33,17 @@ type Service struct {
 	Auth    AuthTokens
 	Config  *config.Store
 	Keyring keyring.Store
+	Harness ShareArtifactResolver
 }
 
 // AuthTokens is the small bit of the auth package session needs:
 // give me a bearer token (or empty in airplane mode).
 type AuthTokens interface {
 	AccessToken(ctx context.Context) (string, error)
+}
+
+type ShareArtifactResolver interface {
+	ShareArtifact(ctx context.Context, req harness.ShareRequest) (sharepkg.Artifact, bool, error)
 }
 
 type ShareResult struct {
@@ -266,15 +272,15 @@ func (s Service) RevokeShare(ctx context.Context, target string, dryRun bool) (R
 
 func (s Service) buildShare(ctx context.Context, ctxState workspaceContext, sessionID string, ttl string, dryRun bool) (ShareResult, error) {
 	if s.Config.Env["S46_SHARE_BACKEND"] == "mock" || dryRun {
-		return s.mockShare(ctxState, sessionID, ttl, dryRun)
+		return s.mockShare(ctx, ctxState, sessionID, ttl, dryRun)
 	}
 	return s.gistShare(ctx, ctxState, sessionID, ttl)
 }
 
-func (s Service) mockShare(ctxState workspaceContext, sessionID string, ttl string, dryRun bool) (ShareResult, error) {
+func (s Service) mockShare(ctx context.Context, ctxState workspaceContext, sessionID string, ttl string, dryRun bool) (ShareResult, error) {
 	session := findOrDefault(ctxState.State, sessionID, ctxState.Team, ctxState.TeamConfig)
 	existing := ctxState.State.Shares[sessionID]
-	encrypted, err := encryptedArtifactForShare(session, shareBuildOptions(ctxState, s.Config.Env), existing)
+	encrypted, err := s.encryptedArtifactForShare(ctx, ctxState, session, existing)
 	if err != nil {
 		return ShareResult{}, err
 	}
@@ -303,7 +309,7 @@ func (s Service) gistShare(ctx context.Context, ctxState workspaceContext, sessi
 	}
 	session := findOrDefault(ctxState.State, sessionID, ctxState.Team, ctxState.TeamConfig)
 	existing := ctxState.State.Shares[sessionID]
-	encrypted, err := encryptedArtifactForShare(session, shareBuildOptions(ctxState, s.Config.Env), existing)
+	encrypted, err := s.encryptedArtifactForShare(ctx, ctxState, session, existing)
 	if err != nil {
 		return ShareResult{}, err
 	}
@@ -314,6 +320,15 @@ func (s Service) gistShare(ctx context.Context, ctxState workspaceContext, sessi
 		response, err := client.Update(ctx, existing.ID, request)
 		if err != nil {
 			return ShareResult{}, err
+		}
+		if response.ID == "" {
+			response.ID = existing.ID
+		}
+		if response.URL == "" {
+			response.URL = firstNonEmpty(existing.BlobURL, strings.TrimRight(shareAPIBaseURL(s.Config.Env), "/")+"/v1/shares/"+response.ID)
+		}
+		if response.TTL == "" {
+			response.TTL = ttl
 		}
 		return shareResultFromUpload(sessionID, response, existing.RevokeKey, encrypted.Key, true, false, s.Config.Env), nil
 	}
@@ -342,15 +357,32 @@ func shareResultFromUpload(sessionID string, response sharepkg.UploadResponse, r
 }
 
 func shareBuildOptions(ctxState workspaceContext, env map[string]string) sharepkg.BuildOptions {
-	return sharepkg.BuildOptions{TeamName: ctxState.TeamName, User: ctxState.State.CurrentUser, Home: env["HOME"]}
+	return sharepkg.BuildOptions{TeamName: ctxState.TeamName, User: ctxState.State.CurrentUser, Home: config.HomeDir(env)}
 }
 
-func encryptedArtifactForShare(session api.Session, opts sharepkg.BuildOptions, existing config.Share) (sharepkg.EncryptedBlob, error) {
-	artifact := sharepkg.BuildArtifact(session, opts)
+func (s Service) encryptedArtifactForShare(ctx context.Context, ctxState workspaceContext, session api.Session, existing config.Share) (sharepkg.EncryptedBlob, error) {
+	artifact, err := s.artifactForShare(ctx, ctxState, session)
+	if err != nil {
+		return sharepkg.EncryptedBlob{}, err
+	}
 	if key := decryptKeyFromViewerURL(existing.ViewerURL); key != "" {
 		return sharepkg.EncryptArtifactWithKey(artifact, key)
 	}
 	return sharepkg.EncryptArtifact(artifact)
+}
+
+func (s Service) artifactForShare(ctx context.Context, ctxState workspaceContext, session api.Session) (sharepkg.Artifact, error) {
+	opts := shareBuildOptions(ctxState, s.Config.Env)
+	if s.Harness != nil {
+		artifact, ok, err := s.Harness.ShareArtifact(ctx, harness.ShareRequest{Env: s.Config.Env, Session: session, TeamName: ctxState.TeamName, User: ctxState.State.CurrentUser})
+		if err != nil {
+			return sharepkg.Artifact{}, err
+		}
+		if ok {
+			return artifact, nil
+		}
+	}
+	return sharepkg.BuildArtifact(session, opts), nil
 }
 
 func decryptKeyFromViewerURL(viewerURL string) string {

@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/sovereign46/s46-cli/internal/harness"
+	"github.com/sovereign46/s46-cli/internal/share"
 )
 
 type Adapter struct{}
@@ -46,4 +47,8 @@ func (a Adapter) Apply(ctx context.Context, plan harness.Plan) (harness.AppliedP
 
 func (a Adapter) Status(ctx context.Context, req harness.StatusRequest) []harness.StatusCheck {
 	return []harness.StatusCheck{{Name: "standard", OK: true, Message: "no third-party harness config required"}}
+}
+
+func (a Adapter) ShareArtifact(ctx context.Context, req harness.ShareRequest) (share.Artifact, bool, error) {
+	return share.Artifact{}, false, nil
 }

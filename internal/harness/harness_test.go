@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sovereign46/s46-cli/internal/api"
+	"github.com/sovereign46/s46-cli/internal/share"
 )
 
 // stubAdapter is a minimal Adapter used to test the Registry without
@@ -28,6 +31,9 @@ func (stubAdapter) Apply(ctx context.Context, plan Plan) (AppliedPlan, error) {
 func (stubAdapter) Status(ctx context.Context, req StatusRequest) []StatusCheck {
 	return nil
 }
+func (stubAdapter) ShareArtifact(ctx context.Context, req ShareRequest) (share.Artifact, bool, error) {
+	return share.Artifact{}, false, nil
+}
 
 func TestRegistryGetAndNames(t *testing.T) {
 	t.Parallel()
@@ -46,6 +52,14 @@ func TestRegistryGetAndNames(t *testing.T) {
 	names := reg.Names()
 	if len(names) != 4 {
 		t.Fatalf("Names() len = %d, want 4", len(names))
+	}
+}
+
+func TestRegistryShareArtifactErrorsForUnrecognizedTranscriptPath(t *testing.T) {
+	reg := NewRegistry(stubAdapter{name: "alpha"})
+	_, ok, err := reg.ShareArtifact(context.Background(), ShareRequest{Session: api.Session{ID: "./session.jsonl"}})
+	if err == nil || !strings.Contains(err.Error(), "no harness adapter recognized") {
+		t.Fatalf("expected unrecognized transcript path error, got ok=%v err=%v", ok, err)
 	}
 }
 

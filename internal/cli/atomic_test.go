@@ -10,6 +10,7 @@ import (
 
 	"github.com/sovereign46/s46-cli/internal/config"
 	"github.com/sovereign46/s46-cli/internal/harness"
+	"github.com/sovereign46/s46-cli/internal/share"
 )
 
 // failingAdapter writes one file successfully and then fails. This
@@ -31,6 +32,9 @@ func (*failingAdapter) PlanDisconnect(context.Context, harness.DisconnectRequest
 }
 func (*failingAdapter) Status(context.Context, harness.StatusRequest) []harness.StatusCheck {
 	return nil
+}
+func (*failingAdapter) ShareArtifact(context.Context, harness.ShareRequest) (share.Artifact, bool, error) {
+	return share.Artifact{}, false, nil
 }
 func (a *failingAdapter) Apply(ctx context.Context, plan harness.Plan) (harness.AppliedPlan, error) {
 	// Write the first file then fail. ApplyPlan handles partial state.

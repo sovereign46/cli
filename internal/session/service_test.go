@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +16,8 @@ import (
 	"github.com/sovereign46/s46-cli/internal/api"
 	"github.com/sovereign46/s46-cli/internal/auth"
 	"github.com/sovereign46/s46-cli/internal/config"
+	"github.com/sovereign46/s46-cli/internal/harness"
+	"github.com/sovereign46/s46-cli/internal/harness/pi"
 	"github.com/sovereign46/s46-cli/internal/keyring"
 	sharepkg "github.com/sovereign46/s46-cli/internal/share"
 )
@@ -137,7 +141,7 @@ func TestGistShareCreateUpdateAndRevoke(t *testing.T) {
 				t.Fatalf("bad revoke key: %#v", req)
 			}
 			updateBlob = req.Blob
-			_ = json.NewEncoder(w).Encode(sharepkg.UploadResponse{ID: shareID, URL: serverURL(r) + "/v1/shares/" + shareID, TTL: req.TTL})
+			_ = json.NewEncoder(w).Encode(sharepkg.UploadResponse{ID: shareID, TTL: req.TTL})
 		case r.Method == http.MethodDelete && r.URL.Path == "/v1/shares/"+shareID:
 			if r.Header.Get("X-S46-Revoke-Key") != "revoke-key" {
 				t.Fatalf("missing delete revoke key")
@@ -166,7 +170,7 @@ func TestGistShareCreateUpdateAndRevoke(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !second.Updated || second.ViewerURL != first.ViewerURL {
+	if !second.Updated || second.ViewerURL != first.ViewerURL || second.BlobURL != first.BlobURL {
 		t.Fatalf("second = %#v first=%#v", second, first)
 	}
 	if _, err := sharepkg.DecryptJSON(updateBlob, key); err != nil {
@@ -188,8 +192,68 @@ func TestGistShareCreateUpdateAndRevoke(t *testing.T) {
 	}
 }
 
+func TestShareBuildsArtifactFromPiJSONL(t *testing.T) {
+	const sessionID = "019e4ad2-ba3a-71f7-b34a-205e84be280e"
+	const shareID = "pi-share-1"
+	var createBlob string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/shares" {
+			http.NotFound(w, r)
+			return
+		}
+		var req sharepkg.UploadRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		createBlob = req.Blob
+		_ = json.NewEncoder(w).Encode(sharepkg.UploadResponse{ID: shareID, URL: serverURL(r) + "/v1/shares/" + shareID, TTL: req.TTL, RevokeKey: "revoke-key"})
+	}))
+	defer server.Close()
+
+	service, _ := newTestService(t, api.Team{Name: "s46", Endpoint: "https://s46.s46.dev", Lane: "EU-OPO", DefaultModel: api.DefaultModel}, config.ModeCloud, map[string]string{"S46_SHARE_API_URL": server.URL, "S46_SHARE_UPLOAD_TOKEN": "upload", "S46_SHARE_VIEWER_URL": "https://share.test"})
+	writeSessionJSONL(t, filepath.Join(service.Config.Env["HOME"], ".pi", "agent", "sessions", "--Users-nuno-dev-app--", "2026-05-21T10-00-00-000Z_"+sessionID+".jsonl"), `
+{"type":"session","id":"019e4ad2-ba3a-71f7-b34a-205e84be280e","timestamp":"2026-05-21T10:00:00.000Z","cwd":"/Users/nuno/dev/app"}
+{"type":"message","timestamp":"2026-05-21T10:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"actual pi prompt"}],"timestamp":"2026-05-21T10:00:01.000Z"}}
+{"type":"message","timestamp":"2026-05-21T10:00:02.000Z","message":{"role":"assistant","model":"gpt-5.5","content":[{"type":"thinking","thinking":"private chain"},{"type":"text","text":"actual pi response"}],"timestamp":"2026-05-21T10:00:02.000Z"}}
+`)
+
+	share, err := service.Share(context.Background(), sessionID, "30d", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := strings.Split(share.ViewerURL, "#")[1]
+	plaintext, err := sharepkg.DecryptJSON(createBlob, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var artifact sharepkg.Artifact
+	if err := json.Unmarshal(plaintext, &artifact); err != nil {
+		t.Fatal(err)
+	}
+	if artifact.Session.ID != sessionID || artifact.Session.Task != "actual pi prompt" || artifact.Session.Harness.Name != "pi" || artifact.Session.Model.Name != "gpt-5.5" {
+		t.Fatalf("unexpected artifact session: %#v", artifact.Session)
+	}
+	if len(artifact.Steps) != 2 || artifact.Steps[0].Body != "actual pi prompt" || artifact.Steps[1].Body != "actual pi response" {
+		t.Fatalf("unexpected artifact steps: %#v", artifact.Steps)
+	}
+	if strings.Contains(string(plaintext), "private chain") {
+		t.Fatalf("artifact leaked reasoning: %s", plaintext)
+	}
+}
+
 func serverURL(r *http.Request) string {
 	return "http://" + r.Host
+}
+
+func writeSessionJSONL(t *testing.T, path string, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(strings.TrimSpace(content)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestAirplaneSessionCallsDoNotSendCloudBearer(t *testing.T) {
@@ -334,7 +398,7 @@ func newTestService(t *testing.T, team api.Team, mode string, extraEnv map[strin
 	}
 	mockClient := api.NewMockClient()
 	authService := auth.Service{API: mockClient, Config: store}
-	return Service{API: mockClient, Auth: authService, Config: store}, store
+	return Service{API: mockClient, Auth: authService, Config: store, Harness: harness.NewRegistry(pi.New())}, store
 }
 
 func TestListErrorsWhenNoActiveTeam(t *testing.T) {

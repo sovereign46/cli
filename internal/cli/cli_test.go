@@ -703,6 +703,32 @@ func TestAirplaneModeOffRestoresPiModelsJSON(t *testing.T) {
 	assertRestoredPiConfig(t, env, modelsPath, originalRaw)
 }
 
+func TestAirplaneModeOnPromptsForHarnessAndRestoresSelectedHarness(t *testing.T) {
+	env := testEnv(t)
+	modelsPath := filepath.Join(env["HOME"], ".pi", "agent", "models.json")
+
+	out := requireOK(t, runWithStdin(t, env, strings.NewReader("pi\n"), "airplane", "mode", "on"))
+	for _, want := range []string{
+		"Harness (pi, claude-code, codex, standard) [claude-code]: ",
+		"[s46✈] mode: airplane",
+		"[s46✈] team: local",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("airplane mode on output missing %q:\n%s", want, out)
+		}
+	}
+	assertAirplanePiConfig(t, modelsPath)
+	status := requireOK(t, run(t, env, "--verbose", "status"))
+	if !strings.Contains(status, "[s46✈] harness: pi") {
+		t.Fatalf("expected airplane mode to use Pi harness:\n%s", status)
+	}
+
+	requireOK(t, run(t, env, "airplane", "mode", "off"))
+	if _, err := os.Stat(modelsPath); !os.IsNotExist(err) {
+		t.Fatalf("expected Pi config created for airplane mode to be removed, stat err=%v", err)
+	}
+}
+
 func TestAirplaneSetupHarnessSelectionRestoresPiModelsJSON(t *testing.T) {
 	env := testEnv(t)
 	modelsPath, originalRaw := prepareCustomPiConfig(t, env)

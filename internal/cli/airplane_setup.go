@@ -160,7 +160,7 @@ func offerOllamaLaunchctlConfig(ctx context.Context, app *app, service airplane.
 	if err := app.renderer.Lines(lines...); err != nil {
 		return false, err
 	}
-	if app.runtime.Stdin == nil {
+	if !hasPromptInput(app.runtime.Stdin) {
 		return false, app.renderer.Lines("[s46] Run `s46 airplane setup` interactively to apply them with launchctl.")
 	}
 	if yes, err := promptYesNo(app, "[s46] Configure macOS Ollama launchd settings now? [Y/n] ", true); err != nil {
@@ -226,7 +226,7 @@ func offerAirplaneGatewayRestart(ctx context.Context, app *app, service airplane
 		}
 		return report, false, nil
 	}
-	if app.runtime.Stdin == nil {
+	if !hasPromptInput(app.runtime.Stdin) {
 		if err := app.renderer.Lines("[s46] Run `s46 airplane setup` interactively to restart it automatically."); err != nil {
 			return report, false, err
 		}
@@ -404,7 +404,7 @@ func offerAirplaneModeOnAfterSetup(ctx context.Context, app *app, report airplan
 	if cfg.ActiveMode() == config.ModeAirplane {
 		return nil
 	}
-	if app.runtime.Stdin == nil {
+	if !hasPromptInput(app.runtime.Stdin) {
 		return app.renderer.Lines("[s46] Airplane mode is ready. Run `s46 airplane mode on` to enable it.")
 	}
 	yes, err := promptYesNo(app, "[s46] Turn on airplane mode now? [Y/n] ", true)
@@ -414,16 +414,7 @@ func offerAirplaneModeOnAfterSetup(ctx context.Context, app *app, report airplan
 	if !yes {
 		return nil
 	}
-	out := app.runtime.Stdout
-	if out == nil {
-		out = io.Discard
-	}
-	harnessName, err := promptHarness(app, app.stdinReader(), out, defaultConnectHarness("", teamConfig.DefaultHarness))
-	if err != nil {
-		return err
-	}
-	teamConfig.DefaultHarness = harnessName
-	return enableAirplaneMode(ctx, app, service, cfg, teamName, teamConfig, report)
+	return enableAirplaneMode(ctx, app, service, cfg, teamName, teamConfig, report, true)
 }
 
 func airplaneRuntimeNeedsRestart(ctx context.Context, app *app, service airplane.Service) bool {
@@ -564,11 +555,10 @@ func airplaneModeOn(ctx context.Context, app *app) error {
 	if err != nil {
 		return err
 	}
-	return enableAirplaneMode(ctx, app, service, cfg, teamName, teamConfig, report)
+	return enableAirplaneMode(ctx, app, service, cfg, teamName, teamConfig, report, true)
 }
 
-func enableAirplaneMode(ctx context.Context, app *app, service airplane.Service, cfg config.Config, teamName string, teamConfig config.TeamConfig, report airplane.Report) error {
-	wasAirplane := cfg.ActiveMode() == config.ModeAirplane
+func enableAirplaneMode(ctx context.Context, app *app, service airplane.Service, cfg config.Config, teamName string, teamConfig config.TeamConfig, report airplane.Report, promptForHarness bool) error {
 	if app.options.dryRun {
 		return renderAirplaneModeOnDryRun(app, teamName)
 	}
@@ -577,6 +567,13 @@ func enableAirplaneMode(ctx context.Context, app *app, service airplane.Service,
 	}
 	if err := ensureOllamaRuntimeSettings(ctx, app, service); err != nil {
 		return err
+	}
+	if promptForHarness {
+		var err error
+		teamConfig, err = promptAirplaneModeHarness(app, teamConfig)
+		if err != nil {
+			return err
+		}
 	}
 	if err := startAirplaneRuntime(ctx, app, service); err != nil {
 		return err
@@ -596,9 +593,7 @@ func enableAirplaneMode(ctx context.Context, app *app, service airplane.Service,
 	if err != nil {
 		return err
 	}
-	if !wasAirplane && teamConfig.HarnessSnapshot == nil {
-		teamConfig.HarnessSnapshot = harness.SnapshotPlan(plan)
-	}
+	teamConfig.HarnessSnapshot = mergeAirplaneHarnessSnapshot(teamConfig.HarnessSnapshot, harness.SnapshotPlan(plan))
 	cfgBefore := cfg.Clone()
 	cfgAfter := cfg.Clone()
 	cfgAfter.ActiveTeam = teamName
@@ -628,6 +623,45 @@ func renderAirplaneModeOnDryRun(app *app, teamName string) error {
 	return app.renderer.Lines(fmt.Sprintf("[s46] dry-run: would set airplane mode for %s", teamName))
 }
 
+func promptAirplaneModeHarness(app *app, teamConfig config.TeamConfig) (config.TeamConfig, error) {
+	if app.options.json || !hasPromptInput(app.runtime.Stdin) {
+		return teamConfig, nil
+	}
+	out := app.runtime.Stdout
+	if out == nil {
+		out = io.Discard
+	}
+	harnessName, err := promptHarness(app, app.stdinReader(), out, defaultConnectHarness("", teamConfig.DefaultHarness))
+	if err != nil {
+		return config.TeamConfig{}, err
+	}
+	teamConfig.DefaultHarness = harnessName
+	return teamConfig, nil
+}
+
+func mergeAirplaneHarnessSnapshot(existing *config.HarnessSnapshot, next *config.HarnessSnapshot) *config.HarnessSnapshot {
+	if next == nil {
+		return existing
+	}
+	if existing == nil {
+		return next
+	}
+	merged := *existing
+	merged.Files = append([]config.HarnessFileSnapshot(nil), existing.Files...)
+	seen := map[string]bool{}
+	for _, file := range existing.Files {
+		seen[file.Path] = true
+	}
+	for _, file := range next.Files {
+		if seen[file.Path] {
+			continue
+		}
+		merged.Files = append(merged.Files, file)
+		seen[file.Path] = true
+	}
+	return &merged
+}
+
 // prepareAirplaneRuntime walks the airplane Report toward Ready: it
 // starts Ollama if installed-but-not-running, optionally re-runs setup
 // when the user agrees, and re-checks after each step. It is idempotent
@@ -647,7 +681,7 @@ func prepareAirplaneRuntime(ctx context.Context, app *app, service airplane.Serv
 	if report.Ready {
 		return nil
 	}
-	if app.runtime.Stdin == nil {
+	if !hasPromptInput(app.runtime.Stdin) {
 		return fmt.Errorf("airplane setup is incomplete; run `s46 airplane setup`")
 	}
 	yes, err := promptYesNo(app, "[s46] Airplane setup is incomplete. Run setup now? [Y/n] ", true)

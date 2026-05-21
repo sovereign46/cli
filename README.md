@@ -62,7 +62,7 @@ Global flags: `--config <path>`, `--json`, `--dry-run`, `--verbose`, `--help`.
 
 Secrets live in the OS keychain (`internal/keyring.Store`). The file keyring backend is test-only.
 
-Encrypted shares are uploaded to `S46_SHARE_API_URL` (default `https://gist.s46.dev`) and viewed at `S46_SHARE_VIEWER_URL` (default `https://share.s46.dev`). Writes require `S46_SHARE_UPLOAD_TOKEN`; revoke keys are stored only in local state so `s46 share revoke` can delete the blob later.
+Encrypted shares are uploaded to `S46_SHARE_API_URL` (default `https://gist.s46.dev`) and viewed at `S46_SHARE_VIEWER_URL` (default `https://share.s46.dev`). Writes require `S46_SHARE_UPLOAD_TOKEN`; revoke keys are stored only in local state so `s46 share revoke` can delete the blob later. When the target matches a supported harness session id or JSONL path, `s46 share` asks that harness adapter to ingest the real local transcript (Pi, Claude Code, or Codex), omitting private reasoning blocks and preserving user-visible messages plus tool calls/results.
 
 `s46 connect` writes harness config to `~/.claude/settings.json`, `~/.codex/config.toml`, or `~/.pi/agent/models.json`. Existing files are merged and backed up with `.s46-backup-<timestamp>`. A connect failure that leaves files half-written is rolled back automatically.
 

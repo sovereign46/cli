@@ -22,7 +22,7 @@ Inside the shell, every `s46` command writes only inside the tempdir; copied har
 ## Run without installing
 
 ```sh
-S46_KEYRING_BACKEND=file S46_SHARE_BACKEND=mock go run ./cmd/s46 --help
+S46_KEYRING_BACKEND=file S46_SKIP_STARTUP_UPDATE_CHECK=1 go run ./cmd/s46 --help
 ```
 
 A typical exercise flow:

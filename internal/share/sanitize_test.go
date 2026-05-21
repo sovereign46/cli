@@ -37,3 +37,12 @@ func TestRedactorRemovesPrivateKeyBlocks(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestRedactorRemovesPiThinkingFieldsFromNestedToolOutput(t *testing.T) {
+	got := (Redactor{}).String(`{"type":"thinking","thinking":"private reasoning","thinkingSignature":"encrypted"} {'thinking': "more private", 'encrypted_content': 'ciphertext'}`)
+	for _, leak := range []string{"private reasoning", `"encrypted"`, "more private", "ciphertext"} {
+		if strings.Contains(got, leak) {
+			t.Fatalf("redactor leaked %q: %s", leak, got)
+		}
+	}
+}

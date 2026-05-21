@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/sovereign46/s46-cli/internal/api"
 	"github.com/sovereign46/s46-cli/internal/config"
+	"github.com/sovereign46/s46-cli/internal/share"
 )
 
 const DefaultName = "claude-code"
@@ -91,6 +93,15 @@ type StatusRequest struct {
 	DefaultModel string
 }
 
+// ShareRequest asks a harness adapter to turn one of its local session
+// transcripts into the generic encrypted-share artifact schema.
+type ShareRequest struct {
+	Env      map[string]string
+	Session  api.Session
+	TeamName string
+	User     string
+}
+
 type Adapter interface {
 	Name() string
 	Detect(ctx context.Context, env map[string]string) (Detection, error)
@@ -102,6 +113,10 @@ type Adapter interface {
 	Apply(ctx context.Context, plan Plan) (AppliedPlan, error)
 	// Status reports the harness wiring health for the given team.
 	Status(ctx context.Context, req StatusRequest) []StatusCheck
+	// ShareArtifact returns a share artifact from this harness's local
+	// transcript storage. ok=false means the adapter did not recognize the
+	// requested session/path and callers should try another adapter or fall back.
+	ShareArtifact(ctx context.Context, req ShareRequest) (artifact share.Artifact, ok bool, err error)
 }
 
 type Registry struct {
@@ -130,6 +145,45 @@ func (r *Registry) Names() []string {
 
 func (r *Registry) NamesString() string {
 	return "pi, claude-code, codex, standard"
+}
+
+func (r *Registry) ShareArtifact(ctx context.Context, req ShareRequest) (share.Artifact, bool, error) {
+	for _, name := range r.shareResolverOrder(req.Session.Harness) {
+		adapter, ok := r.adapters[name]
+		if !ok {
+			continue
+		}
+		artifact, ok, err := adapter.ShareArtifact(ctx, req)
+		if err != nil {
+			return share.Artifact{}, false, fmt.Errorf("%s transcript: %w", name, err)
+		}
+		if ok {
+			return artifact, true, nil
+		}
+	}
+	if looksLikeTranscriptPath(req.Session.ID) {
+		return share.Artifact{}, false, fmt.Errorf("no harness adapter recognized transcript path %q", req.Session.ID)
+	}
+	return share.Artifact{}, false, nil
+}
+
+func looksLikeTranscriptPath(ref string) bool {
+	return filepath.IsAbs(ref) || strings.HasPrefix(ref, ".") || strings.HasPrefix(ref, "~") || strings.HasSuffix(ref, ".jsonl")
+}
+
+func (r *Registry) shareResolverOrder(preferred string) []string {
+	ordered := []string{}
+	seen := map[string]bool{}
+	if strings.TrimSpace(preferred) != "" {
+		ordered = append(ordered, preferred)
+		seen[preferred] = true
+	}
+	for _, name := range r.Names() {
+		if !seen[name] {
+			ordered = append(ordered, name)
+		}
+	}
+	return ordered
 }
 
 // ApplyPlan writes each FilePlan to disk, backing up any prior content.

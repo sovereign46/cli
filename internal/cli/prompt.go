@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"reflect"
 	"strings"
 
 	"github.com/sovereign46/s46-cli/internal/auth"
@@ -15,7 +16,7 @@ import (
 // promptLoginRequest fills a LoginRequest from interactive stdin input,
 // using existing local state and env vars as defaults.
 func promptLoginRequest(app *app, req auth.LoginRequest) (auth.LoginRequest, error) {
-	if app.runtime.Stdin == nil {
+	if !hasPromptInput(app.runtime.Stdin) {
 		return auth.LoginRequest{}, fmt.Errorf("interactive login requires stdin; pass --user <email> --device-id <id>")
 	}
 	out := app.runtime.Stdout
@@ -48,6 +49,19 @@ func promptLoginRequest(app *app, req auth.LoginRequest) (auth.LoginRequest, err
 		return auth.LoginRequest{}, err
 	}
 	return req, nil
+}
+
+func hasPromptInput(stdin io.Reader) bool {
+	if stdin == nil {
+		return false
+	}
+	value := reflect.ValueOf(stdin)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return !value.IsNil()
+	default:
+		return true
+	}
 }
 
 func writeInteractiveCancelHint(out io.Writer) error {
@@ -127,7 +141,7 @@ func hostname() string {
 }
 
 func promptConnectRequest(app *app, req connectRequest) (connectRequest, error) {
-	if app.runtime.Stdin == nil {
+	if !hasPromptInput(app.runtime.Stdin) {
 		return connectRequest{}, fmt.Errorf("interactive connect requires stdin; pass `s46 connect <team>` and --harness <name>")
 	}
 	out := app.runtime.Stdout
@@ -174,7 +188,7 @@ func promptConnectRequest(app *app, req connectRequest) (connectRequest, error) 
 }
 
 func promptMissingHarness(app *app, req connectRequest) (string, error) {
-	if app.runtime.Stdin == nil {
+	if !hasPromptInput(app.runtime.Stdin) {
 		return "", fmt.Errorf("interactive connect requires stdin; pass --harness <name>\noptions: %s", app.harness.NamesString())
 	}
 	out := app.runtime.Stdout
@@ -222,7 +236,7 @@ func promptHarness(app *app, reader *inputReader, out io.Writer, fallback string
 }
 
 func promptYesNo(app *app, prompt string, fallback bool) (bool, error) {
-	if app.runtime.Stdin == nil {
+	if !hasPromptInput(app.runtime.Stdin) {
 		return false, fmt.Errorf("interactive confirmation requires stdin")
 	}
 	out := app.runtime.Stdout
