@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"reflect"
 	"strings"
 
 	"github.com/sovereign46/s46-cli/internal/auth"
@@ -16,8 +15,8 @@ import (
 // promptLoginRequest fills a LoginRequest from interactive stdin input,
 // using existing local state and env vars as defaults.
 func promptLoginRequest(app *app, req auth.LoginRequest) (auth.LoginRequest, error) {
-	if !hasPromptInput(app.runtime.Stdin) {
-		return auth.LoginRequest{}, fmt.Errorf("interactive login requires stdin; pass --user <email> --device-id <id>")
+	if !app.canPrompt() {
+		return auth.LoginRequest{}, fmt.Errorf("interactive login requires a terminal; pass --user <email> --device-id <id>")
 	}
 	out := app.runtime.Stdout
 	if out == nil {
@@ -51,17 +50,22 @@ func promptLoginRequest(app *app, req auth.LoginRequest) (auth.LoginRequest, err
 	return req, nil
 }
 
-func hasPromptInput(stdin io.Reader) bool {
+func (a *app) canPrompt() bool {
+	if a == nil || a.options == nil || a.options.noInput || a.options.machineReadable() {
+		return false
+	}
+	return hasTerminalInput(a.runtime.Stdin, a.runtime.Env)
+}
+
+func hasTerminalInput(stdin io.Reader, env map[string]string) bool {
 	if stdin == nil {
 		return false
 	}
-	value := reflect.ValueOf(stdin)
-	switch value.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
-		return !value.IsNil()
-	default:
+	if strs.Truthy(strs.EnvValue(env, "S46_TEST_FORCE_TTY")) {
 		return true
 	}
+	file, ok := stdin.(*os.File)
+	return ok && terminalInputAvailable(file)
 }
 
 func writeInteractiveCancelHint(out io.Writer) error {
@@ -141,8 +145,8 @@ func hostname() string {
 }
 
 func promptConnectRequest(app *app, req connectRequest) (connectRequest, error) {
-	if !hasPromptInput(app.runtime.Stdin) {
-		return connectRequest{}, fmt.Errorf("interactive connect requires stdin; pass `s46 connect <team>` and --harness <name>")
+	if !app.canPrompt() {
+		return connectRequest{}, fmt.Errorf("interactive connect requires a terminal; pass `s46 connect <team>` and --harness <name>")
 	}
 	out := app.runtime.Stdout
 	if out == nil {
@@ -188,8 +192,8 @@ func promptConnectRequest(app *app, req connectRequest) (connectRequest, error) 
 }
 
 func promptMissingHarness(app *app, req connectRequest) (string, error) {
-	if !hasPromptInput(app.runtime.Stdin) {
-		return "", fmt.Errorf("interactive connect requires stdin; pass --harness <name>\noptions: %s", app.harness.NamesString())
+	if !app.canPrompt() {
+		return "", fmt.Errorf("multiple or no harnesses detected; pass --harness <name>\noptions: %s", app.harness.NamesString())
 	}
 	out := app.runtime.Stdout
 	if out == nil {
@@ -236,8 +240,8 @@ func promptHarness(app *app, reader *inputReader, out io.Writer, fallback string
 }
 
 func promptYesNo(app *app, prompt string, fallback bool) (bool, error) {
-	if !hasPromptInput(app.runtime.Stdin) {
-		return false, fmt.Errorf("interactive confirmation requires stdin")
+	if !app.canPrompt() {
+		return false, fmt.Errorf("interactive confirmation requires a terminal")
 	}
 	out := app.runtime.Stdout
 	if out == nil {

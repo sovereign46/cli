@@ -27,9 +27,10 @@ Available Commands:
 
 Flags:
       --config string   path to s46 config.json
-      --dry-run         show planned mutations without writing
   -h, --help            help for s46
       --json            write machine-readable JSON
+      --jsonl           write newline-delimited JSON
+      --no-input        do not prompt for input
       --verbose         print extra diagnostics
 
 Use "s46 [command] --help" for more information about a command.

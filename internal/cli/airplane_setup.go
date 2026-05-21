@@ -23,12 +23,12 @@ import (
 
 func runAirplaneSetup(ctx context.Context, app *app, allowPrompts bool) (airplane.Report, error) {
 	var progress io.Writer
-	if !app.options.json {
+	if !app.options.machineReadable() {
 		progress = app.runtime.Stdout
 	}
 	service := airplane.Service{Env: app.runtime.Env, Stdin: app.runtime.Stdin, Stdout: app.runtime.Stdout, Stderr: app.runtime.Stderr, Progress: progress, LogPrefix: "[s46]"}
 	report := service.Check(ctx)
-	if app.options.json {
+	if app.options.machineReadable() {
 		return report, nil
 	}
 	if err := app.renderer.Lines(renderAirplaneReport(report)...); err != nil {
@@ -161,16 +161,13 @@ func offerOllamaLaunchctlConfig(ctx context.Context, app *app, service airplane.
 	if err := app.renderer.Lines(lines...); err != nil {
 		return false, err
 	}
-	if !hasPromptInput(app.runtime.Stdin) {
-		return false, app.renderer.Lines("[s46] Run `s46 airplane setup` interactively to apply them with launchctl.")
+	if !app.canPrompt() {
+		return false, app.renderer.Lines("[s46] Run `s46 airplane setup` in a terminal to apply them with launchctl.")
 	}
 	if yes, err := promptYesNo(app, "[s46] Configure macOS Ollama launchd settings now? [Y/n] ", true); err != nil {
 		return false, err
 	} else if !yes {
 		return false, nil
-	}
-	if app.options.dryRun {
-		return false, app.renderer.Lines("[s46] dry-run: would run launchctl setenv for Ollama airplane settings")
 	}
 	if err := service.ConfigureMacOSOllamaLaunchd(ctx); err != nil {
 		return false, fmt.Errorf("failed to configure macOS Ollama launchd settings: %w", err)
@@ -227,8 +224,8 @@ func offerAirplaneGatewayRestart(ctx context.Context, app *app, service airplane
 		}
 		return report, false, nil
 	}
-	if !hasPromptInput(app.runtime.Stdin) {
-		if err := app.renderer.Lines("[s46] Run `s46 airplane setup` interactively to restart it automatically."); err != nil {
+	if !app.canPrompt() {
+		if err := app.renderer.Lines("[s46] Run `s46 airplane setup` in a terminal to restart it automatically."); err != nil {
 			return report, false, err
 		}
 		return report, false, nil
@@ -388,9 +385,6 @@ func waitForGatewayReady(ctx context.Context, service airplane.Service, timeout 
 }
 
 func offerAirplaneModeOnAfterSetup(ctx context.Context, app *app, report airplane.Report) error {
-	if app.options.dryRun {
-		return nil
-	}
 	if !report.Ready {
 		return app.renderer.Lines("[s46] Airplane mode was not offered because setup is incomplete.")
 	}
@@ -405,7 +399,7 @@ func offerAirplaneModeOnAfterSetup(ctx context.Context, app *app, report airplan
 	if cfg.ActiveMode() == config.ModeAirplane {
 		return nil
 	}
-	if !hasPromptInput(app.runtime.Stdin) {
+	if !app.canPrompt() {
 		return app.renderer.Lines("[s46] Airplane mode is ready. Run `s46 airplane mode on` to enable it.")
 	}
 	yes, err := promptYesNo(app, "[s46] Turn on airplane mode now? [Y/n] ", true)
@@ -560,9 +554,6 @@ func airplaneModeOn(ctx context.Context, app *app) error {
 }
 
 func enableAirplaneMode(ctx context.Context, app *app, service airplane.Service, cfg config.Config, teamName string, teamConfig config.TeamConfig, report airplane.Report, promptForHarness bool) error {
-	if app.options.dryRun {
-		return renderAirplaneModeOnDryRun(app, teamName)
-	}
 	if err := prepareAirplaneRuntime(ctx, app, service, report); err != nil {
 		return err
 	}
@@ -604,13 +595,11 @@ func enableAirplaneMode(ctx context.Context, app *app, service airplane.Service,
 	cfgAfter.ActiveTeam = teamName
 	cfgAfter.Mode = config.ModeAirplane
 	cfgAfter.Teams[teamName] = teamConfig
-	if !app.options.dryRun {
-		if _, err := applyAtomicConfigAndHarness(ctx, app, cfgBefore, cfgAfter, adapter, plan, "airplane mode on"); err != nil {
-			return err
-		}
+	if _, err := applyAtomicConfigAndHarness(ctx, app, cfgBefore, cfgAfter, adapter, plan, "airplane mode on"); err != nil {
+		return err
 	}
-	if app.options.json {
-		return app.renderer.WriteJSON(map[string]any{"mode": config.ModeAirplane, "team": teamName, "endpoint": teamConfig.Endpoint, "model": teamConfig.DefaultModel, "dryRun": app.options.dryRun})
+	if ok, err := app.writeStructured(map[string]any{"mode": config.ModeAirplane, "team": teamName, "endpoint": teamConfig.Endpoint, "model": teamConfig.DefaultModel}); ok {
+		return err
 	}
 	app.renderer.Prefix = airplane.Prefix
 	return app.renderer.Lines(
@@ -621,15 +610,8 @@ func enableAirplaneMode(ctx context.Context, app *app, service airplane.Service,
 	)
 }
 
-func renderAirplaneModeOnDryRun(app *app, teamName string) error {
-	if app.options.json {
-		return app.renderer.WriteJSON(map[string]any{"mode": config.ModeAirplane, "team": teamName, "endpoint": airplane.LocalGatewayURL, "model": airplane.LocalModelID, "dryRun": true})
-	}
-	return app.renderer.Lines(fmt.Sprintf("[s46] dry-run: would set airplane mode for %s", teamName))
-}
-
 func promptAirplaneModeHarness(app *app, teamConfig config.TeamConfig) (config.TeamConfig, error) {
-	if app.options.json || !hasPromptInput(app.runtime.Stdin) {
+	if !app.canPrompt() {
 		return teamConfig, nil
 	}
 	out := app.runtime.Stdout
@@ -648,7 +630,7 @@ func shouldSetAirplaneHarnessDefault(app *app, teamConfig config.TeamConfig) (bo
 	if teamConfig.DefaultHarness != "pi" {
 		return false, nil
 	}
-	if app.options.json || !hasPromptInput(app.runtime.Stdin) {
+	if !app.canPrompt() {
 		return true, nil
 	}
 	provider, model, err := pi.CurrentDefault(app.runtime.Env)
@@ -716,7 +698,7 @@ func prepareAirplaneRuntime(ctx context.Context, app *app, service airplane.Serv
 	if report.Ready {
 		return nil
 	}
-	if !hasPromptInput(app.runtime.Stdin) {
+	if !app.canPrompt() {
 		return fmt.Errorf("airplane setup is incomplete; run `s46 airplane setup`")
 	}
 	yes, err := promptYesNo(app, "[s46] Airplane setup is incomplete. Run setup now? [Y/n] ", true)
@@ -788,24 +770,20 @@ func airplaneModeOff(ctx context.Context, app *app) error {
 			cfgAfter.ActiveTeam = ""
 		}
 	}
-	if !app.options.dryRun {
-		if err := applyAtomicModeOff(ctx, app, cfgBefore, cfgAfter, teamName, teamConfig.DefaultHarness, restored, hasCloudConfig, snapshot); err != nil {
-			return err
-		}
+	if err := applyAtomicModeOff(ctx, app, cfgBefore, cfgAfter, teamName, teamConfig.DefaultHarness, restored, hasCloudConfig, snapshot); err != nil {
+		return err
 	}
 	app.renderer.Prefix = "[s46]"
-	if app.options.json {
-		result := map[string]any{"mode": config.ModeCloud, "team": teamName, "dryRun": app.options.dryRun}
+	if app.options.machineReadable() {
+		result := map[string]any{"mode": config.ModeCloud, "team": teamName}
 		if hasCloudConfig {
 			result["endpoint"] = restored.Endpoint
 			result["model"] = restored.DefaultModel
 		} else {
 			result["removedLocalTeam"] = true
 		}
-		return app.renderer.WriteJSON(result)
-	}
-	if app.options.dryRun {
-		return app.renderer.Lines(fmt.Sprintf("[s46] dry-run: would set cloud mode for %s", teamName))
+		_, err := app.writeStructured(result)
+		return err
 	}
 	lines := []string{"[s46] mode: cloud"}
 	if hasCloudConfig {
@@ -939,9 +917,6 @@ func applyHarnessConfig(ctx context.Context, app *app, teamName string, teamConf
 	if err != nil {
 		return err
 	}
-	if app.options.dryRun {
-		return nil
-	}
 	_, err = adapter.Apply(ctx, plan)
 	return err
 }
@@ -952,7 +927,7 @@ func planHarnessConfig(ctx context.Context, app *app, teamName string, teamConfi
 		return nil, harness.Plan{}, err
 	}
 	team := teamConfig.API(teamName)
-	plan, err := adapter.PlanConnect(ctx, harness.ConnectRequest{Env: app.runtime.Env, Team: team, Model: teamConfig.DefaultModel, Mode: mode, Scope: "user", DryRun: app.options.dryRun, SetAsDefault: setHarnessDefault})
+	plan, err := adapter.PlanConnect(ctx, harness.ConnectRequest{Env: app.runtime.Env, Team: team, Model: teamConfig.DefaultModel, Mode: mode, Scope: "user", SetAsDefault: setHarnessDefault})
 	if err != nil {
 		return nil, harness.Plan{}, err
 	}

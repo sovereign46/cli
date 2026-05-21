@@ -25,7 +25,7 @@ import (
 func TestRunStoresSessionAndListReturnsLocalState(t *testing.T) {
 	service, store := newTestService(t, api.Team{Name: "s46", Endpoint: "http://127.0.0.1:8080", Lane: "EU-OPO", DefaultModel: api.DefaultModel}, config.ModeAirplane, nil)
 
-	run, err := service.Run(context.Background(), "Fix /v1 sessions", "", "", false)
+	run, err := service.Run(context.Background(), "Fix /v1 sessions", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,14 +52,14 @@ func TestRunStoresSessionAndListReturnsLocalState(t *testing.T) {
 func TestDetachAndResumePersistSessionState(t *testing.T) {
 	service, store := newTestService(t, api.Team{Name: "s46", Endpoint: "https://s46.s46.dev", Lane: "EU-OPO", DefaultModel: api.DefaultModel}, config.ModeCloud, nil)
 
-	detached, err := service.Detach(context.Background(), "@nunojob/task", "", "", false)
+	detached, err := service.Detach(context.Background(), "@nunojob/task", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if detached.State != "running" || detached.Harness != "standard" {
 		t.Fatalf("detached = %#v", detached)
 	}
-	resumed, previous, err := service.Resume(context.Background(), detached.ID, false)
+	resumed, previous, err := service.Resume(context.Background(), detached.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestDetachAndResumePersistSessionState(t *testing.T) {
 func TestMockSharePersistsViewerURL(t *testing.T) {
 	service, store := newTestService(t, api.Team{Name: "s46", Endpoint: "http://127.0.0.1:8080", Lane: "EU-OPO", DefaultModel: api.DefaultModel}, config.ModeCloud, map[string]string{"S46_SHARE_BACKEND": "mock", "S46_MOCK_GIST_ID": "fixed-gist-123456"})
 
-	share, err := service.Share(context.Background(), "@nunojob/task", "30d", false)
+	share, err := service.Share(context.Background(), "@nunojob/task", "30d")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,11 +97,11 @@ func TestMockSharePersistsViewerURL(t *testing.T) {
 func TestMockShareUpdateReusesViewerKey(t *testing.T) {
 	service, _ := newTestService(t, api.Team{Name: "s46", Endpoint: "https://s46.s46.dev", Lane: "EU-OPO", DefaultModel: api.DefaultModel}, config.ModeCloud, map[string]string{"S46_SHARE_BACKEND": "mock", "S46_MOCK_GIST_ID": "fixed-gist-123456"})
 
-	first, err := service.Share(context.Background(), "@nunojob/task", "30d", false)
+	first, err := service.Share(context.Background(), "@nunojob/task", "30d")
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := service.Share(context.Background(), "@nunojob/task", "30d", false)
+	second, err := service.Share(context.Background(), "@nunojob/task", "30d")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +155,7 @@ func TestGistShareCreateUpdateAndRevoke(t *testing.T) {
 	defer server.Close()
 
 	service, store := newTestService(t, api.Team{Name: "s46", Endpoint: "https://s46.s46.dev", Lane: "EU-OPO", DefaultModel: api.DefaultModel}, config.ModeCloud, map[string]string{"S46_SHARE_API_URL": server.URL, "S46_SHARE_UPLOAD_TOKEN": "upload", "S46_SHARE_VIEWER_URL": "https://share.test"})
-	first, err := service.Share(context.Background(), "@nunojob/task", "7d", false)
+	first, err := service.Share(context.Background(), "@nunojob/task", "7d")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +166,7 @@ func TestGistShareCreateUpdateAndRevoke(t *testing.T) {
 	if _, err := sharepkg.DecryptJSON(createBlob, key); err != nil {
 		t.Fatalf("create blob does not decrypt: %v", err)
 	}
-	second, err := service.Share(context.Background(), "@nunojob/task", "7d", false)
+	second, err := service.Share(context.Background(), "@nunojob/task", "7d")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +176,7 @@ func TestGistShareCreateUpdateAndRevoke(t *testing.T) {
 	if _, err := sharepkg.DecryptJSON(updateBlob, key); err != nil {
 		t.Fatalf("update blob does not decrypt with original key: %v", err)
 	}
-	revoked, err := service.RevokeShare(context.Background(), "@nunojob/task", false)
+	revoked, err := service.RevokeShare(context.Background(), "@nunojob/task")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +218,7 @@ func TestShareBuildsArtifactFromPiJSONL(t *testing.T) {
 {"type":"message","timestamp":"2026-05-21T10:00:02.000Z","message":{"role":"assistant","model":"gpt-5.5","content":[{"type":"thinking","thinking":"private chain"},{"type":"text","text":"actual pi response"}],"timestamp":"2026-05-21T10:00:02.000Z"}}
 `)
 
-	share, err := service.Share(context.Background(), sessionID, "30d", false)
+	share, err := service.Share(context.Background(), sessionID, "30d")
 	if err != nil {
 		t.Fatal(err)
 	}

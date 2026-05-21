@@ -53,7 +53,7 @@ func TestShareBuildsArtifactsFromPublicHarnessFixtures(t *testing.T) {
 			service.Harness = harness.NewRegistry(claude.New(), codex.New(), pi.New())
 			copyFixtureTree(t, tc.fixtureDir, filepath.Join(service.Config.Env["HOME"], tc.homeRel), service.Config.Env["HOME"])
 
-			result, err := service.Share(context.Background(), tc.sessionID, "30d", false)
+			result, err := service.Share(context.Background(), tc.sessionID, "30d")
 			if err != nil {
 				t.Fatal(err)
 			}

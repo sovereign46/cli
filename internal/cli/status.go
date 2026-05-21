@@ -120,12 +120,20 @@ func statusCommand(runtime Runtime, opts *options) *cobra.Command {
 				if ok {
 					team = &teamConfig
 					checks = statusChecks(cmd.Context(), app, cfg.ActiveTeam, teamConfig)
+					if cfg.ActiveMode() == config.ModeCloud && !state.Authenticated {
+						checks = append([]statusCheck{{Name: "auth", OK: false, Message: "not authenticated; run `s46 login` before using cloud harnesses"}}, checks...)
+					}
 				} else {
 					checks = []statusCheck{{Name: "active-team", OK: false, Message: fmt.Sprintf("%q is missing from config", cfg.ActiveTeam)}}
 				}
 			}
-			localServers := statusLocalServers(app.runtime.Env, team)
-			ollamaRuntime := airplane.Service{Env: app.runtime.Env}.OllamaRuntime(cmd.Context())
+			showLocalRuntime := cfg.ActiveMode() == config.ModeAirplane || opts.verbose
+			var localServers []localServerStatus
+			var ollamaRuntime airplane.OllamaRuntime
+			if showLocalRuntime {
+				localServers = statusLocalServers(app.runtime.Env, team)
+				ollamaRuntime = airplane.Service{Env: app.runtime.Env}.OllamaRuntime(cmd.Context())
+			}
 			result := map[string]any{
 				"authenticated": state.Authenticated,
 				"user":          state.CurrentUser,
@@ -135,17 +143,14 @@ func statusCommand(runtime Runtime, opts *options) *cobra.Command {
 				"configPath":    config.DisplayPath(app.config.ConfigPath, runtime.Env),
 				"statePath":     config.DisplayPath(app.config.StatePath, runtime.Env),
 				"checks":        checks,
-				"localServers":  localServers,
-				"ollama":        ollamaRuntime,
+				"ok":            !statusChecksFailed(checks),
 			}
-			if opts.json {
-				if err := app.renderer.WriteJSON(result); err != nil {
-					return err
-				}
-				if statusChecksFailed(checks) {
-					return fmt.Errorf("status found configuration problems")
-				}
-				return nil
+			if showLocalRuntime {
+				result["localServers"] = localServers
+				result["ollama"] = ollamaRuntime
+			}
+			if ok, err := app.writeStructured(result); ok {
+				return err
 			}
 			var lines []string
 			if opts.verbose {
@@ -176,12 +181,14 @@ func renderStatusConcise(app *app, cfg config.Config, state config.State, team *
 			fmt.Sprintf("[s46] api:     %s", team.Endpoint),
 		)
 	}
-	lines = append(lines, renderOllamaRuntimeConcise(ollamaRuntime))
-	for _, server := range localServers {
-		if server.Name == "ollama" {
-			continue // Ollama runtime line above already reports this.
+	if cfg.ActiveMode() == config.ModeAirplane {
+		lines = append(lines, renderOllamaRuntimeConcise(ollamaRuntime))
+		for _, server := range localServers {
+			if server.Name == "ollama" {
+				continue // Ollama runtime line above already reports this.
+			}
+			lines = append(lines, renderLocalServerStatusConcise(server))
 		}
-		lines = append(lines, renderLocalServerStatusConcise(server))
 	}
 	lines = append(lines, renderStatusChecksConcise(checks))
 	if statusChecksFailed(checks) {

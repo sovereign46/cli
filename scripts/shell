@@ -198,7 +198,6 @@ $share_notice
 Try:
   s46 airplane setup
   s46 login --user <your-email> --device-id dev-laptop --device-name "Dev laptop"
-  s46 connect <your-team> --harness=claude-code --dry-run
   s46 connect <your-team> --harness=claude-code
   s46 status
 

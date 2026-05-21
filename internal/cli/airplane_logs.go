@@ -1,8 +1,11 @@
 package cli
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"os/exec"
@@ -23,7 +26,7 @@ func airplaneLogsCommand(runtime Runtime, opts *options) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "logs [ollama|gateway|all]",
 		Short: "show local airplane-mode logs",
-		Args:  cobra.MaximumNArgs(1),
+		Args:  maxArgs("s46 airplane logs [ollama|gateway|all]", 1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := newApp(runtime, opts)
 			if err != nil {
@@ -39,7 +42,16 @@ func airplaneLogsCommand(runtime Runtime, opts *options) *cobra.Command {
 			}
 			files = resolveAirplaneLogFiles(app.runtime.Env, files)
 			if opts.json {
+				if follow {
+					return fmt.Errorf("--follow streams logs; use --jsonl with --follow")
+				}
 				return app.renderer.WriteJSON(map[string]any{"logs": files})
+			}
+			if opts.jsonl {
+				if follow {
+					return followAirplaneLogsJSONL(cmd.Context(), app, files, lines)
+				}
+				return renderAirplaneLogsJSONL(app, files, lines)
 			}
 			if follow {
 				return followAirplaneLogs(cmd.Context(), app, files, lines)
@@ -235,6 +247,92 @@ func renderAirplaneLogs(app *app, files []airplane.LogFile, lines int) error {
 		outputLines = append(outputLines, tailTextFile(file.Path, lines)...)
 	}
 	return app.renderer.Lines(outputLines...)
+}
+
+type logLineEvent struct {
+	Type string `json:"type"`
+	Log  string `json:"log"`
+	Path string `json:"path"`
+	Line string `json:"line,omitempty"`
+}
+
+func renderAirplaneLogsJSONL(app *app, files []airplane.LogFile, lines int) error {
+	for _, file := range files {
+		if _, err := os.Stat(file.Path); err != nil {
+			if os.IsNotExist(err) {
+				if err := app.renderer.WriteJSONL(logLineEvent{Type: "missing", Log: file.Name, Path: file.Path}); err != nil {
+					return err
+				}
+				continue
+			}
+			return err
+		}
+		for _, line := range tailTextFile(file.Path, lines) {
+			if err := app.renderer.WriteJSONL(logLineEvent{Type: "log", Log: file.Name, Path: file.Path, Line: line}); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+type followingLog struct {
+	file   airplane.LogFile
+	reader *bufio.Reader
+}
+
+func followAirplaneLogsJSONL(ctx context.Context, app *app, files []airplane.LogFile, lines int) error {
+	if err := renderAirplaneLogsJSONL(app, files, lines); err != nil {
+		return err
+	}
+	followers := []followingLog{}
+	for _, file := range files {
+		handle, err := os.Open(file.Path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return err
+		}
+		defer handle.Close()
+		if _, err := handle.Seek(0, io.SeekEnd); err != nil {
+			return err
+		}
+		followers = append(followers, followingLog{file: file, reader: bufio.NewReader(handle)})
+	}
+	if len(followers) == 0 {
+		return nil
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		for i := range followers {
+			if err := emitAvailableJSONLLogLines(app, &followers[i]); err != nil {
+				return err
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+func emitAvailableJSONLLogLines(app *app, follower *followingLog) error {
+	for {
+		line, err := follower.reader.ReadString('\n')
+		if err == nil {
+			line = strings.TrimRight(line, "\n")
+			if err := app.renderer.WriteJSONL(logLineEvent{Type: "log", Log: follower.file.Name, Path: follower.file.Path, Line: line}); err != nil {
+				return err
+			}
+			continue
+		}
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		return err
+	}
 }
 
 func followAirplaneLogs(ctx context.Context, app *app, files []airplane.LogFile, lines int) error {

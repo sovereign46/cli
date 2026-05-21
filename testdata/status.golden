@@ -2,7 +2,5 @@
 [s46] team:    acme · EU-OPO · cloud
 [s46] harness: standard · s46/kimi-k2.6
 [s46] api:     https://acme.s46.dev
-[s46] ollama:  not running
-[s46] api:     not running
 [s46] checks:  3/3 ok
 [s46] sessions: 0

@@ -15,13 +15,14 @@ import (
 type offlineSuggestionClient struct {
 	delegate api.Client
 	env      map[string]string
+	verbose  bool
 }
 
-func withOfflineSuggestion(client api.Client, env map[string]string) api.Client {
+func withOfflineSuggestion(client api.Client, env map[string]string, verbose bool) api.Client {
 	if env != nil && env["S46_API_MODE"] == "mock" && env["S46_API_BASE_URL"] == "" {
 		return client
 	}
-	return offlineSuggestionClient{delegate: client, env: env}
+	return offlineSuggestionClient{delegate: client, env: env, verbose: verbose}
 }
 
 func (c offlineSuggestionClient) StartDeviceLogin(ctx context.Context, req api.DeviceLoginRequest) (api.DeviceLogin, error) {
@@ -94,7 +95,7 @@ func (c offlineSuggestionClient) wrap(ctx context.Context, err error) error {
 		return err
 	}
 	if baseURL := c.localAPIBaseURL(); baseURL != "" {
-		return fmt.Errorf("%s\nunderlying error: %w", localAPIUnavailableSuggestion(c.env, baseURL), err)
+		return c.withUnderlying(localAPIUnavailableSuggestion(c.env, baseURL), err)
 	}
 	if !cloudCall(c.env) {
 		return err
@@ -106,7 +107,14 @@ func (c offlineSuggestionClient) wrap(ctx context.Context, err error) error {
 	if strs.Truthy(c.env["S46_OFFLINE"]) {
 		return err
 	}
-	return fmt.Errorf("%s\nunderlying error: %w", offlineSuggestion(ctx, c.env), err)
+	return c.withUnderlying(offlineSuggestion(ctx, c.env), err)
+}
+
+func (c offlineSuggestionClient) withUnderlying(message string, err error) error {
+	if c.verbose {
+		return fmt.Errorf("%s\nunderlying error: %w", message, err)
+	}
+	return errors.New(message)
 }
 
 func (c offlineSuggestionClient) localAPIBaseURL() string {
@@ -139,11 +147,11 @@ func localBaseURL(raw string) string {
 
 func localAPIUnavailableSuggestion(env map[string]string, baseURL string) string {
 	lines := []string{
-		fmt.Sprintf("[s46] local S46 API is not running at %s.", baseURL),
-		"[s46] Start the API server, or unset S46_API_BASE_URL / exit make shell to use the cloud API.",
+		fmt.Sprintf("local S46 API is not running at %s.", baseURL),
+		"Start the API server, or unset S46_API_BASE_URL / exit make shell to use the cloud API.",
 	}
 	if repo := strings.TrimSpace(env["S46_API_REPO"]); repo != "" {
-		lines = append(lines, fmt.Sprintf("[s46] Try: cd %s && go run ./cmd/s46-api", repo))
+		lines = append(lines, fmt.Sprintf("Try: cd %s && go run ./cmd/s46-api", repo))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -183,9 +191,9 @@ func cloudUnavailable(err error) bool {
 func offlineSuggestion(ctx context.Context, env map[string]string) string {
 	report := airplane.Service{Env: env, ModelProbeTimeout: 2 * time.Second}.Check(ctx)
 	if airplaneCheckOK(report, "model-downloaded") && airplaneCheckOK(report, "model-probe") {
-		return "[s46] cloud unavailable.\n[s46] local model is ready.\n[s46] Run: s46 airplane mode on"
+		return "cloud unavailable.\nlocal model is ready.\nRun: s46 airplane mode on"
 	}
-	return "[s46] cloud unavailable.\n[s46] no local model is installed.\n[s46] connect once and run: s46 airplane setup"
+	return "cloud unavailable.\nno local model is installed.\nRun: s46 airplane setup"
 }
 
 func airplaneCheckOK(report airplane.Report, name string) bool {

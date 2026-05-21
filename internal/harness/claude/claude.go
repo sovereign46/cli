@@ -70,15 +70,11 @@ func (a Adapter) PlanConnect(ctx context.Context, req harness.ConnectRequest) (h
 	}
 	content = append(content, '\n')
 
-	verb := "writes"
-	if req.DryRun {
-		verb = "would write"
-	}
 	return harness.Plan{
 		Harness: "claude-code",
 		Title:   "Configure Claude Code for Sovereign46",
 		Env:     req.Env,
-		Summary: fmt.Sprintf("harness: claude-code (%s %s)", verb, config.DisplayPath(path, req.Env)),
+		Summary: fmt.Sprintf("harness: claude-code (writes %s)", config.DisplayPath(path, req.Env)),
 		Operations: []string{
 			"set apiKeyHelper to 's46 token --refresh'",
 			fmt.Sprintf("set ANTHROPIC_BASE_URL to %s/anthropic", req.Team.Endpoint),
@@ -130,15 +126,11 @@ func (a Adapter) PlanDisconnect(ctx context.Context, req harness.DisconnectReque
 		return harness.Plan{}, err
 	}
 	content = append(content, '\n')
-	verb := "writes"
-	if req.DryRun {
-		verb = "would write"
-	}
 	return harness.Plan{
 		Harness: "claude-code",
 		Title:   "Disconnect Claude Code from Sovereign46",
 		Env:     req.Env,
-		Summary: fmt.Sprintf("harness: claude-code (%s %s)", verb, config.DisplayPath(path, req.Env)),
+		Summary: fmt.Sprintf("harness: claude-code (writes %s)", config.DisplayPath(path, req.Env)),
 		Operations: []string{
 			"remove s46 apiKeyHelper when present",
 			"remove S46 Anthropic environment overrides",

@@ -111,15 +111,11 @@ func (a Adapter) PlanConnect(ctx context.Context, req harness.ConnectRequest) (h
 		files = append(files, settingsFile)
 	}
 
-	verb := "writes"
-	if req.DryRun {
-		verb = "would write"
-	}
 	return harness.Plan{
 		Harness:    "pi",
 		Title:      "Configure Pi custom provider for Sovereign46",
 		Env:        req.Env,
-		Summary:    fmt.Sprintf("harness: pi (%s %s)", verb, config.DisplayPath(path, req.Env)),
+		Summary:    fmt.Sprintf("harness: pi (writes %s)", config.DisplayPath(path, req.Env)),
 		Operations: operations,
 		Files:      files,
 	}, nil
@@ -183,15 +179,11 @@ func (a Adapter) PlanDisconnect(ctx context.Context, req harness.DisconnectReque
 		return harness.Plan{}, err
 	}
 	content = append(content, '\n')
-	verb := "writes"
-	if req.DryRun {
-		verb = "would write"
-	}
 	return harness.Plan{
 		Harness:    "pi",
 		Title:      "Disconnect Pi from Sovereign46",
 		Env:        req.Env,
-		Summary:    fmt.Sprintf("harness: pi (%s %s)", verb, config.DisplayPath(path, req.Env)),
+		Summary:    fmt.Sprintf("harness: pi (writes %s)", config.DisplayPath(path, req.Env)),
 		Operations: []string{"remove providers.s46 from Pi models.json"},
 		Files:      []harness.FilePlan{{Path: path, DisplayPath: config.DisplayPath(path, req.Env), Kind: "json", OldContent: oldContent, Content: content, JSONValue: existing, Mode: 0o600}},
 	}, nil

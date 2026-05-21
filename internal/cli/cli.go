@@ -47,7 +47,8 @@ var errInteractiveCanceled = errors.New("interactive prompt canceled")
 type options struct {
 	configPath string
 	json       bool
-	dryRun     bool
+	jsonl      bool
+	noInput    bool
 	verbose    bool
 }
 
@@ -65,6 +66,40 @@ type app struct {
 type inputReader struct {
 	*bufio.Reader
 	source io.Reader
+}
+
+func (o *options) machineReadable() bool {
+	return o != nil && (o.json || o.jsonl)
+}
+
+func exactArgs(expected string, count int) cobra.PositionalArgs {
+	return func(cmd *cobra.Command, args []string) error {
+		if len(args) == count {
+			return nil
+		}
+		if len(args) < count {
+			return fmt.Errorf("missing argument\nexpected: %s", expected)
+		}
+		return fmt.Errorf("too many arguments\nexpected: %s", expected)
+	}
+}
+
+func maxArgs(expected string, count int) cobra.PositionalArgs {
+	return func(cmd *cobra.Command, args []string) error {
+		if len(args) <= count {
+			return nil
+		}
+		return fmt.Errorf("too many arguments\nexpected: %s", expected)
+	}
+}
+
+func minArgs(expected string, count int) cobra.PositionalArgs {
+	return func(cmd *cobra.Command, args []string) error {
+		if len(args) >= count {
+			return nil
+		}
+		return fmt.Errorf("missing argument\nexpected: %s", expected)
+	}
 }
 
 func ProcessEnv() map[string]string {
@@ -101,7 +136,8 @@ func NewRootCommand(runtime Runtime) *cobra.Command {
 
 	root.PersistentFlags().StringVar(&opts.configPath, "config", "", "path to s46 config.json")
 	root.PersistentFlags().BoolVar(&opts.json, "json", false, "write machine-readable JSON")
-	root.PersistentFlags().BoolVar(&opts.dryRun, "dry-run", false, "show planned mutations without writing")
+	root.PersistentFlags().BoolVar(&opts.jsonl, "jsonl", false, "write newline-delimited JSON")
+	root.PersistentFlags().BoolVar(&opts.noInput, "no-input", false, "do not prompt for input")
 	root.PersistentFlags().BoolVar(&opts.verbose, "verbose", false, "print extra diagnostics")
 
 	root.AddCommand(loginCommand(runtime, opts))
@@ -149,8 +185,11 @@ func airplaneHelpNotice() string {
 }
 
 func checkForStartupUpdate(ctx context.Context, runtime Runtime, opts *options, cmd *cobra.Command) error {
+	if opts.json && opts.jsonl {
+		return fmt.Errorf("--json and --jsonl cannot be used together")
+	}
 	env := runtime.Env
-	if skipStartupUpdateCheck(cmd, env) {
+	if opts.machineReadable() || skipStartupUpdateCheck(cmd, env) {
 		return nil
 	}
 	stderr := runtime.Stderr
@@ -241,10 +280,11 @@ func newApp(runtime Runtime, opts *options) (*app, error) {
 		options: opts,
 		config:  store,
 		keyring: keyringStore,
-		api:     withOfflineSuggestion(client, runtime.Env),
+		api:     withOfflineSuggestion(client, runtime.Env, opts.verbose),
 		harness: harness.NewRegistry(claude.New(), codex.New(), pi.New(), standard.New()),
 		renderer: output.Renderer{
 			JSON:   opts.json,
+			JSONL:  opts.jsonl,
 			Out:    runtime.Stdout,
 			Prefix: activeOutputPrefix(store),
 		},
@@ -272,7 +312,7 @@ func loginCommand(runtime Runtime, opts *options) *cobra.Command {
 			}
 			service := app.authService()
 			req := auth.LoginRequest{Email: email, Team: team, DeviceID: deviceID, DeviceName: deviceName}
-			interactive := !opts.json && !loginFlagChanged(cmd)
+			interactive := app.canPrompt() && !loginFlagChanged(cmd)
 			alreadyAuthenticated := false
 			var result auth.LoginResult
 			if err := app.withLock(cmd.Context(), func() error {
@@ -288,15 +328,18 @@ func loginCommand(runtime Runtime, opts *options) *cobra.Command {
 						return err
 					}
 				}
-				if opts.json {
+				if opts.machineReadable() {
 					result, err = service.LoginWithDeviceCallback(cmd.Context(), req, nil)
 					return err
 				}
 				result, err = service.LoginWithDeviceCallback(cmd.Context(), req, func(device api.DeviceLogin) error {
+					emailLine := "[s46] check your Sovereign46 email and open the magic link to approve this device"
+					if emailHint := strings.TrimSpace(req.Email); emailHint != "" {
+						emailLine = fmt.Sprintf("[s46] check your email at %s and open the magic link to approve this device", emailHint)
+					}
 					return app.renderer.Lines(
 						fmt.Sprintf("[s46] pairing code: %s", device.UserCode),
-						fmt.Sprintf("[s46] magic-link endpoint: %s", device.VerificationURI),
-						"[s46] open the magic-link URL logged by the API server to approve this device",
+						emailLine,
 						"[s46] waiting for magic-link approval...",
 					)
 				})
@@ -304,13 +347,19 @@ func loginCommand(runtime Runtime, opts *options) *cobra.Command {
 			}); err != nil {
 				return err
 			}
-			if opts.json {
-				return app.renderer.WriteJSON(result)
+			if ok, err := app.writeStructured(result); ok {
+				return err
 			}
+			lines := []string{}
 			if alreadyAuthenticated {
-				return app.renderer.Lines(fmt.Sprintf("[s46] already authenticated as %s", result.User))
+				lines = append(lines, fmt.Sprintf("[s46] already authenticated as %s", result.User))
+			} else {
+				lines = append(lines, fmt.Sprintf("[s46] authenticated as %s", result.User))
 			}
-			return app.renderer.Lines(fmt.Sprintf("[s46] authenticated as %s", result.User))
+			if result.Team != "" {
+				lines = append(lines, fmt.Sprintf("[s46] next: s46 connect %s --harness=<pi|claude-code|codex|standard>", result.Team))
+			}
+			return app.renderer.Lines(lines...)
 		},
 	}
 	cmd.Flags().StringVar(&email, "user", "", "email address")
@@ -349,8 +398,8 @@ func logoutCommand(runtime Runtime, opts *options) *cobra.Command {
 			}); err != nil {
 				return err
 			}
-			if opts.json {
-				return app.renderer.WriteJSON(map[string]any{"authenticated": false, "previousUser": user})
+			if ok, err := app.writeStructured(map[string]any{"authenticated": false, "previousUser": user}); ok {
+				return err
 			}
 			if user == "" {
 				return app.renderer.Lines("[s46] logged out")
@@ -375,8 +424,8 @@ func whoamiCommand(runtime Runtime, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if opts.json {
-				return app.renderer.WriteJSON(map[string]any{"authenticated": true, "user": user})
+			if ok, err := app.writeStructured(map[string]any{"authenticated": true, "user": user}); ok {
+				return err
 			}
 			return app.renderer.Lines(user)
 		},
@@ -397,6 +446,9 @@ func tokenCommand(runtime Runtime, opts *options) *cobra.Command {
 			service := app.authService()
 			token, err := service.Token(cmd.Context(), refresh)
 			if err != nil {
+				return err
+			}
+			if ok, err := app.writeStructured(map[string]any{"token": token}); ok {
 				return err
 			}
 			_, err = fmt.Fprintln(runtime.Stdout, token)
@@ -425,8 +477,8 @@ func devicesCommand(runtime Runtime, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if opts.json {
-				return app.renderer.WriteJSON(map[string]any{"devices": devices})
+			if ok, err := app.writeStructured(map[string]any{"devices": devices}); ok {
+				return err
 			}
 			return app.renderer.Lines(renderDevices(devices)...)
 		},
@@ -440,7 +492,7 @@ func deleteDeviceCommand(runtime Runtime, opts *options) *cobra.Command {
 		Use:     "delete <device-id>",
 		Aliases: []string{"revoke", "rm"},
 		Short:   "delete and revoke a paired device",
-		Args:    cobra.ExactArgs(1),
+		Args:    exactArgs("s46 devices delete <device-id>", 1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := newApp(runtime, opts)
 			if err != nil {
@@ -458,8 +510,8 @@ func deleteDeviceCommand(runtime Runtime, opts *options) *cobra.Command {
 			}); err != nil {
 				return err
 			}
-			if opts.json {
-				return app.renderer.WriteJSON(map[string]any{"deleted": true, "deviceId": args[0], "loggedOut": revokedCurrent})
+			if ok, err := app.writeStructured(map[string]any{"deleted": true, "deviceId": args[0], "loggedOut": revokedCurrent}); ok {
+				return err
 			}
 			lines := []string{fmt.Sprintf("[s46] revoked device %s", args[0])}
 			if revokedCurrent {
@@ -507,8 +559,8 @@ func versionCommand(runtime Runtime, opts *options) *cobra.Command {
 				return err
 			}
 			info := version.Get()
-			if opts.json {
-				return app.renderer.WriteJSON(info)
+			if ok, err := app.writeStructured(info); ok {
+				return err
 			}
 			return app.renderer.Lines(
 				fmt.Sprintf("s46 %s", info.Version),
@@ -537,14 +589,20 @@ func updateCommand(runtime Runtime, opts *options) *cobra.Command {
 			if out == nil {
 				out = io.Discard
 			}
-			renderer := output.Renderer{JSON: opts.json, Out: out}
+			renderer := output.Renderer{JSON: opts.json, JSONL: opts.jsonl, Out: out}
 			check, err := updater.Updater{CurrentVersion: version.Get().Version, Env: runtime.Env}.Check(cmd.Context())
-			if opts.json {
+			if opts.machineReadable() {
 				if errors.Is(err, updater.ErrCheckDisabled) || errors.Is(err, updater.ErrNoRelease) {
+					if opts.jsonl {
+						return renderer.WriteJSONL(check)
+					}
 					return renderer.WriteJSON(check)
 				}
 				if err != nil {
 					return err
+				}
+				if opts.jsonl {
+					return renderer.WriteJSONL(check)
 				}
 				return renderer.WriteJSON(check)
 			}
@@ -592,7 +650,7 @@ func connectCommand(runtime Runtime, opts *options) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "connect [team]",
 		Short: "connect a team and configure a harness",
-		Args:  cobra.MaximumNArgs(1),
+		Args:  maxArgs("s46 connect [team]", 1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := newApp(runtime, opts)
 			if err != nil {
@@ -610,7 +668,13 @@ func connectCommand(runtime Runtime, opts *options) *cobra.Command {
 				if len(args) == 1 {
 					req.TeamName = args[0]
 				}
-				if !opts.json && !connectFlagChanged(cmd) {
+				if err := validateConnectRequest(req); err != nil {
+					return err
+				}
+				if err := app.requireCloudAuthBeforeConnectPrompt(cmd.Context(), req); err != nil {
+					return err
+				}
+				if app.canPrompt() && !connectFlagChanged(cmd) {
 					var err error
 					req, err = promptConnectRequest(app, req)
 					if err != nil {
@@ -672,14 +736,11 @@ func runConnect(ctx context.Context, app *app, req connectRequest) error {
 		return err
 	}
 	selectedModel := strs.FirstNonEmpty(req.Model, team.DefaultModel, api.DefaultModel)
-	plan, err := adapter.PlanConnect(ctx, harness.ConnectRequest{Env: app.runtime.Env, Team: team, Model: selectedModel, Mode: targetMode, Scope: req.Scope, DryRun: app.options.dryRun})
+	plan, err := adapter.PlanConnect(ctx, harness.ConnectRequest{Env: app.runtime.Env, Team: team, Model: selectedModel, Mode: targetMode, Scope: req.Scope})
 	if err != nil {
 		return err
 	}
-	result := connectResult(team, harnessName, selectedModel, targetMode, plan, app.options.dryRun)
-	if app.options.dryRun {
-		return renderConnectDryRun(app, team, plan, result)
-	}
+	result := connectResult(team, harnessName, selectedModel, targetMode, plan)
 	cfgBefore, cfgAfter := buildConnectConfigs(cfg, team, harnessName, selectedModel, targetMode, existing)
 	applied, err := applyAtomicConfigAndHarness(ctx, app, cfgBefore, cfgAfter, adapter, plan, "connect")
 	if err != nil {
@@ -687,6 +748,22 @@ func runConnect(ctx context.Context, app *app, req connectRequest) error {
 	}
 	result["files"] = applied.Files
 	return renderConnectApplied(app, team, plan, applied, result)
+}
+
+func (a *app) requireCloudAuthBeforeConnectPrompt(ctx context.Context, req connectRequest) error {
+	cfg, err := a.config.LoadConfig()
+	if err != nil {
+		return err
+	}
+	teamName := req.TeamName
+	if teamName == "" {
+		teamName = cfg.ActiveTeam
+	}
+	if resolveConnectMode(cfg, cfg.Teams[teamName], req) == config.ModeAirplane {
+		return nil
+	}
+	_, err = a.requireAccessToken(ctx)
+	return err
 }
 
 func validateConnectRequest(req connectRequest) error {
@@ -700,7 +777,7 @@ func selectConnectHarness(ctx context.Context, app *app, req connectRequest) (st
 	name, err := resolveHarnessName(ctx, app, req.Harness)
 	if err != nil {
 		var selection *harnessSelectionError
-		if !app.options.json && errors.As(err, &selection) {
+		if app.canPrompt() && errors.As(err, &selection) {
 			if name, err = promptMissingHarness(app, req); err != nil {
 				return "", nil, err
 			}
@@ -725,7 +802,7 @@ func fillMissingTeamForConnect(cfg config.Config, req connectRequest) (connectRe
 	return req, nil
 }
 
-func connectResult(team api.Team, harnessName, model, mode string, plan harness.Plan, dryRun bool) map[string]any {
+func connectResult(team api.Team, harnessName, model, mode string, plan harness.Plan) map[string]any {
 	return map[string]any{
 		"team":       team.Name,
 		"lane":       team.Lane,
@@ -733,7 +810,6 @@ func connectResult(team api.Team, harnessName, model, mode string, plan harness.
 		"harness":    harnessName,
 		"model":      model,
 		"endpoint":   team.Endpoint,
-		"dryRun":     dryRun,
 		"operations": plan.Operations,
 		"files":      plan.Files,
 	}
@@ -743,9 +819,7 @@ func buildConnectConfigs(cfg config.Config, team api.Team, harnessName, model, m
 	before := cfg.Clone()
 	after := cfg.Clone()
 	after.ActiveTeam = team.Name
-	if mode == config.ModeAirplane {
-		after.Mode = config.ModeAirplane
-	}
+	after.Mode = mode
 	teamConfig := config.TeamConfigFromAPI(team, harnessName, model, mode)
 	if mode == config.ModeAirplane && existing.APISnapshot.Endpoint != "" && !isLocalEndpoint(existing.APISnapshot.Endpoint) {
 		teamConfig.APISnapshot = existing.APISnapshot
@@ -801,7 +875,10 @@ func connectTeam(ctx context.Context, app *app, mode string, existing config.Tea
 	if mode == config.ModeAirplane {
 		return localAirplaneTeam(req.TeamName, existing, req), nil
 	}
-	accessToken := app.accessToken(ctx)
+	accessToken, err := app.requireAccessToken(ctx)
+	if err != nil {
+		return api.Team{}, err
+	}
 	return app.api.Team(ctx, req.TeamName, api.TeamOptions{
 		Endpoint:     strs.FirstNonEmpty(req.Endpoint, existing.Endpoint),
 		Lane:         strs.FirstNonEmpty(req.Lane, existing.Lane),
@@ -810,22 +887,9 @@ func connectTeam(ctx context.Context, app *app, mode string, existing config.Tea
 	})
 }
 
-func renderConnectDryRun(app *app, team api.Team, plan harness.Plan, result map[string]any) error {
-	if app.options.json {
-		return app.renderer.WriteJSON(result)
-	}
-	lines := []string{
-		fmt.Sprintf("[s46] dry-run: would connect %s", team.Name),
-		fmt.Sprintf("[s46] team:    %s · lane: %s · endpoint: %s", team.Name, team.Lane, team.Endpoint),
-	}
-	lines = append(lines, output.RenderPlan(plan)...)
-	lines = append(lines, "", "[s46] dry-run: no files written")
-	return app.renderer.Lines(lines...)
-}
-
 func renderConnectApplied(app *app, team api.Team, plan harness.Plan, applied harness.AppliedPlan, result map[string]any) error {
-	if app.options.json {
-		return app.renderer.WriteJSON(result)
+	if ok, err := app.writeStructured(result); ok {
+		return err
 	}
 	lines := []string{
 		fmt.Sprintf("[s46] %s", plan.Summary),
@@ -837,7 +901,21 @@ func renderConnectApplied(app *app, team api.Team, plan harness.Plan, applied ha
 			lines = append(lines, fmt.Sprintf("[s46] backup: %s", file.BackupPath))
 		}
 	}
+	lines = append(lines, connectNextSteps(plan.Harness, team.Name, team.DefaultModel)...)
 	return app.renderer.Lines(lines...)
+}
+
+func connectNextSteps(harnessName string, teamName string, model string) []string {
+	switch harnessName {
+	case "pi":
+		return []string{fmt.Sprintf("[s46] next: in Pi, choose provider s46 and model %s", model)}
+	case "claude-code":
+		return []string{"[s46] next: start Claude Code; it will use Sovereign46 through `s46 token --refresh`"}
+	case "codex":
+		return []string{"[s46] next: run Codex with profile s46"}
+	default:
+		return []string{fmt.Sprintf("[s46] next: s46 run \"your task\" (team %s)", teamName)}
+	}
 }
 
 func resolveHarnessName(ctx context.Context, app *app, explicit string) (string, error) {
@@ -887,7 +965,7 @@ func disconnectCommand(runtime Runtime, opts *options) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "disconnect <team>",
 		Short: "remove S46 configuration for a team and harness",
-		Args:  cobra.ExactArgs(1),
+		Args:  exactArgs("s46 disconnect <team>", 1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := newApp(runtime, opts)
 			if err != nil {
@@ -923,20 +1001,11 @@ func runDisconnect(ctx context.Context, app *app, teamName string, harnessName s
 		return err
 	}
 	team := teamConfig.API(teamName)
-	plan, err := adapter.PlanDisconnect(ctx, harness.DisconnectRequest{Env: app.runtime.Env, Team: team, Harness: harnessName, Scope: scope, DryRun: app.options.dryRun})
+	plan, err := adapter.PlanDisconnect(ctx, harness.DisconnectRequest{Env: app.runtime.Env, Team: team, Harness: harnessName, Scope: scope})
 	if err != nil {
 		return err
 	}
-	result := map[string]any{"team": teamName, "harness": harnessName, "dryRun": app.options.dryRun, "operations": plan.Operations, "files": plan.Files}
-	if app.options.dryRun {
-		if app.options.json {
-			return app.renderer.WriteJSON(result)
-		}
-		lines := []string{fmt.Sprintf("[s46] dry-run: would disconnect %s", teamName)}
-		lines = append(lines, output.RenderPlan(plan)...)
-		lines = append(lines, "", "[s46] dry-run: no files written")
-		return app.renderer.Lines(lines...)
-	}
+	result := map[string]any{"team": teamName, "harness": harnessName, "operations": plan.Operations, "files": plan.Files}
 	cfgBefore := cfg.Clone()
 	cfgAfter := cfg.Clone()
 	delete(cfgAfter.Teams, teamName)
@@ -948,8 +1017,8 @@ func runDisconnect(ctx context.Context, app *app, teamName string, harnessName s
 		return err
 	}
 	result["files"] = applied.Files
-	if app.options.json {
-		return app.renderer.WriteJSON(result)
+	if ok, err := app.writeStructured(result); ok {
+		return err
 	}
 	lines := []string{fmt.Sprintf("[s46] disconnected %s", teamName)}
 	for _, file := range applied.Files {
@@ -1034,11 +1103,11 @@ func runTeamsList(app *app) error {
 		return err
 	}
 	entries := teamListEntries(cfg)
-	if app.options.json {
-		return app.renderer.WriteJSON(map[string]any{"activeTeam": cfg.ActiveTeam, "teams": entries})
+	if ok, err := app.writeStructured(map[string]any{"activeTeam": cfg.ActiveTeam, "teams": entries}); ok {
+		return err
 	}
 	if len(entries) == 0 {
-		return app.renderer.Lines("[s46] no connected teams", "[s46] connect with: s46 connect <team> --harness=<name>")
+		return app.renderer.Lines("[s46] no connected teams", "[s46] next: s46 login", "[s46] then: s46 connect <team> --harness=<name>")
 	}
 	return app.renderer.Lines(renderTeamsList(entries)...)
 }
@@ -1091,8 +1160,8 @@ func runTeamsUse(app *app, teamName string) error {
 	if err := app.config.SaveConfig(cfg); err != nil {
 		return err
 	}
-	if app.options.json {
-		return app.renderer.WriteJSON(map[string]any{"activeTeam": teamName})
+	if ok, err := app.writeStructured(map[string]any{"activeTeam": teamName}); ok {
+		return err
 	}
 	return app.renderer.Lines(fmt.Sprintf("[s46] active team: %s", teamName))
 }
@@ -1112,8 +1181,11 @@ func sessionsCommand(runtime Runtime, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if opts.json {
-				return app.renderer.WriteJSON(map[string]any{"sessions": sessions})
+			if ok, err := app.writeStructured(map[string]any{"sessions": sessions}); ok {
+				return err
+			}
+			if len(sessions) == 0 {
+				return app.renderer.Lines("[s46] no sessions found", "[s46] next: start a coding session, then run `s46 sessions` again")
 			}
 			sessionIDs := displaySessionIDs(sessions)
 			rows := make([][]string, 0, len(sessions))
@@ -1217,7 +1289,7 @@ func detachCommand(runtime Runtime, opts *options) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "detach <session>",
 		Short: "detach a session to an S46 box",
-		Args:  cobra.ExactArgs(1),
+		Args:  exactArgs("s46 detach <session>", 1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := newApp(runtime, opts)
 			if err != nil {
@@ -1239,20 +1311,13 @@ func runDetach(ctx context.Context, app *app, sessionID string, harnessName stri
 	var result api.Session
 	if err := app.withLock(ctx, func() error {
 		var err error
-		result, err = service.Detach(ctx, sessionID, harnessName, box, app.options.dryRun)
+		result, err = service.Detach(ctx, sessionID, harnessName, box)
 		return err
 	}); err != nil {
 		return err
 	}
-	if app.options.json {
-		return app.renderer.WriteJSON(map[string]any{"session": result, "dryRun": app.options.dryRun})
-	}
-	if app.options.dryRun {
-		return app.renderer.Lines(
-			fmt.Sprintf("[s46] dry-run: would detach %s", sessionID),
-			fmt.Sprintf("[s46] would run on %s", result.Location),
-			"[s46] dry-run: no remote state changed",
-		)
+	if ok, err := app.writeStructured(map[string]any{"session": result}); ok {
+		return err
 	}
 	return app.renderer.Lines(
 		fmt.Sprintf("[s46] detached %s session %s", result.Harness, result.ID),
@@ -1265,7 +1330,7 @@ func resumeCommand(runtime Runtime, opts *options) *cobra.Command {
 	return &cobra.Command{
 		Use:   "resume <session>",
 		Short: "resume a session locally",
-		Args:  cobra.ExactArgs(1),
+		Args:  exactArgs("s46 resume <session>", 1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := newApp(runtime, opts)
 			if err != nil {
@@ -1285,20 +1350,16 @@ func runResume(ctx context.Context, app *app, sessionID string) error {
 	var previous string
 	if err := app.withLock(ctx, func() error {
 		var err error
-		result, previous, err = service.Resume(ctx, sessionID, app.options.dryRun)
+		result, previous, err = service.Resume(ctx, sessionID)
 		return err
 	}); err != nil {
 		return err
 	}
-	if app.options.json {
-		return app.renderer.WriteJSON(map[string]any{"session": result, "previousLocation": previous, "dryRun": app.options.dryRun})
-	}
-	prefix := "[s46] resumed"
-	if app.options.dryRun {
-		prefix = "[s46] dry-run: would resume"
+	if ok, err := app.writeStructured(map[string]any{"session": result, "previousLocation": previous}); ok {
+		return err
 	}
 	return app.renderer.Lines(
-		fmt.Sprintf("%s %s on localhost", prefix, sessionID),
+		fmt.Sprintf("[s46] resumed %s on localhost", sessionID),
 		fmt.Sprintf("# Under the hood: pulled local harness state from %s.", previous),
 	)
 }
@@ -1308,7 +1369,7 @@ func shareCommand(runtime Runtime, opts *options) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "share [session]",
 		Short: "share a session as an encrypted static page",
-		Args:  cobra.MaximumNArgs(1),
+		Args:  maxArgs("s46 share [session]", 1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := newApp(runtime, opts)
 			if err != nil {
@@ -1325,7 +1386,7 @@ func shareCommand(runtime Runtime, opts *options) *cobra.Command {
 	cmd.AddCommand(&cobra.Command{
 		Use:   "revoke <session-or-share-id>",
 		Short: "delete a previously created encrypted share",
-		Args:  cobra.ExactArgs(1),
+		Args:  exactArgs("s46 share revoke <session-or-share-id>", 1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := newApp(runtime, opts)
 			if err != nil {
@@ -1346,7 +1407,7 @@ func runShare(ctx context.Context, app *app, sessionID string, ttl string) error
 			return err
 		}
 		if !ok {
-			return fmt.Errorf("no sessions found; start a coding session or pass a session id")
+			return fmt.Errorf("no sessions found; start a coding session, run `s46 sessions`, or pass a session id")
 		}
 		sessionID = latest.ID
 		inferred = &latest
@@ -1360,23 +1421,15 @@ func runShare(ctx context.Context, app *app, sessionID string, ttl string) error
 	var result sessioncmd.ShareResult
 	if err := app.withLock(ctx, func() error {
 		var err error
-		result, err = service.Share(ctx, sessionID, ttl, app.options.dryRun)
+		result, err = service.Share(ctx, sessionID, ttl)
 		return err
 	}); err != nil {
 		return err
 	}
-	if app.options.json {
-		return app.renderer.WriteJSON(result)
+	if ok, err := app.writeStructured(result); ok {
+		return err
 	}
 	lines := inferredShareLines(inferred)
-	if app.options.dryRun {
-		lines = append(lines,
-			fmt.Sprintf("[s46] dry-run: would sanitize and encrypt %s locally", result.SessionID),
-			fmt.Sprintf("[s46] dry-run: would upload ciphertext to s46-gist with ttl=%s", result.TTL),
-			fmt.Sprintf("[s46] dry-run: viewer would be %s", result.ViewerURL),
-		)
-		return app.renderer.Lines(lines...)
-	}
 	verb := "created"
 	if result.Updated {
 		verb = "updated"
@@ -1424,16 +1477,13 @@ func runShareRevoke(ctx context.Context, app *app, target string) error {
 	var result sessioncmd.RevokeResult
 	if err := app.withLock(ctx, func() error {
 		var err error
-		result, err = service.RevokeShare(ctx, target, app.options.dryRun)
+		result, err = service.RevokeShare(ctx, target)
 		return err
 	}); err != nil {
 		return err
 	}
-	if app.options.json {
-		return app.renderer.WriteJSON(result)
-	}
-	if app.options.dryRun {
-		return app.renderer.Lines(fmt.Sprintf("[s46] dry-run: would revoke share %s for %s", result.ID, result.SessionID))
+	if ok, err := app.writeStructured(result); ok {
+		return err
 	}
 	return app.renderer.Lines(fmt.Sprintf("[s46] revoked share %s for %s", result.ID, result.SessionID))
 }
@@ -1444,7 +1494,7 @@ func sessionCommand(runtime Runtime, opts *options) *cobra.Command {
 	land := &cobra.Command{
 		Use:   "land [session]",
 		Short: "prepare review-ready landing metadata",
-		Args:  cobra.MaximumNArgs(1),
+		Args:  maxArgs("s46 session land [session]", 1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := newApp(runtime, opts)
 			if err != nil {
@@ -1472,8 +1522,8 @@ func sessionCommand(runtime Runtime, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if opts.json {
-				return app.renderer.WriteJSON(result)
+			if ok, err := app.writeStructured(result); ok {
+				return err
 			}
 			return app.renderer.Lines(
 				fmt.Sprintf("# %s", result.Title),
@@ -1502,7 +1552,7 @@ func modeCommand(runtime Runtime, opts *options) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "mode [cloud|airplane]",
 		Short: "view or set operating mode",
-		Args:  cobra.MaximumNArgs(1),
+		Args:  maxArgs("s46 mode [cloud|airplane]", 1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := newApp(runtime, opts)
 			if err != nil {
@@ -1547,8 +1597,8 @@ func renderModeStatus(app *app) error {
 		result["gatewayUrl"] = airplane.LocalGatewayURL
 		result["backendModel"] = airplane.BackendModel
 	}
-	if app.options.json {
-		return app.renderer.WriteJSON(result)
+	if ok, err := app.writeStructured(result); ok {
+		return err
 	}
 	lines := []string{fmt.Sprintf("[s46] mode: %s", mode)}
 	if teamName == "" {
@@ -1583,8 +1633,8 @@ func airplaneCommand(runtime Runtime, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if opts.json {
-				return app.renderer.WriteJSON(report)
+			if ok, err := app.writeStructured(report); ok {
+				return err
 			}
 			return offerAirplaneModeOnAfterSetup(cmd.Context(), app, report)
 		},
@@ -1624,7 +1674,7 @@ func runCommand(runtime Runtime, opts *options) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "run <task>",
 		Short: "start a direct mocked s46 session",
-		Args:  cobra.MinimumNArgs(1),
+		Args:  minArgs("s46 run <task>", 1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := newApp(runtime, opts)
 			if err != nil {
@@ -1643,20 +1693,16 @@ func runRun(ctx context.Context, app *app, task string, model string, sessionID 
 	var result sessioncmd.RunResult
 	if err := app.withLock(ctx, func() error {
 		var err error
-		result, err = service.Run(ctx, task, model, sessionID, app.options.dryRun)
+		result, err = service.Run(ctx, task, model, sessionID)
 		return err
 	}); err != nil {
 		return err
 	}
-	if app.options.json {
-		return app.renderer.WriteJSON(result)
-	}
-	prefix := "[s46] session:"
-	if app.options.dryRun {
-		prefix = "[s46] dry-run: would start"
+	if ok, err := app.writeStructured(result); ok {
+		return err
 	}
 	return app.renderer.Lines(
-		fmt.Sprintf("%s %s", prefix, result.ID),
+		fmt.Sprintf("[s46] session: %s", result.ID),
 		fmt.Sprintf("[s46] state:   %s locally", result.State),
 		fmt.Sprintf("[s46] harness: s46 (direct) · model: %s", result.Model),
 		fmt.Sprintf("[s46] task:    %s", result.Task),
@@ -1670,16 +1716,22 @@ func authStatus(state config.State) string {
 	return "not authenticated"
 }
 
-func (a *app) accessToken(ctx context.Context) string {
-	cfg, err := a.config.LoadConfig()
-	if err == nil && cfg.ActiveMode() == config.ModeAirplane {
-		return ""
-	}
-	token, err := a.authService().Token(ctx, false)
+func (a *app) requireAccessToken(ctx context.Context) (string, error) {
+	state, err := a.config.LoadState()
 	if err != nil {
-		return ""
+		return "", err
 	}
-	return token
+	if !state.Authenticated || state.CurrentUser == "" {
+		return "", fmt.Errorf("not authenticated; run `s46 login` before connecting a cloud team")
+	}
+	token, err := a.authService().AccessToken(ctx)
+	if err != nil {
+		return "", fmt.Errorf("could not obtain s46 access token: %w; run `s46 login` if your session expired", err)
+	}
+	if token == "" {
+		return "", fmt.Errorf("not authenticated; run `s46 login` before connecting a cloud team")
+	}
+	return token, nil
 }
 
 // authService wires the standard {API, Config, Keyring} triple into
@@ -1694,6 +1746,16 @@ func (a *app) authService() auth.Service {
 // into the keyring directly.
 func (a *app) sessionService() sessioncmd.Service {
 	return sessioncmd.Service{API: a.api, Auth: a.authService(), Config: a.config, Keyring: a.keyring, Harness: a.harness}
+}
+
+func (a *app) writeStructured(value any) (bool, error) {
+	if a.options.json {
+		return true, a.renderer.WriteJSON(value)
+	}
+	if a.options.jsonl {
+		return true, a.renderer.WriteJSONL(value)
+	}
+	return false, nil
 }
 
 func (a *app) requireCloudFeature(feature string) error {
@@ -1724,7 +1786,7 @@ func (a *app) withLock(ctx context.Context, fn func() error) error {
 }
 
 func (a *app) debug(format string, args ...any) {
-	if a != nil && a.options != nil && a.options.verbose {
+	if a != nil && a.options != nil && a.options.verbose && !a.options.machineReadable() {
 		fmt.Fprintf(a.runtime.Stderr, "[s46:debug] "+format+"\n", args...)
 	}
 }

@@ -30,8 +30,8 @@ s46 logout
 s46 whoami
 s46 token --refresh
 s46 devices [delete <device-id>]
-s46 connect <team> --harness=pi|claude-code|codex|standard [--dry-run]
-s46 disconnect <team> [--harness=...] [--dry-run]
+s46 connect <team> --harness=pi|claude-code|codex|standard
+s46 disconnect <team> [--harness=...]
 s46 teams list
 s46 teams use <team>
 s46 status [--verbose]
@@ -50,7 +50,7 @@ s46 airplane logs [ollama|gateway|all] [--follow]
 s46 run "task"
 ```
 
-Global flags: `--config <path>`, `--json`, `--dry-run`, `--verbose`, `--help`.
+Global flags: `--config <path>`, `--json`, `--jsonl`, `--no-input`, `--verbose`, `--help`.
 
 ## Local state
 
@@ -64,7 +64,7 @@ Secrets live in the OS keychain (`internal/keyring.Store`). The file keyring bac
 
 Encrypted shares are uploaded to `S46_SHARE_API_URL` (default `https://gist.s46.dev`) and viewed at `S46_SHARE_VIEWER_URL` (default `https://share.s46.dev`). Writes require `S46_SHARE_UPLOAD_TOKEN`; revoke keys are stored only in local state so `s46 share revoke` can delete the blob later. `s46 sessions` lists supported local harness transcripts (Pi, Claude Code, and Codex) for the current project together with S46 state/API sessions, and `s46 share` with no argument shares the latest listed session. When the target matches a supported harness session id or JSONL path, `s46 share` asks that harness adapter to ingest the real local transcript, omitting private reasoning blocks and preserving user-visible messages plus tool calls/results.
 
-`s46 connect` writes harness config to `~/.claude/settings.json`, `~/.codex/config.toml`, or `~/.pi/agent/models.json`. Existing files are merged and backed up with `.s46-backup-<timestamp>`. A connect failure that leaves files half-written is rolled back automatically.
+`s46 connect` requires a valid login for cloud teams so the API can verify team access, then writes harness config to `~/.claude/settings.json`, `~/.codex/config.toml`, or `~/.pi/agent/models.json`. Existing files are merged and backed up with `.s46-backup-<timestamp>`. A connect failure that leaves files half-written is rolled back automatically.
 
 ## Airplane mode
 

@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"io"
 	"strings"
-
-	"github.com/sovereign46/s46-cli/internal/harness"
 )
 
 // DefaultPrefix is the literal CLI prefix used for cloud-mode output
@@ -20,10 +18,11 @@ const DefaultPrefix = "[s46]"
 
 type Interface interface {
 	WriteJSON(value any) error
+	WriteJSONL(value any) error
 	Lines(lines ...string) error
 }
 
-// Renderer prints either JSON or plain lines. Plain output respects
+// Renderer prints either JSON, JSONL, or plain lines. Plain output respects
 // the active brand prefix: lines that begin with DefaultPrefix have
 // it swapped for r.Prefix; lines that begin with the status markers
 // "[ok]" or "[fail]" get r.Prefix prepended when r.Prefix differs
@@ -31,6 +30,7 @@ type Interface interface {
 // mode prefixes them to disambiguate from third-party tools).
 type Renderer struct {
 	JSON   bool
+	JSONL  bool
 	Out    io.Writer
 	Prefix string
 }
@@ -38,6 +38,11 @@ type Renderer struct {
 func (r Renderer) WriteJSON(value any) error {
 	encoder := json.NewEncoder(r.Out)
 	encoder.SetIndent("", "  ")
+	return encoder.Encode(value)
+}
+
+func (r Renderer) WriteJSONL(value any) error {
+	encoder := json.NewEncoder(r.Out)
 	return encoder.Encode(value)
 }
 
@@ -61,18 +66,6 @@ func rewritePrefix(lines []string, prefix string) []string {
 		}
 	}
 	return rewritten
-}
-
-func RenderPlan(plan harness.Plan) []string {
-	lines := []string{fmt.Sprintf("%s %s", DefaultPrefix, plan.Title), fmt.Sprintf("%s %s", DefaultPrefix, plan.Summary)}
-	for _, operation := range plan.Operations {
-		lines = append(lines, "  - "+operation)
-	}
-	for _, file := range plan.Files {
-		lines = append(lines, "", fmt.Sprintf("--- %s", file.DisplayPath), fmt.Sprintf("+++ %s", file.DisplayPath))
-		lines = append(lines, SimpleDiff(file.OldContent, file.Content)...)
-	}
-	return lines
 }
 
 func SimpleDiff(oldContent []byte, newContent []byte) []string {

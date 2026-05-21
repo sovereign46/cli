@@ -50,15 +50,11 @@ func (a Adapter) PlanConnect(ctx context.Context, req harness.ConnectRequest) (h
 	if err != nil {
 		return harness.Plan{}, err
 	}
-	verb := "writes"
-	if req.DryRun {
-		verb = "would write"
-	}
 	return harness.Plan{
 		Harness: "codex",
 		Title:   "Configure Codex profile for Sovereign46",
 		Env:     req.Env,
-		Summary: fmt.Sprintf("harness: codex (%s %s, profile: s46)", verb, config.DisplayPath(path, req.Env)),
+		Summary: fmt.Sprintf("harness: codex (writes %s, profile: s46)", config.DisplayPath(path, req.Env)),
 		Operations: []string{
 			"add or replace [model_providers.s46]",
 			"add or replace [profiles.s46]",
@@ -83,15 +79,11 @@ func (a Adapter) PlanDisconnect(ctx context.Context, req harness.DisconnectReque
 		return harness.Plan{}, err
 	}
 	content := removeMarkedBlock(existing, "s46")
-	verb := "writes"
-	if req.DryRun {
-		verb = "would write"
-	}
 	return harness.Plan{
 		Harness:    "codex",
 		Title:      "Disconnect Codex from Sovereign46",
 		Env:        req.Env,
-		Summary:    fmt.Sprintf("harness: codex (%s %s)", verb, config.DisplayPath(path, req.Env)),
+		Summary:    fmt.Sprintf("harness: codex (writes %s)", config.DisplayPath(path, req.Env)),
 		Operations: []string{"remove s46 marked TOML block"},
 		Files:      []harness.FilePlan{{Path: path, DisplayPath: config.DisplayPath(path, req.Env), Kind: "toml", OldContent: []byte(existing), Content: []byte(content), Mode: 0o600}},
 	}, nil

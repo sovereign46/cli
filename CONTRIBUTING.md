@@ -29,7 +29,6 @@ A typical exercise flow:
 
 ```sh
 go run ./cmd/s46 login
-go run ./cmd/s46 connect acme --harness=claude-code --dry-run
 go run ./cmd/s46 connect acme --harness=claude-code
 go run ./cmd/s46 status
 go run ./cmd/s46 share @dscape/auth-redirect-fix

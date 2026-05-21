@@ -26,7 +26,6 @@ type ConnectRequest struct {
 	Model        string
 	Mode         string
 	Scope        string
-	DryRun       bool
 	SetAsDefault bool
 }
 
@@ -35,7 +34,6 @@ type DisconnectRequest struct {
 	Team    api.Team
 	Harness string
 	Scope   string
-	DryRun  bool
 }
 
 type FilePlan struct {

@@ -115,11 +115,30 @@ func run(t *testing.T, env map[string]string, args ...string) commandResult {
 
 func runWithStdin(t *testing.T, env map[string]string, stdin *strings.Reader, args ...string) commandResult {
 	t.Helper()
+	if stdin != nil {
+		env["S46_TEST_FORCE_TTY"] = "1"
+	}
 	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
 	root := NewRootCommand(Runtime{Stdin: stdin, Stdout: stdout, Stderr: stderr, Env: env})
 	root.SetArgs(args)
 	err := root.Execute()
+	return commandResult{stdout: stdout.String(), stderr: stderr.String(), err: err}
+}
+
+func runMain(t *testing.T, env map[string]string, args ...string) commandResult {
+	t.Helper()
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	runtime := Runtime{Stdin: nil, Stdout: stdout, Stderr: stderr, Env: env}
+	root := NewRootCommand(runtime)
+	root.SetArgs(args)
+	err := root.Execute()
+	if err != nil {
+		if renderErr := RenderExecutionError(root, runtime, err); renderErr != nil {
+			t.Fatalf("render error: %v", renderErr)
+		}
+	}
 	return commandResult{stdout: stdout.String(), stderr: stderr.String(), err: err}
 }
 
@@ -140,6 +159,117 @@ func TestHelpMatchesGolden(t *testing.T) {
 	}
 	if out != string(golden) {
 		t.Fatalf("help output changed\n--- got ---\n%s\n--- want ---\n%s", out, string(golden))
+	}
+}
+
+func TestJSONErrorsAreStructured(t *testing.T) {
+	cases := [][]string{
+		{"--json", "whoami"},
+		{"--jsonl", "whoami"},
+		{"--json", "connect", "acme", "--harness=standard"},
+		{"--json", "devices", "delete"},
+		{"--json", "airplane", "logs", "banana"},
+		{"--json", "airplane", "logs", "--follow"},
+	}
+	for _, args := range cases {
+		env := testEnv(t)
+		result := runMain(t, env, args...)
+		if result.err == nil {
+			t.Fatalf("expected %v to fail", args)
+		}
+		if result.stdout != "" {
+			t.Fatalf("%v wrote stdout for json error: %q", args, result.stdout)
+		}
+		var payload struct {
+			OK    bool `json:"ok"`
+			Error struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal([]byte(result.stderr), &payload); err != nil {
+			t.Fatalf("%v did not render JSON error: %v\nstderr=%s", args, err, result.stderr)
+		}
+		if payload.OK || payload.Error.Code == "" || payload.Error.Message == "" || strings.Contains(result.stderr, "[s46]") {
+			t.Fatalf("bad json error for %v: %s", args, result.stderr)
+		}
+	}
+}
+
+func TestStatusJSONFailureIsMachineReadable(t *testing.T) {
+	env := testEnv(t)
+	result := run(t, env, "status", "--json")
+	if result.err != nil {
+		t.Fatalf("status --json should report failed checks in JSON without returning a second error: %#v", result)
+	}
+	if result.stderr != "" {
+		t.Fatalf("status --json wrote stderr: %q", result.stderr)
+	}
+	var payload struct {
+		OK           bool          `json:"ok"`
+		Checks       []statusCheck `json:"checks"`
+		LocalServers []any         `json:"localServers"`
+		Ollama       any           `json:"ollama"`
+	}
+	if err := json.Unmarshal([]byte(result.stdout), &payload); err != nil {
+		t.Fatalf("invalid status json: %v\n%s", err, result.stdout)
+	}
+	if payload.OK || len(payload.Checks) == 0 || payload.LocalServers != nil || payload.Ollama != nil {
+		t.Fatalf("unexpected status json: %s", result.stdout)
+	}
+}
+
+func TestNoInputDoesNotPrompt(t *testing.T) {
+	env := testEnv(t)
+	result := run(t, env, "connect")
+	if result.err == nil {
+		t.Fatal("expected connect without input to fail")
+	}
+	if strings.Contains(result.stdout, "interactive connect") || strings.Contains(result.stdout, "Team:") || strings.Contains(result.stdout, "Harness") {
+		t.Fatalf("non-tty command prompted:\nstdout=%s\nstderr=%s", result.stdout, result.stderr)
+	}
+
+	env = testEnv(t)
+	result = runWithStdin(t, env, strings.NewReader("acme\nstandard\n"), "connect", "--no-input")
+	if result.err == nil {
+		t.Fatal("expected --no-input connect without args to fail")
+	}
+	if result.stdout != "" {
+		t.Fatalf("--no-input command prompted: %s", result.stdout)
+	}
+}
+
+func TestTokenJSONAndAirplaneLogsJSONL(t *testing.T) {
+	env := testEnv(t)
+	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	token := requireOK(t, run(t, env, "token", "--refresh", "--json"))
+	var tokenPayload struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal([]byte(token), &tokenPayload); err != nil || tokenPayload.Token == "" {
+		t.Fatalf("invalid token json: err=%v payload=%s", err, token)
+	}
+
+	logDir := filepath.Join(env["XDG_CACHE_HOME"], "s46")
+	if err := os.MkdirAll(logDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(logDir, "ollama.log"), []byte("one\ntwo\nthree\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	logs := requireOK(t, run(t, env, "airplane", "logs", "ollama", "--jsonl", "--lines=2"))
+	lines := strings.Split(strings.TrimSpace(logs), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 jsonl lines, got %d: %s", len(lines), logs)
+	}
+	for _, line := range lines {
+		var event map[string]any
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("invalid jsonl line %q: %v", line, err)
+		}
+		if event["type"] != "log" || event["log"] != "ollama" || strings.HasPrefix(line, "[s46]") {
+			t.Fatalf("unexpected jsonl event: %s", line)
+		}
 	}
 }
 
@@ -242,7 +372,7 @@ func TestTenantEndpointOKAllowsLocalAPIBase(t *testing.T) {
 	}
 }
 
-func TestLoginUsesLocalVerificationURL(t *testing.T) {
+func TestLoginTellsUserToCheckEmail(t *testing.T) {
 	env := testEnv(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -283,7 +413,7 @@ func TestLoginUsesLocalVerificationURL(t *testing.T) {
 	env["S46_API_BASE_URL"] = server.URL
 
 	out := requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev", "--device-id", "dev-laptop", "--device-name", "Dev laptop"))
-	if !strings.Contains(out, "magic-link endpoint: "+server.URL+"/v1/auth/magic/consume") {
+	if !strings.Contains(out, "check your email at dscape@acme.s46.dev") || strings.Contains(out, "magic-link endpoint") || strings.Contains(out, "API server") {
 		t.Fatalf("unexpected login output: %s", out)
 	}
 	status := requireOK(t, run(t, env, "status"))
@@ -443,6 +573,17 @@ func TestLoginTokenWhoamiLogout(t *testing.T) {
 	requireOK(t, run(t, env, "logout"))
 	if result := run(t, env, "whoami"); result.err == nil || !strings.Contains(result.err.Error(), "not authenticated") {
 		t.Fatalf("expected not authenticated error, got %#v", result)
+	}
+}
+
+func TestInteractiveConnectRequiresLoginBeforePrompt(t *testing.T) {
+	env := testEnv(t)
+	result := runWithStdin(t, env, strings.NewReader("acme\nstandard\nuser\n"), "connect")
+	if result.err == nil || !strings.Contains(result.err.Error(), "not authenticated") {
+		t.Fatalf("expected auth error, got %#v", result)
+	}
+	if strings.Contains(result.stdout, "interactive connect") || strings.Contains(result.stdout, "Team [") || strings.Contains(result.stdout, "Team: ") {
+		t.Fatalf("connect prompted before auth failure:\n%s", result.stdout)
 	}
 }
 
@@ -1210,15 +1351,10 @@ func TestAirplaneSetupReportsInsufficientHardware(t *testing.T) {
 	}
 }
 
-func TestConnectClaudeDryRunAndWrite(t *testing.T) {
+func TestConnectClaudeWritesHarnessConfig(t *testing.T) {
 	env := testEnv(t)
 	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
-	out := requireOK(t, run(t, env, "connect", "acme", "--harness=claude-code", "--dry-run"))
-	assertGolden(t, "connect-claude-dry-run.golden", out)
 	settingsPath := filepath.Join(env["HOME"], ".claude", "settings.json")
-	if _, err := os.Stat(settingsPath); !os.IsNotExist(err) {
-		t.Fatalf("dry-run wrote settings")
-	}
 	requireOK(t, run(t, env, "connect", "acme", "--harness=claude-code"))
 	settings := map[string]any{}
 	readJSON(t, settingsPath, &settings)
@@ -1233,8 +1369,6 @@ func TestConnectClaudeDryRunAndWrite(t *testing.T) {
 
 func TestConnectCodexAndPi(t *testing.T) {
 	env := testEnv(t)
-	assertGolden(t, "connect-codex-dry-run.golden", requireOK(t, run(t, env, "connect", "acme", "--harness=codex", "--dry-run")))
-	assertGolden(t, "connect-pi-dry-run.golden", requireOK(t, run(t, env, "connect", "acme", "--harness=pi", "--dry-run")))
 	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
 	requireOK(t, run(t, env, "connect", "acme", "--harness=codex"))
 	codexConfig, err := os.ReadFile(filepath.Join(env["HOME"], ".codex", "config.toml"))

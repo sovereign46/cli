@@ -61,7 +61,6 @@ type ShareResult struct {
 	Format     string `json:"format"`
 	Provider   string `json:"provider"`
 	Updated    bool   `json:"updated"`
-	DryRun     bool   `json:"dryRun"`
 	Mock       bool   `json:"mock"`
 }
 
@@ -69,7 +68,6 @@ type RevokeResult struct {
 	ID        string `json:"id"`
 	SessionID string `json:"sessionId"`
 	Deleted   bool   `json:"deleted"`
-	DryRun    bool   `json:"dryRun"`
 	Mock      bool   `json:"mock"`
 }
 
@@ -81,7 +79,6 @@ type RunResult struct {
 	Harness  string `json:"harness"`
 	Model    string `json:"model"`
 	Lane     string `json:"lane"`
-	DryRun   bool   `json:"dryRun"`
 }
 
 type ListedSession struct {
@@ -250,7 +247,7 @@ func localDevelopmentAPI(env map[string]string) bool {
 	return strs.Truthy(env["S46_DEV_SHELL"])
 }
 
-func (s Service) Detach(ctx context.Context, sessionID string, harness string, box string, dryRun bool) (api.Session, error) {
+func (s Service) Detach(ctx context.Context, sessionID string, harness string, box string) (api.Session, error) {
 	ctxState, err := s.contextState()
 	if err != nil {
 		return api.Session{}, err
@@ -267,16 +264,14 @@ func (s Service) Detach(ctx context.Context, sessionID string, harness string, b
 	if err != nil {
 		return api.Session{}, err
 	}
-	if !dryRun {
-		ctxState.State.Sessions[sessionID] = result
-		if err := s.Config.SaveState(ctxState.State); err != nil {
-			return api.Session{}, err
-		}
+	ctxState.State.Sessions[sessionID] = result
+	if err := s.Config.SaveState(ctxState.State); err != nil {
+		return api.Session{}, err
 	}
 	return result, nil
 }
 
-func (s Service) Resume(ctx context.Context, sessionID string, dryRun bool) (api.Session, string, error) {
+func (s Service) Resume(ctx context.Context, sessionID string) (api.Session, string, error) {
 	ctxState, err := s.contextState()
 	if err != nil {
 		return api.Session{}, "", err
@@ -291,16 +286,14 @@ func (s Service) Resume(ctx context.Context, sessionID string, dryRun bool) (api
 	if err != nil {
 		return api.Session{}, "", err
 	}
-	if !dryRun {
-		ctxState.State.Sessions[sessionID] = result
-		if err := s.Config.SaveState(ctxState.State); err != nil {
-			return api.Session{}, "", err
-		}
+	ctxState.State.Sessions[sessionID] = result
+	if err := s.Config.SaveState(ctxState.State); err != nil {
+		return api.Session{}, "", err
 	}
 	return result, previous, nil
 }
 
-func (s Service) Share(ctx context.Context, sessionID string, ttl string, dryRun bool) (ShareResult, error) {
+func (s Service) Share(ctx context.Context, sessionID string, ttl string) (ShareResult, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		latest, ok, err := s.LatestSession(ctx)
@@ -308,7 +301,7 @@ func (s Service) Share(ctx context.Context, sessionID string, ttl string, dryRun
 			return ShareResult{}, err
 		}
 		if !ok {
-			return ShareResult{}, fmt.Errorf("no sessions found; start a coding session or pass a session id")
+			return ShareResult{}, fmt.Errorf("no sessions found; start a coding session, run `s46 sessions`, or pass a session id")
 		}
 		sessionID = latest.ID
 	}
@@ -320,31 +313,29 @@ func (s Service) Share(ctx context.Context, sessionID string, ttl string, dryRun
 	if err != nil {
 		return ShareResult{}, err
 	}
-	result, err := s.buildShare(ctx, ctxState, sessionID, normalizedTTL, dryRun)
+	result, err := s.buildShare(ctx, ctxState, sessionID, normalizedTTL)
 	if err != nil {
 		return ShareResult{}, err
 	}
-	if !dryRun {
-		ctxState.State.Shares[sessionID] = config.Share{
-			ID:         result.ID,
-			ViewerURL:  result.ViewerURL,
-			BlobURL:    result.BlobURL,
-			RevokeKey:  result.RevokeKey,
-			TTL:        result.TTL,
-			ExpiresAt:  result.ExpiresAt,
-			Visibility: result.Visibility,
-			Format:     result.Format,
-			Provider:   result.Provider,
-			Mock:       result.Mock,
-		}
-		if err := s.Config.SaveState(ctxState.State); err != nil {
-			return ShareResult{}, err
-		}
+	ctxState.State.Shares[sessionID] = config.Share{
+		ID:         result.ID,
+		ViewerURL:  result.ViewerURL,
+		BlobURL:    result.BlobURL,
+		RevokeKey:  result.RevokeKey,
+		TTL:        result.TTL,
+		ExpiresAt:  result.ExpiresAt,
+		Visibility: result.Visibility,
+		Format:     result.Format,
+		Provider:   result.Provider,
+		Mock:       result.Mock,
+	}
+	if err := s.Config.SaveState(ctxState.State); err != nil {
+		return ShareResult{}, err
 	}
 	return result, nil
 }
 
-func (s Service) RevokeShare(ctx context.Context, target string, dryRun bool) (RevokeResult, error) {
+func (s Service) RevokeShare(ctx context.Context, target string) (RevokeResult, error) {
 	ctxState, _, err := s.relaxedContextState()
 	if err != nil {
 		return RevokeResult{}, err
@@ -357,29 +348,27 @@ func (s Service) RevokeShare(ctx context.Context, target string, dryRun bool) (R
 		return RevokeResult{}, fmt.Errorf("share %q has no revoke key; recreate it with `s46 share %s`", target, sessionID)
 	}
 	mock := s.Config.Env["S46_SHARE_BACKEND"] == "mock" || record.Mock
-	if !dryRun && !mock {
+	if !mock {
 		client := sharepkg.Client{BaseURL: shareAPIBaseURL(s.Config.Env), UploadToken: shareUploadToken(s.Config.Env)}
 		if _, err := client.Delete(ctx, record.ID, record.RevokeKey); err != nil {
 			return RevokeResult{}, err
 		}
 	}
-	if !dryRun {
-		delete(ctxState.State.Shares, sessionID)
-		if err := s.Config.SaveState(ctxState.State); err != nil {
-			return RevokeResult{}, err
-		}
+	delete(ctxState.State.Shares, sessionID)
+	if err := s.Config.SaveState(ctxState.State); err != nil {
+		return RevokeResult{}, err
 	}
-	return RevokeResult{ID: record.ID, SessionID: sessionID, Deleted: !dryRun, DryRun: dryRun, Mock: mock}, nil
+	return RevokeResult{ID: record.ID, SessionID: sessionID, Deleted: true, Mock: mock}, nil
 }
 
-func (s Service) buildShare(ctx context.Context, ctxState workspaceContext, sessionID string, ttl string, dryRun bool) (ShareResult, error) {
-	if s.Config.Env["S46_SHARE_BACKEND"] == "mock" || dryRun {
-		return s.mockShare(ctx, ctxState, sessionID, ttl, dryRun)
+func (s Service) buildShare(ctx context.Context, ctxState workspaceContext, sessionID string, ttl string) (ShareResult, error) {
+	if s.Config.Env["S46_SHARE_BACKEND"] == "mock" {
+		return s.mockShare(ctx, ctxState, sessionID, ttl)
 	}
 	return s.gistShare(ctx, ctxState, sessionID, ttl)
 }
 
-func (s Service) mockShare(ctx context.Context, ctxState workspaceContext, sessionID string, ttl string, dryRun bool) (ShareResult, error) {
+func (s Service) mockShare(ctx context.Context, ctxState workspaceContext, sessionID string, ttl string) (ShareResult, error) {
 	session := findOrDefault(ctxState.State, sessionID, ctxState.Team, ctxState.TeamConfig)
 	existing := ctxState.State.Shares[sessionID]
 	encrypted, err := s.encryptedArtifactForShare(ctx, ctxState, session, existing)
@@ -401,7 +390,7 @@ func (s Service) mockShare(ctx context.Context, ctxState workspaceContext, sessi
 		revokeKey = secureToken(32)
 	}
 	blobURL := strings.TrimRight(shareAPIBaseURL(s.Config.Env), "/") + "/v1/shares/" + shareID
-	return ShareResult{ID: shareID, SessionID: sessionID, ViewerURL: viewerURL(s.Config.Env, shareID, encrypted.Key), BlobURL: blobURL, RevokeKey: revokeKey, TTL: ttl, Visibility: "unlisted", Format: "s46.share.v1+aes-gcm", Provider: "s46-gist", Updated: updated, DryRun: dryRun, Mock: true}, nil
+	return ShareResult{ID: shareID, SessionID: sessionID, ViewerURL: viewerURL(s.Config.Env, shareID, encrypted.Key), BlobURL: blobURL, RevokeKey: revokeKey, TTL: ttl, Visibility: "unlisted", Format: "s46.share.v1+aes-gcm", Provider: "s46-gist", Updated: updated, Mock: true}, nil
 }
 
 func (s Service) gistShare(ctx context.Context, ctxState workspaceContext, sessionID string, ttl string) (ShareResult, error) {
@@ -549,7 +538,7 @@ func (s Service) Land(ctx context.Context, sessionID string, title string) (api.
 	return enrichLandWithGit(ctx, result), nil
 }
 
-func (s Service) Run(ctx context.Context, task string, model string, sessionID string, dryRun bool) (RunResult, error) {
+func (s Service) Run(ctx context.Context, task string, model string, sessionID string) (RunResult, error) {
 	ctxState, err := s.contextState()
 	if err != nil {
 		return RunResult{}, err
@@ -564,12 +553,10 @@ func (s Service) Run(ctx context.Context, task string, model string, sessionID s
 	if ctxState.Config.ActiveMode() == config.ModeAirplane {
 		location = "localhost"
 	}
-	result := RunResult{ID: sessionID, Task: task, State: "mocked", Location: location, Harness: "s46", Model: model, Lane: ctxState.Team.Lane, DryRun: dryRun}
-	if !dryRun {
-		ctxState.State.Sessions[sessionID] = api.Session{ID: sessionID, State: "mocked", Harness: "s46", Location: location, Lane: ctxState.Team.Lane, Model: model, Age: "0m", Spent: "€0.00", Task: task}
-		if err := s.Config.SaveState(ctxState.State); err != nil {
-			return RunResult{}, err
-		}
+	result := RunResult{ID: sessionID, Task: task, State: "mocked", Location: location, Harness: "s46", Model: model, Lane: ctxState.Team.Lane}
+	ctxState.State.Sessions[sessionID] = api.Session{ID: sessionID, State: "mocked", Harness: "s46", Location: location, Lane: ctxState.Team.Lane, Model: model, Age: "0m", Spent: "€0.00", Task: task}
+	if err := s.Config.SaveState(ctxState.State); err != nil {
+		return RunResult{}, err
 	}
 	return result, nil
 }

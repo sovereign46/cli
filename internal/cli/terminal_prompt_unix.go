@@ -11,6 +11,11 @@ import (
 	"syscall"
 )
 
+func terminalInputAvailable(file *os.File) bool {
+	_, err := getTerminalState(int(file.Fd()))
+	return err == nil
+}
+
 func readTerminalPromptLine(reader *bufio.Reader, source io.Reader, out io.Writer) (string, bool, error) {
 	file, ok := source.(*os.File)
 	if !ok {
