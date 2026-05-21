@@ -121,7 +121,14 @@ func NewRootCommand(runtime Runtime) *cobra.Command {
 	root := &cobra.Command{
 		Use:   "s46",
 		Short: "Sovereign46 CLI control plane",
-		Long:  "s46 is the Sovereign46 CLI control plane for coding-agent harnesses.",
+		Long: strings.Join([]string{
+			"s46 is a control plane for coding-agent harnesses.",
+			"",
+			"Start here:",
+			`  s46 ask "I just installed this; what should I do?"`,
+			`  s46 ask "configure Codex for my team"`,
+			`  s46 ask "can I code offline?"`,
+		}, "\n"),
 		CompletionOptions: cobra.CompletionOptions{
 			HiddenDefaultCmd: true,
 		},
@@ -147,6 +154,7 @@ func NewRootCommand(runtime Runtime) *cobra.Command {
 	root.AddCommand(devicesCommand(runtime, opts))
 	root.AddCommand(versionCommand(runtime, opts))
 	root.AddCommand(updateCommand(runtime, opts))
+	root.AddCommand(askCommand(runtime, opts))
 	root.AddCommand(connectCommand(runtime, opts))
 	root.AddCommand(disconnectCommand(runtime, opts))
 	root.AddCommand(teamsCommand(runtime, opts))

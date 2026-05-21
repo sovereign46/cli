@@ -61,7 +61,7 @@ func hasTerminalInput(stdin io.Reader, env map[string]string) bool {
 	if stdin == nil {
 		return false
 	}
-	if strs.Truthy(strs.EnvValue(env, "S46_TEST_FORCE_TTY")) {
+	if seamForceTTY(env) {
 		return true
 	}
 	file, ok := stdin.(*os.File)

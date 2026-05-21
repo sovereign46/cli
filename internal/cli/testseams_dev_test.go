@@ -27,4 +27,7 @@ func TestCLISeamsInactiveWithEmptyEnv(t *testing.T) {
 	if _, ok := seamListeningProcess(nil, "8080"); ok {
 		t.Errorf("seamListeningProcess(nil env) should be inactive")
 	}
+	if seamForceTTY(env) || seamForceTTY(nil) {
+		t.Errorf("seamForceTTY should be inactive without explicit env")
+	}
 }

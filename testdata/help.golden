@@ -1,10 +1,16 @@
 s46 is the Sovereign46 CLI control plane for coding-agent harnesses.
 
+Start here:
+  s46 ask "I just installed this; what should I do?"
+  s46 ask "configure Codex for my team"
+  s46 ask "can I code offline?"
+
 Usage:
   s46 [command]
 
 Available Commands:
   airplane    manage local airplane mode
+  ask         ask the local S46 model for a command plan
   connect     connect a team and configure a harness
   detach      detach a session to an S46 box
   devices     list and revoke paired devices

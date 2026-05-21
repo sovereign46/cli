@@ -47,6 +47,7 @@ s46 mode [cloud|airplane]
 s46 airplane setup
 s46 airplane mode on|off
 s46 airplane logs [ollama|gateway|all] [--follow]
+s46 ask "request"
 s46 run "task"
 ```
 

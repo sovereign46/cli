@@ -10,6 +10,7 @@
 //   - S46_TEST_STOP_GATEWAY_OK     fake `stopListeningProcess` success.
 //   - S46_TEST_LISTENER_<port> +   fake the `lsof` listener probe in
 //     S46_TEST_LISTENER_DEFAULT    status/airplane setup paths.
+//   - S46_TEST_FORCE_TTY           force interactive prompt code paths.
 //
 // Release builds compile testseams_release.go instead, which keeps
 // these strings out of the production binary.
@@ -62,4 +63,8 @@ func seamListeningProcess(env map[string]string, port string) (override string, 
 		return value, true
 	}
 	return "", false
+}
+
+func seamForceTTY(env map[string]string) bool {
+	return strs.Truthy(strs.EnvValue(env, "S46_TEST_FORCE_TTY"))
 }

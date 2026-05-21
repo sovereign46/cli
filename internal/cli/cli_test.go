@@ -196,6 +196,112 @@ func TestJSONErrorsAreStructured(t *testing.T) {
 	}
 }
 
+func TestAskPlansAndRunsConfirmedS46Commands(t *testing.T) {
+	env := testEnv(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("unexpected ask request: %s %s", r.Method, r.URL.Path)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body["model"] != airplane.LocalModelID || body["stream"] != false {
+			t.Fatalf("unexpected ask body: %#v", body)
+		}
+		content := `{"answer":"Yes. Enable airplane mode after checking setup.","commands":[{"command":"s46 version","reason":"Verify the CLI is runnable before changing setup."}]}`
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": content}}}})
+	}))
+	defer server.Close()
+	env["S46_AIRPLANE_GATEWAY_URL"] = server.URL
+
+	out := requireOK(t, runWithStdin(t, env, strings.NewReader("y\n"), "ask", "can I code offline?"))
+	for _, want := range []string{
+		"[s46] Answer:",
+		"Yes. Enable airplane mode after checking setup.",
+		"[s46] Plan:",
+		"1. s46 version",
+		"Verify the CLI is runnable before changing setup.",
+		"[s46] Run this plan? [Y/n] ",
+		"[s46] running: s46 version",
+		"[s46] done",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("ask output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestAskCanDeclinePlan(t *testing.T) {
+	env := testEnv(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		content := `{"answer":"Check status first.","commands":[{"command":"s46 status --verbose"}]}`
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": content}}}})
+	}))
+	defer server.Close()
+	env["S46_AIRPLANE_GATEWAY_URL"] = server.URL
+
+	out := requireOK(t, runWithStdin(t, env, strings.NewReader("n\n"), "ask", "am I ready?"))
+	if !strings.Contains(out, "[s46] plan not run") || strings.Contains(out, "[s46] running:") {
+		t.Fatalf("unexpected declined ask output:\n%s", out)
+	}
+}
+
+func TestAskJSONPrintsPlanWithoutPrompting(t *testing.T) {
+	env := testEnv(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		content := "```json\n{\"answer\":\"Run status.\",\"commands\":[{\"command\":\"s46 status\"}]}\n```"
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": content}}}})
+	}))
+	defer server.Close()
+	env["S46_AIRPLANE_GATEWAY_URL"] = server.URL
+
+	out := requireOK(t, run(t, env, "ask", "am I ready?", "--json"))
+	var payload askCommandResult
+	if err := json.Unmarshal([]byte(out), &payload); err != nil {
+		t.Fatalf("invalid ask json: %v\n%s", err, out)
+	}
+	if payload.Answer != "Run status." || len(payload.Commands) != 1 || payload.Commands[0].Command != "s46 status" {
+		t.Fatalf("unexpected ask json: %s", out)
+	}
+}
+
+func TestAskRejectsUnsafeModelCommands(t *testing.T) {
+	env := testEnv(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		content := `{"answer":"Use lsof.","commands":[{"command":"lsof -ti :8080 | xargs kill"}]}`
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": content}}}})
+	}))
+	defer server.Close()
+	env["S46_AIRPLANE_GATEWAY_URL"] = server.URL
+
+	result := runWithStdin(t, env, strings.NewReader("y\n"), "ask", "kill the api server")
+	if result.err == nil || !strings.Contains(result.err.Error(), "unsupported shell syntax") {
+		t.Fatalf("expected unsafe ask command to fail, got err=%v stdout=%q", result.err, result.stdout)
+	}
+	if strings.Contains(result.stdout, "Run this plan") {
+		t.Fatalf("unsafe plan prompted for execution:\n%s", result.stdout)
+	}
+}
+
+func TestAskRequiresLocalRuntime(t *testing.T) {
+	env := testEnv(t)
+	delete(env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")
+	env["S46_TEST_MEMORY_BYTES"] = "64000000000"
+	env["S46_TEST_FREE_DISK_BYTES"] = "30000000000"
+	env["S46_TEST_OLLAMA_PATH"] = "missing"
+	env["S46_TEST_OLLAMA_RUNNING"] = "0"
+	env["S46_TEST_GATEWAY_BINARY"] = "missing"
+	env["S46_TEST_GATEWAY_READY"] = "0"
+	env["S46_TEST_MODEL_DOWNLOADED"] = "0"
+	env["S46_TEST_MODEL_PROBE"] = "0"
+
+	result := run(t, env, "ask", "can I code offline?")
+	if result.err == nil || !strings.Contains(result.err.Error(), "local model setup is incomplete") || !strings.Contains(result.err.Error(), "s46 airplane setup") {
+		t.Fatalf("expected local runtime error, got %#v", result)
+	}
+}
+
 func TestStatusJSONFailureIsMachineReadable(t *testing.T) {
 	env := testEnv(t)
 	result := run(t, env, "status", "--json")
