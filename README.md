@@ -40,7 +40,8 @@ s46 update
 s46 sessions
 s46 detach <session>
 s46 resume <session>
-s46 share <session>
+s46 share <session> [--ttl=1d|7d|30d|365d|never]
+s46 share revoke <session-or-share-id>
 s46 session land [session]
 s46 mode [cloud|airplane]
 s46 airplane setup
@@ -60,6 +61,8 @@ Global flags: `--config <path>`, `--json`, `--dry-run`, `--verbose`, `--help`.
 | `~/.cache/s46/` | Logs and lock file |
 
 Secrets live in the OS keychain (`internal/keyring.Store`). The file keyring backend is test-only.
+
+Encrypted shares are uploaded to `S46_SHARE_API_URL` (default `https://gist.s46.dev`) and viewed at `S46_SHARE_VIEWER_URL` (default `https://share.s46.dev`). Writes require `S46_SHARE_UPLOAD_TOKEN`; revoke keys are stored only in local state so `s46 share revoke` can delete the blob later.
 
 `s46 connect` writes harness config to `~/.claude/settings.json`, `~/.codex/config.toml`, or `~/.pi/agent/models.json`. Existing files are merged and backed up with `.s46-backup-<timestamp>`. A connect failure that leaves files half-written is rolled back automatically.
 

@@ -1217,21 +1217,36 @@ func runResume(ctx context.Context, app *app, sessionID string) error {
 }
 
 func shareCommand(runtime Runtime, opts *options) *cobra.Command {
-	return &cobra.Command{
+	var ttl string
+	cmd := &cobra.Command{
 		Use:   "share <session>",
-		Short: "share a session as a Pi-style HTML page via secret gist",
+		Short: "share a session as an encrypted static page",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := newApp(runtime, opts)
 			if err != nil {
 				return err
 			}
-			return runShare(cmd.Context(), app, args[0])
+			return runShare(cmd.Context(), app, args[0], ttl)
 		},
 	}
+	cmd.Flags().StringVar(&ttl, "ttl", "30d", "share expiration: 1d, 7d, 30d, 365d, never")
+	cmd.AddCommand(&cobra.Command{
+		Use:   "revoke <session-or-share-id>",
+		Short: "delete a previously created encrypted share",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := newApp(runtime, opts)
+			if err != nil {
+				return err
+			}
+			return runShareRevoke(cmd.Context(), app, args[0])
+		},
+	})
+	return cmd
 }
 
-func runShare(ctx context.Context, app *app, sessionID string) error {
+func runShare(ctx context.Context, app *app, sessionID string, ttl string) error {
 	if err := app.requireCloudFeature("share"); err != nil {
 		return err
 	}
@@ -1239,7 +1254,7 @@ func runShare(ctx context.Context, app *app, sessionID string) error {
 	var result sessioncmd.ShareResult
 	if err := app.withLock(ctx, func() error {
 		var err error
-		result, err = service.Share(ctx, sessionID, app.options.dryRun)
+		result, err = service.Share(ctx, sessionID, ttl, app.options.dryRun)
 		return err
 	}); err != nil {
 		return err
@@ -1249,20 +1264,46 @@ func runShare(ctx context.Context, app *app, sessionID string) error {
 	}
 	if app.options.dryRun {
 		return app.renderer.Lines(
-			fmt.Sprintf("[s46] dry-run: would export %s to HTML", sessionID),
-			"[s46] dry-run: would create a secret GitHub gist via gh gist create --public=false",
+			fmt.Sprintf("[s46] dry-run: would sanitize and encrypt %s locally", sessionID),
+			fmt.Sprintf("[s46] dry-run: would upload ciphertext to s46-gist with ttl=%s", result.TTL),
 			fmt.Sprintf("[s46] dry-run: viewer would be %s", result.ViewerURL),
 		)
 	}
-	provider := "GitHub gist"
+	verb := "created"
+	if result.Updated {
+		verb = "updated"
+	}
+	provider := result.Provider
 	if result.Mock {
 		provider += " (mock)"
 	}
 	return app.renderer.Lines(
 		fmt.Sprintf("[s46] Share URL: %s", result.ViewerURL),
-		fmt.Sprintf("[s46] Gist:      %s", result.GistURL),
-		fmt.Sprintf("[s46] Visibility: secret · Format: HTML · Provider: %s", provider),
+		fmt.Sprintf("[s46] Blob:      %s", result.BlobURL),
+		fmt.Sprintf("[s46] %s encrypted share · TTL: %s · Provider: %s", verb, result.TTL, provider),
 	)
+}
+
+func runShareRevoke(ctx context.Context, app *app, target string) error {
+	if err := app.requireCloudFeature("share revoke"); err != nil {
+		return err
+	}
+	service := app.sessionService()
+	var result sessioncmd.RevokeResult
+	if err := app.withLock(ctx, func() error {
+		var err error
+		result, err = service.RevokeShare(ctx, target, app.options.dryRun)
+		return err
+	}); err != nil {
+		return err
+	}
+	if app.options.json {
+		return app.renderer.WriteJSON(result)
+	}
+	if app.options.dryRun {
+		return app.renderer.Lines(fmt.Sprintf("[s46] dry-run: would revoke share %s for %s", result.ID, result.SessionID))
+	}
+	return app.renderer.Lines(fmt.Sprintf("[s46] revoked share %s for %s", result.ID, result.SessionID))
 }
 
 func sessionCommand(runtime Runtime, opts *options) *cobra.Command {

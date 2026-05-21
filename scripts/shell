@@ -77,6 +77,44 @@ join_by_comma() {
   echo "$joined"
 }
 
+url_host_port() {
+  local url="$1"
+  local rest host port
+  rest="${url#*://}"
+  rest="${rest%%/*}"
+  host="${rest%%:*}"
+  if [[ "$rest" == *:* ]]; then
+    port="${rest##*:}"
+  elif [[ "$url" == https://* ]]; then
+    port="443"
+  else
+    port="80"
+  fi
+  printf '%s %s\n' "$host" "$port"
+}
+
+port_open() {
+  local host="$1"
+  local port="$2"
+  if command -v nc >/dev/null 2>&1; then
+    nc -z -w 1 "$host" "$port" >/dev/null 2>&1
+    return $?
+  fi
+  (echo >/dev/tcp/"$host"/"$port") >/dev/null 2>&1
+}
+
+check_share_server() {
+  local label="$1"
+  local url="$2"
+  local host port
+  read -r host port < <(url_host_port "$url")
+  if port_open "$host" "$port"; then
+    echo "ready"
+  else
+    echo "missing"
+  fi
+}
+
 mkdir -p "$sandbox/home" "$sandbox/home/.ollama" "$sandbox/home/.config" "$sandbox/home/.local/share" "$sandbox/home/.cache" "$sandbox/bin"
 
 cd "$repo_root"
@@ -102,8 +140,14 @@ api_base_default="${S46_DEV_BASE_URL:-http://127.0.0.1:8080}"
 export S46_API_BASE_URL="${S46_API_BASE_URL:-$api_base_default}"
 export S46_DEV_BASE_URL="${S46_DEV_BASE_URL:-$S46_API_BASE_URL}"
 export S46_KEYRING_BACKEND=file
-export S46_SHARE_BACKEND=mock
-export S46_MOCK_GIST_ID=0123456789abcdef0123456789abcdef
+share_api_default="http://127.0.0.1:8789"
+share_viewer_default="http://127.0.0.1:5173"
+export S46_SHARE_API_URL="${S46_SHARE_API_URL:-$share_api_default}"
+export S46_SHARE_VIEWER_URL="${S46_SHARE_VIEWER_URL:-$share_viewer_default}"
+export S46_SHARE_UPLOAD_TOKEN="${S46_SHARE_UPLOAD_TOKEN:-dev-upload-token}"
+unset S46_SHARE_BACKEND
+share_gist_status="$(check_share_server "s46-gist" "$S46_SHARE_API_URL")"
+share_viewer_status="$(check_share_server "s46-share" "$S46_SHARE_VIEWER_URL")"
 seed_harness_configs
 if [ -z "${S46_API_REPO:-}" ] && [ -d "$api_repo_default/cmd/s46-api" ]; then
   ln -s "$api_repo_default" "$sandbox/s46-api"
@@ -122,6 +166,16 @@ seeded_harnesses_display="none"
 if [ "${#seeded_harnesses[@]}" -gt 0 ]; then
   seeded_harnesses_display="$(join_by_comma "${seeded_harnesses[@]}")"
 fi
+share_status_display="ready"
+share_notice="Share dev servers: ready"
+if [ "$share_gist_status" != "ready" ] || [ "$share_viewer_status" != "ready" ]; then
+  share_status_display="not ready"
+  share_notice="Share dev servers: not ready — s46 share will not work until both are running.
+  s46-gist  ($S46_SHARE_API_URL): $share_gist_status
+    start:  cd ../s46-gist && ./scripts/server
+  s46-share ($S46_SHARE_VIEWER_URL): $share_viewer_status
+    start:  cd ../s46-share && ./scripts/server"
+fi
 
 cat <<EOF
 s46 development shell
@@ -135,6 +189,11 @@ Ollama models: $OLLAMA_MODELS
 S46 logs: $S46_LOG_DIR
 S46 API repo: $api_repo_display
 Seeded harness configs: $seeded_harnesses_display
+Share API: $S46_SHARE_API_URL
+Share viewer: $S46_SHARE_VIEWER_URL
+Share dev server status: $share_status_display
+
+$share_notice
 
 Try:
   s46 airplane setup

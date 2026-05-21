@@ -60,10 +60,15 @@ type State struct {
 type Share struct {
 	ID         string `json:"id"`
 	ViewerURL  string `json:"viewerUrl"`
-	GistURL    string `json:"gistUrl"`
-	GistID     string `json:"gistId"`
+	BlobURL    string `json:"blobUrl,omitempty"`
+	GistURL    string `json:"gistUrl,omitempty"`
+	GistID     string `json:"gistId,omitempty"`
+	RevokeKey  string `json:"revokeKey,omitempty"`
+	TTL        string `json:"ttl,omitempty"`
+	ExpiresAt  string `json:"expiresAt,omitempty"`
 	Visibility string `json:"visibility"`
 	Format     string `json:"format"`
+	Provider   string `json:"provider,omitempty"`
 	Mock       bool   `json:"mock"`
 }
 

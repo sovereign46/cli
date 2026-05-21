@@ -6,10 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"html"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -17,6 +14,7 @@ import (
 	"github.com/sovereign46/s46-cli/internal/api"
 	"github.com/sovereign46/s46-cli/internal/config"
 	"github.com/sovereign46/s46-cli/internal/keyring"
+	sharepkg "github.com/sovereign46/s46-cli/internal/share"
 	"github.com/sovereign46/s46-cli/internal/strs"
 	"github.com/sovereign46/s46-cli/internal/workspace"
 )
@@ -44,13 +42,26 @@ type AuthTokens interface {
 
 type ShareResult struct {
 	ID         string `json:"id"`
+	SessionID  string `json:"sessionId"`
 	ViewerURL  string `json:"viewerUrl"`
-	GistURL    string `json:"gistUrl"`
-	GistID     string `json:"gistId"`
+	BlobURL    string `json:"blobUrl"`
+	RevokeKey  string `json:"revokeKey,omitempty"`
+	TTL        string `json:"ttl"`
+	ExpiresAt  string `json:"expiresAt,omitempty"`
 	Visibility string `json:"visibility"`
 	Format     string `json:"format"`
+	Provider   string `json:"provider"`
+	Updated    bool   `json:"updated"`
 	DryRun     bool   `json:"dryRun"`
 	Mock       bool   `json:"mock"`
+}
+
+type RevokeResult struct {
+	ID        string `json:"id"`
+	SessionID string `json:"sessionId"`
+	Deleted   bool   `json:"deleted"`
+	DryRun    bool   `json:"dryRun"`
+	Mock      bool   `json:"mock"`
 }
 
 type RunResult struct {
@@ -192,12 +203,16 @@ func (s Service) Resume(ctx context.Context, sessionID string, dryRun bool) (api
 	return result, previous, nil
 }
 
-func (s Service) Share(ctx context.Context, sessionID string, dryRun bool) (ShareResult, error) {
+func (s Service) Share(ctx context.Context, sessionID string, ttl string, dryRun bool) (ShareResult, error) {
 	ctxState, err := s.contextState()
 	if err != nil {
 		return ShareResult{}, err
 	}
-	result, err := s.buildShare(ctx, ctxState, sessionID, dryRun)
+	normalizedTTL, err := sharepkg.NormalizeTTL(firstNonEmpty(ttl, s.Config.Env["S46_SHARE_TTL"]))
+	if err != nil {
+		return ShareResult{}, err
+	}
+	result, err := s.buildShare(ctx, ctxState, sessionID, normalizedTTL, dryRun)
 	if err != nil {
 		return ShareResult{}, err
 	}
@@ -205,11 +220,14 @@ func (s Service) Share(ctx context.Context, sessionID string, dryRun bool) (Shar
 		ctxState.State.Shares[sessionID] = config.Share{
 			ID:         result.ID,
 			ViewerURL:  result.ViewerURL,
-			GistURL:    result.GistURL,
-			GistID:     result.GistID,
+			BlobURL:    result.BlobURL,
+			RevokeKey:  result.RevokeKey,
+			TTL:        result.TTL,
+			ExpiresAt:  result.ExpiresAt,
 			Visibility: result.Visibility,
 			Format:     result.Format,
-			Mock:       true,
+			Provider:   result.Provider,
+			Mock:       result.Mock,
 		}
 		if err := s.Config.SaveState(ctxState.State); err != nil {
 			return ShareResult{}, err
@@ -218,58 +236,166 @@ func (s Service) Share(ctx context.Context, sessionID string, dryRun bool) (Shar
 	return result, nil
 }
 
-func (s Service) buildShare(ctx context.Context, ctxState workspaceContext, sessionID string, dryRun bool) (ShareResult, error) {
+func (s Service) RevokeShare(ctx context.Context, target string, dryRun bool) (RevokeResult, error) {
+	ctxState, err := s.contextState()
+	if err != nil {
+		return RevokeResult{}, err
+	}
+	sessionID, record, ok := findShareRecord(ctxState.State, target)
+	if !ok {
+		return RevokeResult{}, fmt.Errorf("no local share record for %q", target)
+	}
+	if record.ID == "" || record.RevokeKey == "" {
+		return RevokeResult{}, fmt.Errorf("share %q has no revoke key; recreate it with `s46 share %s`", target, sessionID)
+	}
+	mock := s.Config.Env["S46_SHARE_BACKEND"] == "mock" || record.Mock
+	if !dryRun && !mock {
+		client := sharepkg.Client{BaseURL: shareAPIBaseURL(s.Config.Env), UploadToken: shareUploadToken(s.Config.Env)}
+		if _, err := client.Delete(ctx, record.ID, record.RevokeKey); err != nil {
+			return RevokeResult{}, err
+		}
+	}
+	if !dryRun {
+		delete(ctxState.State.Shares, sessionID)
+		if err := s.Config.SaveState(ctxState.State); err != nil {
+			return RevokeResult{}, err
+		}
+	}
+	return RevokeResult{ID: record.ID, SessionID: sessionID, Deleted: !dryRun, DryRun: dryRun, Mock: mock}, nil
+}
+
+func (s Service) buildShare(ctx context.Context, ctxState workspaceContext, sessionID string, ttl string, dryRun bool) (ShareResult, error) {
 	if s.Config.Env["S46_SHARE_BACKEND"] == "mock" || dryRun {
-		return s.mockShare(ctxState, sessionID, dryRun), nil
+		return s.mockShare(ctxState, sessionID, ttl, dryRun)
 	}
-	return s.ghShare(ctx, ctxState, sessionID, dryRun)
+	return s.gistShare(ctx, ctxState, sessionID, ttl)
 }
 
-func (s Service) mockShare(ctxState workspaceContext, sessionID string, dryRun bool) ShareResult {
-	gistID := ""
-	if existing, ok := ctxState.State.Shares[sessionID]; ok {
-		gistID = existing.GistID
+func (s Service) mockShare(ctxState workspaceContext, sessionID string, ttl string, dryRun bool) (ShareResult, error) {
+	session := findOrDefault(ctxState.State, sessionID, ctxState.Team, ctxState.TeamConfig)
+	existing := ctxState.State.Shares[sessionID]
+	encrypted, err := encryptedArtifactForShare(session, shareBuildOptions(ctxState, s.Config.Env), existing)
+	if err != nil {
+		return ShareResult{}, err
 	}
-	if gistID == "" {
-		gistID = s.Config.Env["S46_MOCK_GIST_ID"]
+	shareID := ""
+	revokeKey := ""
+	updated := false
+	if existing.ID != "" || existing.GistID != "" {
+		shareID = firstNonEmpty(existing.ID, existing.GistID)
+		revokeKey = existing.RevokeKey
+		updated = shareID != ""
 	}
-	if gistID == "" {
-		gistID = secureToken(16)
+	if shareID == "" {
+		shareID = firstNonEmpty(s.Config.Env["S46_MOCK_SHARE_ID"], s.Config.Env["S46_MOCK_GIST_ID"], secureToken(16))
 	}
-	return ShareResult{ID: sessionID, ViewerURL: fmt.Sprintf("%s/session/#%s", ctxState.Team.Endpoint, gistID), GistURL: fmt.Sprintf("https://gist.github.com/s46-mock/%s", gistID), GistID: gistID, Visibility: "secret", Format: "html", DryRun: dryRun, Mock: true}
+	if revokeKey == "" {
+		revokeKey = secureToken(32)
+	}
+	blobURL := strings.TrimRight(shareAPIBaseURL(s.Config.Env), "/") + "/v1/shares/" + shareID
+	return ShareResult{ID: shareID, SessionID: sessionID, ViewerURL: viewerURL(s.Config.Env, shareID, encrypted.Key), BlobURL: blobURL, RevokeKey: revokeKey, TTL: ttl, Visibility: "unlisted", Format: "s46.share.v1+aes-gcm", Provider: "s46-gist", Updated: updated, DryRun: dryRun, Mock: true}, nil
 }
 
-func (s Service) ghShare(ctx context.Context, ctxState workspaceContext, sessionID string, dryRun bool) (ShareResult, error) {
-	if out, err := exec.CommandContext(ctx, "gh", "auth", "status").CombinedOutput(); err != nil {
-		return ShareResult{}, fmt.Errorf("GitHub CLI is not logged in or unavailable; run `gh auth login` first: %s", strings.TrimSpace(string(out)))
+func (s Service) gistShare(ctx context.Context, ctxState workspaceContext, sessionID string, ttl string) (ShareResult, error) {
+	uploadToken := shareUploadToken(s.Config.Env)
+	if uploadToken == "" {
+		return ShareResult{}, fmt.Errorf("missing S46_SHARE_UPLOAD_TOKEN for s46-gist uploads")
 	}
 	session := findOrDefault(ctxState.State, sessionID, ctxState.Team, ctxState.TeamConfig)
-	tmpDir, err := os.MkdirTemp("", "s46-share-*")
+	existing := ctxState.State.Shares[sessionID]
+	encrypted, err := encryptedArtifactForShare(session, shareBuildOptions(ctxState, s.Config.Env), existing)
 	if err != nil {
 		return ShareResult{}, err
 	}
-	defer os.RemoveAll(tmpDir)
-	htmlPath := filepath.Join(tmpDir, "session.html")
-	if err := os.WriteFile(htmlPath, []byte(renderShareHTML(session)), 0o600); err != nil {
+	client := sharepkg.Client{BaseURL: shareAPIBaseURL(s.Config.Env), UploadToken: uploadToken}
+	request := sharepkg.UploadRequest{Blob: encrypted.Blob, TTL: ttl, ContentType: sharepkg.BlobContentType}
+	if existing.ID != "" && existing.RevokeKey != "" {
+		request.RevokeKey = existing.RevokeKey
+		response, err := client.Update(ctx, existing.ID, request)
+		if err != nil {
+			return ShareResult{}, err
+		}
+		return shareResultFromUpload(sessionID, response, existing.RevokeKey, encrypted.Key, true, false, s.Config.Env), nil
+	}
+	response, err := client.Create(ctx, request)
+	if err != nil {
 		return ShareResult{}, err
 	}
-	out, err := exec.CommandContext(ctx, "gh", "gist", "create", "--public=false", htmlPath).CombinedOutput()
-	if err != nil {
-		return ShareResult{}, fmt.Errorf("failed to create secret gist: %s", strings.TrimSpace(string(out)))
-	}
-	gistURL := strings.TrimSpace(string(out))
-	gistID := gistURL[strings.LastIndex(gistURL, "/")+1:]
-	if gistID == "" || gistID == gistURL {
-		return ShareResult{}, fmt.Errorf("failed to parse gist id from gh output %q", gistURL)
-	}
-	return ShareResult{ID: sessionID, ViewerURL: fmt.Sprintf("%s/session/#%s", ctxState.Team.Endpoint, gistID), GistURL: gistURL, GistID: gistID, Visibility: "secret", Format: "html", DryRun: dryRun, Mock: false}, nil
+	return shareResultFromUpload(sessionID, response, response.RevokeKey, encrypted.Key, false, false, s.Config.Env), nil
 }
 
-func renderShareHTML(session api.Session) string {
-	return fmt.Sprintf(`<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>s46 session %s</title></head>
-<body><main><h1>%s</h1><dl><dt>State</dt><dd>%s</dd><dt>Harness</dt><dd>%s</dd><dt>Location</dt><dd>%s</dd><dt>Model</dt><dd>%s</dd><dt>Cost</dt><dd>%s</dd></dl><pre>%s</pre></main></body></html>
-`, html.EscapeString(session.ID), html.EscapeString(session.ID), html.EscapeString(session.State), html.EscapeString(session.Harness), html.EscapeString(session.Location), html.EscapeString(session.Model), html.EscapeString(session.Spent), html.EscapeString(session.Task))
+func shareResultFromUpload(sessionID string, response sharepkg.UploadResponse, revokeKey string, decryptKey string, updated bool, mock bool, env map[string]string) ShareResult {
+	return ShareResult{
+		ID:         response.ID,
+		SessionID:  sessionID,
+		ViewerURL:  viewerURL(env, response.ID, decryptKey),
+		BlobURL:    response.URL,
+		RevokeKey:  revokeKey,
+		TTL:        response.TTL,
+		ExpiresAt:  response.ExpiresAt,
+		Visibility: "unlisted",
+		Format:     "s46.share.v1+aes-gcm",
+		Provider:   "s46-gist",
+		Updated:    updated,
+		Mock:       mock,
+	}
+}
+
+func shareBuildOptions(ctxState workspaceContext, env map[string]string) sharepkg.BuildOptions {
+	return sharepkg.BuildOptions{TeamName: ctxState.TeamName, User: ctxState.State.CurrentUser, Home: env["HOME"]}
+}
+
+func encryptedArtifactForShare(session api.Session, opts sharepkg.BuildOptions, existing config.Share) (sharepkg.EncryptedBlob, error) {
+	artifact := sharepkg.BuildArtifact(session, opts)
+	if key := decryptKeyFromViewerURL(existing.ViewerURL); key != "" {
+		return sharepkg.EncryptArtifactWithKey(artifact, key)
+	}
+	return sharepkg.EncryptArtifact(artifact)
+}
+
+func decryptKeyFromViewerURL(viewerURL string) string {
+	_, key, ok := strings.Cut(viewerURL, "#")
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(key)
+}
+
+func findShareRecord(state config.State, target string) (string, config.Share, bool) {
+	if record, ok := state.Shares[target]; ok {
+		return target, record, true
+	}
+	for sessionID, record := range state.Shares {
+		if record.ID == target || record.GistID == target {
+			return sessionID, record, true
+		}
+	}
+	return "", config.Share{}, false
+}
+
+func viewerURL(env map[string]string, shareID string, decryptKey string) string {
+	return strings.TrimRight(shareViewerBaseURL(env), "/") + "/" + shareID + "#" + decryptKey
+}
+
+func shareViewerBaseURL(env map[string]string) string {
+	return firstNonEmpty(env["S46_SHARE_VIEWER_URL"], sharepkg.DefaultViewerURL)
+}
+
+func shareAPIBaseURL(env map[string]string) string {
+	return firstNonEmpty(env["S46_SHARE_API_URL"], env["S46_GIST_URL"], sharepkg.DefaultAPIBaseURL)
+}
+
+func shareUploadToken(env map[string]string) string {
+	return firstNonEmpty(env["S46_SHARE_UPLOAD_TOKEN"], env["S46_GIST_UPLOAD_TOKEN"])
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func (s Service) Land(ctx context.Context, sessionID string, title string) (api.LandResult, error) {

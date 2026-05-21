@@ -142,13 +142,13 @@ func TestHelpMatchesGolden(t *testing.T) {
 	}
 }
 
-func TestDevShellMockShareUsesLocalViewerURL(t *testing.T) {
+func TestMockShareUsesStaticViewerURL(t *testing.T) {
 	env := testEnv(t)
 	env["S46_DEV_SHELL"] = "1"
 	env["S46_DEV_BASE_URL"] = "http://127.0.0.1:8080"
 	seedActiveTeam(t, env, "acme", "http://127.0.0.1:8080")
 	out := requireOK(t, run(t, env, "share", "@dscape/auth-redirect-fix"))
-	if !strings.Contains(out, "Share URL: http://127.0.0.1:8080/session/#") {
+	if !strings.Contains(out, "Share URL: https://share.s46.dev/0123456789abcdef0123456789abcdef#") {
 		t.Fatalf("unexpected share output: %s", out)
 	}
 }
@@ -1125,12 +1125,15 @@ func TestStatusModeSessionsAndShare(t *testing.T) {
 		t.Fatalf("sessions missing default: %s", sessions)
 	}
 	share := requireOK(t, run(t, env, "share", "@dscape/auth-redirect-fix"))
-	assertGolden(t, "share.golden", share)
-	if !regexp.MustCompile(`Share URL: https://acme\.s46\.dev/session/#[a-f0-9]{32}`).MatchString(share) {
+	if !regexp.MustCompile(`Share URL: https://share\.s46\.dev/0123456789abcdef0123456789abcdef#[A-Za-z0-9_-]{43}`).MatchString(share) {
 		t.Fatalf("unexpected share output:\n%s", share)
 	}
-	if !strings.Contains(share, "Gist:      https://gist.github.com/s46-mock/") {
-		t.Fatalf("missing gist output:\n%s", share)
+	if !strings.Contains(share, "Blob:      https://gist.s46.dev/v1/shares/0123456789abcdef0123456789abcdef") {
+		t.Fatalf("missing blob output:\n%s", share)
+	}
+	revoke := requireOK(t, run(t, env, "share", "revoke", "@dscape/auth-redirect-fix"))
+	if !strings.Contains(revoke, "revoked share 0123456789abcdef0123456789abcdef for @dscape/auth-redirect-fix") {
+		t.Fatalf("unexpected revoke output:\n%s", revoke)
 	}
 }
 

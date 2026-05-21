@@ -33,6 +33,10 @@ test ! -L "$HOME/.pi/agent/models.json"
 grep -q 'pi models' "$HOME/.pi/agent/models.json"
 grep -q 'claude settings' "$HOME/.claude/settings.json"
 grep -q 'codex config' "$HOME/.codex/config.toml"
+test "$S46_SHARE_API_URL" = "http://127.0.0.1:1"
+test "$S46_SHARE_VIEWER_URL" = "http://127.0.0.1:2"
+test "$S46_SHARE_UPLOAD_TOKEN" = "dev-upload-token"
+test "${S46_SHARE_BACKEND-}" = ""
 printf ok > "$S46_HOST_HOME/seed-ok"
 `
 	if err := os.WriteFile(fakeShell, []byte(fakeShellScript), 0o755); err != nil {
@@ -49,6 +53,8 @@ printf ok > "$S46_HOST_HOME/seed-ok"
 		"GOMODCACHE="+gomodcache,
 		"GOCACHE="+gocache,
 		"GOPATH="+gopath,
+		"S46_SHARE_API_URL=http://127.0.0.1:1",
+		"S46_SHARE_VIEWER_URL=http://127.0.0.1:2",
 	)
 	var out bytes.Buffer
 	cmd.Stdout = &out
@@ -61,6 +67,9 @@ printf ok > "$S46_HOST_HOME/seed-ok"
 	}
 	if !strings.Contains(out.String(), "Seeded harness configs: pi, claude-code, codex") {
 		t.Fatalf("missing seeded harness summary:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "Share dev servers: not ready") || !strings.Contains(out.String(), "s46 share will not work") {
+		t.Fatalf("missing share server warning:\n%s", out.String())
 	}
 }
 

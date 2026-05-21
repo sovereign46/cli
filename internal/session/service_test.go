@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +15,7 @@ import (
 	"github.com/sovereign46/s46-cli/internal/auth"
 	"github.com/sovereign46/s46-cli/internal/config"
 	"github.com/sovereign46/s46-cli/internal/keyring"
+	sharepkg "github.com/sovereign46/s46-cli/internal/share"
 )
 
 func TestRunStoresSessionAndListReturnsLocalState(t *testing.T) {
@@ -69,13 +72,13 @@ func TestDetachAndResumePersistSessionState(t *testing.T) {
 }
 
 func TestMockSharePersistsViewerURL(t *testing.T) {
-	service, store := newTestService(t, api.Team{Name: "s46", Endpoint: "http://127.0.0.1:8080", Lane: "EU-OPO", DefaultModel: api.DefaultModel}, config.ModeCloud, map[string]string{"S46_SHARE_BACKEND": "mock", "S46_MOCK_GIST_ID": "fixed-gist"})
+	service, store := newTestService(t, api.Team{Name: "s46", Endpoint: "http://127.0.0.1:8080", Lane: "EU-OPO", DefaultModel: api.DefaultModel}, config.ModeCloud, map[string]string{"S46_SHARE_BACKEND": "mock", "S46_MOCK_GIST_ID": "fixed-gist-123456"})
 
-	share, err := service.Share(context.Background(), "@nunojob/task", false)
+	share, err := service.Share(context.Background(), "@nunojob/task", "30d", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if share.ViewerURL != "http://127.0.0.1:8080/session/#fixed-gist" || !share.Mock {
+	if !strings.HasPrefix(share.ViewerURL, "https://share.s46.dev/fixed-gist-123456#") || share.BlobURL != "https://gist.s46.dev/v1/shares/fixed-gist-123456" || !share.Mock {
 		t.Fatalf("share = %#v", share)
 	}
 	state, err := store.LoadState()
@@ -85,6 +88,108 @@ func TestMockSharePersistsViewerURL(t *testing.T) {
 	if state.Shares["@nunojob/task"].ViewerURL != share.ViewerURL {
 		t.Fatalf("state share = %#v", state.Shares["@nunojob/task"])
 	}
+}
+
+func TestMockShareUpdateReusesViewerKey(t *testing.T) {
+	service, _ := newTestService(t, api.Team{Name: "s46", Endpoint: "https://s46.s46.dev", Lane: "EU-OPO", DefaultModel: api.DefaultModel}, config.ModeCloud, map[string]string{"S46_SHARE_BACKEND": "mock", "S46_MOCK_GIST_ID": "fixed-gist-123456"})
+
+	first, err := service.Share(context.Background(), "@nunojob/task", "30d", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := service.Share(context.Background(), "@nunojob/task", "30d", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !second.Updated {
+		t.Fatalf("expected update: %#v", second)
+	}
+	if second.ViewerURL != first.ViewerURL {
+		t.Fatalf("update changed decrypt key: first=%s second=%s", first.ViewerURL, second.ViewerURL)
+	}
+}
+
+func TestGistShareCreateUpdateAndRevoke(t *testing.T) {
+	const shareID = "share1234567890ab"
+	var createBlob string
+	var updateBlob string
+	var sawDelete bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method != http.MethodDelete && r.Header.Get("Authorization") != "Bearer upload" {
+			http.Error(w, "missing auth", http.StatusUnauthorized)
+			return
+		}
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/shares":
+			var req sharepkg.UploadRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatal(err)
+			}
+			createBlob = req.Blob
+			_ = json.NewEncoder(w).Encode(sharepkg.UploadResponse{ID: shareID, URL: serverURL(r) + "/v1/shares/" + shareID, TTL: req.TTL, RevokeKey: "revoke-key"})
+		case r.Method == http.MethodPut && r.URL.Path == "/v1/shares/"+shareID:
+			var req sharepkg.UploadRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatal(err)
+			}
+			if req.RevokeKey != "revoke-key" {
+				t.Fatalf("bad revoke key: %#v", req)
+			}
+			updateBlob = req.Blob
+			_ = json.NewEncoder(w).Encode(sharepkg.UploadResponse{ID: shareID, URL: serverURL(r) + "/v1/shares/" + shareID, TTL: req.TTL})
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/shares/"+shareID:
+			if r.Header.Get("X-S46-Revoke-Key") != "revoke-key" {
+				t.Fatalf("missing delete revoke key")
+			}
+			sawDelete = true
+			_ = json.NewEncoder(w).Encode(sharepkg.DeleteResponse{ID: shareID, Deleted: true})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	service, store := newTestService(t, api.Team{Name: "s46", Endpoint: "https://s46.s46.dev", Lane: "EU-OPO", DefaultModel: api.DefaultModel}, config.ModeCloud, map[string]string{"S46_SHARE_API_URL": server.URL, "S46_SHARE_UPLOAD_TOKEN": "upload", "S46_SHARE_VIEWER_URL": "https://share.test"})
+	first, err := service.Share(context.Background(), "@nunojob/task", "7d", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(first.ViewerURL, "https://share.test/"+shareID+"#") || first.RevokeKey != "revoke-key" {
+		t.Fatalf("first = %#v", first)
+	}
+	key := strings.Split(first.ViewerURL, "#")[1]
+	if _, err := sharepkg.DecryptJSON(createBlob, key); err != nil {
+		t.Fatalf("create blob does not decrypt: %v", err)
+	}
+	second, err := service.Share(context.Background(), "@nunojob/task", "7d", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !second.Updated || second.ViewerURL != first.ViewerURL {
+		t.Fatalf("second = %#v first=%#v", second, first)
+	}
+	if _, err := sharepkg.DecryptJSON(updateBlob, key); err != nil {
+		t.Fatalf("update blob does not decrypt with original key: %v", err)
+	}
+	revoked, err := service.RevokeShare(context.Background(), "@nunojob/task", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !revoked.Deleted || !sawDelete {
+		t.Fatalf("revoked=%#v sawDelete=%v", revoked, sawDelete)
+	}
+	state, err := store.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := state.Shares["@nunojob/task"]; ok {
+		t.Fatalf("share was not removed from state: %#v", state.Shares)
+	}
+}
+
+func serverURL(r *http.Request) string {
+	return "http://" + r.Host
 }
 
 func TestAirplaneSessionCallsDoNotSendCloudBearer(t *testing.T) {
@@ -247,19 +352,6 @@ func TestListErrorsWhenNoActiveTeam(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no active team") {
 		t.Fatalf("expected no-active-team error, got: %v", err)
-	}
-}
-
-func TestRenderShareHTMLEscapesValues(t *testing.T) {
-	t.Parallel()
-	got := renderShareHTML(api.Session{ID: "<x>&y", State: "running", Harness: "claude-code", Location: "box-01", Model: "s46/kimi", Spent: "€4.20", Task: "<script>alert(1)</script>"})
-	for _, want := range []string{"&lt;x&gt;&amp;y", "running", "claude-code", "box-01", "s46/kimi", "€4.20", "&lt;script&gt;alert(1)&lt;/script&gt;"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("HTML missing %q:\n%s", want, got)
-		}
-	}
-	if !strings.HasPrefix(got, "<!doctype html>") {
-		t.Errorf("expected doctype prefix, got: %q", got[:32])
 	}
 }
 
