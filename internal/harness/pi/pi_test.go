@@ -61,6 +61,53 @@ func TestPlanConnectUsesAirplaneModelLimits(t *testing.T) {
 	}
 }
 
+func TestPlanConnectLeavesPiSettingsAloneByDefault(t *testing.T) {
+	home := t.TempDir()
+	env := map[string]string{"HOME": home}
+	settingsPath := filepath.Join(home, ".pi", "agent", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, []byte(`{"defaultProvider":"openai-codex","defaultModel":"gpt-5.5"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	team := api.Team{Name: "acme", Endpoint: "https://acme.s46.dev", Models: api.DefaultModels, DefaultModel: api.DefaultModel}
+	plan, err := New().PlanConnect(context.Background(), harness.ConnectRequest{Env: env, Team: team, Model: api.DefaultModel})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Files) != 1 || plan.Files[0].Path == settingsPath {
+		t.Fatalf("expected models.json only, got %#v", plan.Files)
+	}
+}
+
+func TestPlanConnectCanSetPiDefaultModel(t *testing.T) {
+	home := t.TempDir()
+	env := map[string]string{"HOME": home}
+	settingsPath := filepath.Join(home, ".pi", "agent", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, []byte(`{"defaultProvider":"openai-codex","defaultModel":"gpt-5.5","theme":"dark"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	team := api.Team{Name: "local", Endpoint: airplane.LocalGatewayURL, Models: []string{airplane.LocalModelID}, DefaultModel: airplane.LocalModelID}
+	plan, err := New().PlanConnect(context.Background(), harness.ConnectRequest{Env: env, Team: team, Model: airplane.LocalModelID, Mode: airplane.ModeAirplane, SetAsDefault: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Files) != 2 || plan.Files[1].Path != settingsPath {
+		t.Fatalf("expected settings plan after models plan, got %#v", plan.Files)
+	}
+	var settings map[string]any
+	if err := json.Unmarshal(plan.Files[1].Content, &settings); err != nil {
+		t.Fatal(err)
+	}
+	if settings["defaultProvider"] != "s46" || settings["defaultModel"] != airplane.LocalModelID || settings["theme"] != "dark" {
+		t.Fatalf("unexpected settings: %#v", settings)
+	}
+}
+
 func TestStatusReportsMissingConfig(t *testing.T) {
 	home := t.TempDir()
 	env := map[string]string{"HOME": home}

@@ -1,0 +1,25 @@
+{
+  "schema": "s46.share.v1",
+  "session": {
+    "id": "00000000-0000-4000-8000-000000000001",
+    "title": "Create helloworld.js",
+    "task": "Create a file called helloworld.js that prints 'hello world' to the console. Use the write tool. Reply with just 'done' after.",
+    "status": "finished",
+    "location": "~/workspace/demo",
+    "team": "fixture",
+    "visibility": "Unlisted",
+    "sharedAt": "2026-01-01T00:00:00Z",
+    "sharedBy": { "handle": "tester" },
+    "harness": { "name": "pi" },
+    "model": { "name": "s46/devstral-small-2-24b" },
+    "lane": { "id": "EU-OPO" },
+    "durationSeconds": 20,
+    "usage": { "tokensIn": 8442, "tokensOut": 26, "gpuSeconds": 0, "toolCalls": 1 }
+  },
+  "steps": [
+    { "id": 1, "kind": "user", "t": 0, "dur": 0, "body": "Create a file called helloworld.js that prints 'hello world' to the console. Use the write tool. Reply with just 'done' after." },
+    { "id": 2, "kind": "edit", "t": 20, "dur": 0, "path": "helloworld.js", "added": 1, "removed": 0, "after": "Successfully wrote 27 bytes to helloworld.js", "hunks": [{ "header": "@@ write @@", "lines": [{ "k": "add", "v": "console.log('hello world');" }] }] },
+    { "id": 3, "kind": "think", "t": 20, "dur": 0, "body": "done" }
+  ],
+  "files": [{ "path": "helloworld.js", "op": "M", "added": 1, "removed": 0 }]
+}

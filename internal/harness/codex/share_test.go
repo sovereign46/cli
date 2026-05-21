@@ -28,7 +28,7 @@ func TestShareArtifactIngestsCodexJSONL(t *testing.T) {
 {"timestamp":"2026-05-21T10:00:08.000Z","type":"event_msg","payload":{"type":"exec_command_end","call_id":"call_read","command":["/bin/zsh","-lc","sed -n '1,20p' pkg/foo.go"],"cwd":"$HOME/dev/app","parsed_cmd":[{"type":"read","cmd":"sed -n '1,20p' pkg/foo.go","path":"$HOME/dev/app/pkg/foo.go"}],"aggregated_output":"package pkg\nconst token = \"ok\"","exit_code":0,"duration":{"secs":1,"nanos":0},"status":"success"}}
 `)
 
-	artifact, ok, err := New().ShareArtifact(context.Background(), harness.ShareRequest{Env: map[string]string{"HOME": home}, Session: api.Session{ID: sessionID, Lane: "EU-OPO"}, TeamName: "acme", User: "nuno@example.com"})
+	artifact, ok, err := New().ShareArtifact(context.Background(), harness.ShareRequest{Env: map[string]string{"HOME": home}, Session: api.Session{ID: sessionID, Lane: "EU-OPO"}, TeamName: "acme", User: "tester"})
 	if err != nil {
 		t.Fatal(err)
 	}

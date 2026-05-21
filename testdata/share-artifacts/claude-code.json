@@ -1,0 +1,24 @@
+{
+  "schema": "s46.share.v1",
+  "session": {
+    "id": "00000000-0000-4000-8000-000000000002",
+    "title": "Fix the failing auth redirect test",
+    "task": "fix the failing auth redirect test",
+    "status": "finished",
+    "location": "~/workspace/webapp",
+    "team": "fixture",
+    "visibility": "Unlisted",
+    "sharedAt": "2026-01-01T00:00:00Z",
+    "sharedBy": { "handle": "tester" },
+    "harness": { "name": "claude-code" },
+    "model": { "name": "s46/kimi-k2.6" },
+    "lane": { "id": "EU-OPO" },
+    "durationSeconds": 1,
+    "usage": { "tokensIn": 1, "tokensOut": 1, "gpuSeconds": 0, "toolCalls": 0 }
+  },
+  "steps": [
+    { "id": 1, "kind": "user", "t": 0, "dur": 0, "body": "fix the failing auth redirect test" },
+    { "id": 2, "kind": "think", "t": 1, "dur": 0, "body": "(s46 mock · s46/kimi-k2.6 · lane EU-OPO)\nI'll start by locating the failing test. In the real backend I would read the test file, trace the assertion to the auth redirect code, propose a fix, and re-run the suite.\n\nThis response is a placeholder produced by the local mock server." }
+  ],
+  "files": []
+}

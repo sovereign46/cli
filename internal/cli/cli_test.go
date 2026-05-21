@@ -706,10 +706,12 @@ func TestAirplaneModeOffRestoresPiModelsJSON(t *testing.T) {
 func TestAirplaneModeOnPromptsForHarnessAndRestoresSelectedHarness(t *testing.T) {
 	env := testEnv(t)
 	modelsPath := filepath.Join(env["HOME"], ".pi", "agent", "models.json")
+	settingsPath := filepath.Join(env["HOME"], ".pi", "agent", "settings.json")
 
-	out := requireOK(t, runWithStdin(t, env, strings.NewReader("pi\n"), "airplane", "mode", "on"))
+	out := requireOK(t, runWithStdin(t, env, strings.NewReader("pi\nY\n"), "airplane", "mode", "on"))
 	for _, want := range []string{
 		"Harness (pi, claude-code, codex, standard) [claude-code]: ",
+		"[s46] Make Pi use s46/devstral-small-2-24b as its default model while airplane mode is on? [Y/n]",
 		"[s46✈] mode: airplane",
 		"[s46✈] team: local",
 	} {
@@ -718,6 +720,7 @@ func TestAirplaneModeOnPromptsForHarnessAndRestoresSelectedHarness(t *testing.T)
 		}
 	}
 	assertAirplanePiConfig(t, modelsPath)
+	assertPiDefaultSettings(t, settingsPath, "s46", airplane.LocalModelID)
 	status := requireOK(t, run(t, env, "--verbose", "status"))
 	if !strings.Contains(status, "[s46✈] harness: pi") {
 		t.Fatalf("expected airplane mode to use Pi harness:\n%s", status)
@@ -727,16 +730,66 @@ func TestAirplaneModeOnPromptsForHarnessAndRestoresSelectedHarness(t *testing.T)
 	if _, err := os.Stat(modelsPath); !os.IsNotExist(err) {
 		t.Fatalf("expected Pi config created for airplane mode to be removed, stat err=%v", err)
 	}
+	if _, err := os.Stat(settingsPath); !os.IsNotExist(err) {
+		t.Fatalf("expected Pi settings created for airplane mode to be removed, stat err=%v", err)
+	}
+}
+
+func TestAirplaneModeOnRestoresExistingPiDefaultSettings(t *testing.T) {
+	env := testEnv(t)
+	settingsPath := filepath.Join(env["HOME"], ".pi", "agent", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	originalRaw := []byte("{\n  \"defaultProvider\": \"openai-codex\",\n  \"defaultModel\": \"gpt-5.5\",\n  \"defaultThinkingLevel\": \"xhigh\"\n}\n")
+	if err := os.WriteFile(settingsPath, originalRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	out := requireOK(t, runWithStdin(t, env, strings.NewReader("pi\nY\n"), "airplane", "mode", "on"))
+	for _, want := range []string{
+		"[s46] Pi currently defaults to openai-codex · gpt-5.5.",
+		"[s46] Make Pi use s46/devstral-small-2-24b as its default model while airplane mode is on? [Y/n]",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("airplane mode on output missing %q:\n%s", want, out)
+		}
+	}
+	assertPiDefaultSettings(t, settingsPath, "s46", airplane.LocalModelID)
+
+	requireOK(t, run(t, env, "airplane", "mode", "off"))
+	restoredRaw, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(restoredRaw) != string(originalRaw) {
+		t.Fatalf("Pi settings were not restored\n--- got ---\n%s\n--- want ---\n%s", restoredRaw, originalRaw)
+	}
+}
+
+func TestAirplaneModeOnCanLeaveExistingPiDefaultSettings(t *testing.T) {
+	env := testEnv(t)
+	settingsPath := filepath.Join(env["HOME"], ".pi", "agent", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, []byte("{\n  \"defaultProvider\": \"openai-codex\",\n  \"defaultModel\": \"gpt-5.5\"\n}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	requireOK(t, runWithStdin(t, env, strings.NewReader("pi\nn\n"), "airplane", "mode", "on"))
+	assertPiDefaultSettings(t, settingsPath, "openai-codex", "gpt-5.5")
 }
 
 func TestAirplaneSetupHarnessSelectionRestoresPiModelsJSON(t *testing.T) {
 	env := testEnv(t)
 	modelsPath, originalRaw := prepareCustomPiConfig(t, env)
 
-	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\npi\n"), "airplane", "setup"))
+	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\npi\nY\n"), "airplane", "setup"))
 	for _, want := range []string{
 		"[s46] Turn on airplane mode now? [Y/n]",
 		"Harness (pi, claude-code, codex, standard) [pi]: ",
+		"[s46] Make Pi use s46/devstral-small-2-24b as its default model while airplane mode is on? [Y/n]",
 		"[s46✈] mode: airplane",
 	} {
 		if !strings.Contains(out, want) {
@@ -857,6 +910,15 @@ func assertAirplanePiConfig(t *testing.T, modelsPath string) {
 	}
 	if !strings.Contains(string(airplaneRaw), airplane.LocalGatewayURL+"/v1") || strings.Contains(string(airplaneRaw), "keep-this-exact-shape") {
 		t.Fatalf("expected airplane Pi config, got:\n%s", airplaneRaw)
+	}
+}
+
+func assertPiDefaultSettings(t *testing.T, settingsPath string, provider string, model string) {
+	t.Helper()
+	settings := map[string]any{}
+	readJSON(t, settingsPath, &settings)
+	if settings["defaultProvider"] != provider || settings["defaultModel"] != model {
+		t.Fatalf("unexpected Pi default settings: %#v", settings)
 	}
 }
 

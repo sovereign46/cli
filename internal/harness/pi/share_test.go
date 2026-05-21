@@ -25,7 +25,7 @@ func TestShareArtifactIngestsPiJSONL(t *testing.T) {
 {"type":"message","timestamp":"2026-05-21T10:00:07.000Z","message":{"role":"toolResult","toolCallId":"call_2","toolName":"read","content":[{"type":"text","text":"package pkg\nconst token = \"ok\""}],"timestamp":"2026-05-21T10:00:07.000Z"}}
 `)
 
-	artifact, ok, err := New().ShareArtifact(context.Background(), harness.ShareRequest{Env: map[string]string{"HOME": home}, Session: api.Session{ID: "019e4ad2", Lane: "EU-OPO"}, TeamName: "acme", User: "nuno@example.com"})
+	artifact, ok, err := New().ShareArtifact(context.Background(), harness.ShareRequest{Env: map[string]string{"HOME": home}, Session: api.Session{ID: "019e4ad2", Lane: "EU-OPO"}, TeamName: "acme", User: "tester"})
 	if err != nil {
 		t.Fatal(err)
 	}

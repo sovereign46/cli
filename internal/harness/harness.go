@@ -20,12 +20,13 @@ type Detection struct {
 }
 
 type ConnectRequest struct {
-	Env    map[string]string
-	Team   api.Team
-	Model  string
-	Mode   string
-	Scope  string
-	DryRun bool
+	Env          map[string]string
+	Team         api.Team
+	Model        string
+	Mode         string
+	Scope        string
+	DryRun       bool
+	SetAsDefault bool
 }
 
 type DisconnectRequest struct {

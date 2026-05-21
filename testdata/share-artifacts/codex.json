@@ -1,0 +1,26 @@
+{
+  "schema": "s46.share.v1",
+  "session": {
+    "id": "00000000-0000-4000-8000-000000000003",
+    "title": "How can I get summary git stats",
+    "task": "how can i get summary git stats like lines added and lines deleted",
+    "status": "finished",
+    "location": "~/workspace/repo",
+    "team": "fixture",
+    "visibility": "Unlisted",
+    "sharedAt": "2026-01-01T00:00:00Z",
+    "sharedBy": { "handle": "tester" },
+    "harness": { "name": "codex" },
+    "model": { "name": "gpt-5.4" },
+    "lane": { "id": "EU-OPO" },
+    "durationSeconds": 16,
+    "usage": { "tokensIn": 0, "tokensOut": 0, "gpuSeconds": 0, "toolCalls": 0 }
+  },
+  "steps": [
+    { "id": 1, "kind": "user", "t": 0, "dur": 0, "body": "how can i get summary git stats like lines added and lines deleted" },
+    { "id": 2, "kind": "think", "t": 5, "dur": 0, "body": "Use `git diff --shortstat` for a one-line summary.\n\nExamples:\n\n- Working tree vs `HEAD`: `git diff --shortstat`\n- Staged changes only: `git diff --cached --shortstat`\n- Between branches or commits: `git diff --shortstat main...HEAD`\n\nFor per-file counts, use `git diff --numstat`." },
+    { "id": 3, "kind": "user", "t": 10, "dur": 0, "body": "i want changes between main and head including non committed stuff" },
+    { "id": 4, "kind": "think", "t": 16, "dur": 0, "body": "Use `git diff --shortstat \"$(git merge-base main HEAD)\"`. That compares from the branch point to the current working tree, so it includes committed, staged, and unstaged changes. Untracked files are not included by `git diff`; add them intentionally or count them separately." }
+  ],
+  "files": []
+}

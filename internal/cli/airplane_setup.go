@@ -16,6 +16,7 @@ import (
 	"github.com/sovereign46/s46-cli/internal/api"
 	"github.com/sovereign46/s46-cli/internal/config"
 	"github.com/sovereign46/s46-cli/internal/harness"
+	"github.com/sovereign46/s46-cli/internal/harness/pi"
 	"github.com/sovereign46/s46-cli/internal/strs"
 	"github.com/sovereign46/s46-cli/internal/workspace"
 )
@@ -575,6 +576,10 @@ func enableAirplaneMode(ctx context.Context, app *app, service airplane.Service,
 			return err
 		}
 	}
+	setHarnessDefault, err := shouldSetAirplaneHarnessDefault(app, teamConfig)
+	if err != nil {
+		return err
+	}
 	if err := startAirplaneRuntime(ctx, app, service); err != nil {
 		return err
 	}
@@ -589,7 +594,7 @@ func enableAirplaneMode(ctx context.Context, app *app, service airplane.Service,
 	if teamConfig.DefaultHarness == "" {
 		teamConfig.DefaultHarness = harness.DefaultName
 	}
-	adapter, plan, err := planHarnessConfig(ctx, app, teamName, teamConfig, config.ModeAirplane)
+	adapter, plan, err := planHarnessConfig(ctx, app, teamName, teamConfig, config.ModeAirplane, setHarnessDefault)
 	if err != nil {
 		return err
 	}
@@ -637,6 +642,36 @@ func promptAirplaneModeHarness(app *app, teamConfig config.TeamConfig) (config.T
 	}
 	teamConfig.DefaultHarness = harnessName
 	return teamConfig, nil
+}
+
+func shouldSetAirplaneHarnessDefault(app *app, teamConfig config.TeamConfig) (bool, error) {
+	if teamConfig.DefaultHarness != "pi" {
+		return false, nil
+	}
+	if app.options.json || !hasPromptInput(app.runtime.Stdin) {
+		return true, nil
+	}
+	provider, model, err := pi.CurrentDefault(app.runtime.Env)
+	if err == nil && provider == "s46" && model == airplane.LocalModelID {
+		return true, nil
+	}
+	if err == nil && (provider != "" || model != "") {
+		if err := app.renderer.Lines(fmt.Sprintf("[s46] Pi currently defaults to %s.", piDefaultLabel(provider, model))); err != nil {
+			return false, err
+		}
+	}
+	return promptYesNo(app, fmt.Sprintf("[s46] Make Pi use %s as its default model while airplane mode is on? [Y/n] ", airplane.LocalModelID), true)
+}
+
+func piDefaultLabel(provider string, model string) string {
+	parts := []string{}
+	if provider != "" {
+		parts = append(parts, provider)
+	}
+	if model != "" {
+		parts = append(parts, model)
+	}
+	return strings.Join(parts, " · ")
 }
 
 func mergeAirplaneHarnessSnapshot(existing *config.HarnessSnapshot, next *config.HarnessSnapshot) *config.HarnessSnapshot {
@@ -790,7 +825,7 @@ func applyAtomicModeOff(ctx context.Context, app *app, before, after config.Conf
 		return applyAtomicConfigAndSnapshot(app, before, after, *snapshot, "airplane mode off")
 	}
 	if hasCloudConfig {
-		adapter, plan, err := planHarnessConfig(ctx, app, teamName, restored, config.ModeCloud)
+		adapter, plan, err := planHarnessConfig(ctx, app, teamName, restored, config.ModeCloud, false)
 		if err != nil {
 			return err
 		}
@@ -900,7 +935,7 @@ func restoreCloudTeamConfig(teamName string, teamConfig config.TeamConfig) (conf
 }
 
 func applyHarnessConfig(ctx context.Context, app *app, teamName string, teamConfig config.TeamConfig, mode string) error {
-	adapter, plan, err := planHarnessConfig(ctx, app, teamName, teamConfig, mode)
+	adapter, plan, err := planHarnessConfig(ctx, app, teamName, teamConfig, mode, false)
 	if err != nil {
 		return err
 	}
@@ -911,13 +946,13 @@ func applyHarnessConfig(ctx context.Context, app *app, teamName string, teamConf
 	return err
 }
 
-func planHarnessConfig(ctx context.Context, app *app, teamName string, teamConfig config.TeamConfig, mode string) (harness.Adapter, harness.Plan, error) {
+func planHarnessConfig(ctx context.Context, app *app, teamName string, teamConfig config.TeamConfig, mode string, setHarnessDefault bool) (harness.Adapter, harness.Plan, error) {
 	adapter, err := app.harness.Get(strs.FirstNonEmpty(teamConfig.DefaultHarness, harness.DefaultName))
 	if err != nil {
 		return nil, harness.Plan{}, err
 	}
 	team := teamConfig.API(teamName)
-	plan, err := adapter.PlanConnect(ctx, harness.ConnectRequest{Env: app.runtime.Env, Team: team, Model: teamConfig.DefaultModel, Mode: mode, Scope: "user", DryRun: app.options.dryRun})
+	plan, err := adapter.PlanConnect(ctx, harness.ConnectRequest{Env: app.runtime.Env, Team: team, Model: teamConfig.DefaultModel, Mode: mode, Scope: "user", DryRun: app.options.dryRun, SetAsDefault: setHarnessDefault})
 	if err != nil {
 		return nil, harness.Plan{}, err
 	}

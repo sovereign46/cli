@@ -18,8 +18,26 @@ import (
 // $HOME. Update this if Pi moves its config.
 var modelsRelPath = filepath.Join(".pi", "agent", "models.json")
 
+// settingsRelPath is the location of Pi's settings config relative to
+// $HOME. Update this if Pi moves its config.
+var settingsRelPath = filepath.Join(".pi", "agent", "settings.json")
+
 func modelsPath(env map[string]string) string {
 	return filepath.Join(config.HomeDir(env), modelsRelPath)
+}
+
+func settingsPath(env map[string]string) string {
+	return filepath.Join(config.HomeDir(env), settingsRelPath)
+}
+
+func CurrentDefault(env map[string]string) (string, string, error) {
+	settings := map[string]any{}
+	if err := config.ReadJSON(settingsPath(env), map[string]any{}, &settings); err != nil {
+		return "", "", err
+	}
+	provider, _ := settings["defaultProvider"].(string)
+	model, _ := settings["defaultModel"].(string)
+	return provider, model, nil
 }
 
 type Adapter struct{}
@@ -68,31 +86,80 @@ func (a Adapter) PlanConnect(ctx context.Context, req harness.ConnectRequest) (h
 		return harness.Plan{}, err
 	}
 	content = append(content, '\n')
+
+	operations := []string{
+		"add or replace providers.s46 in Pi models.json",
+		fmt.Sprintf("set baseUrl to %s/v1", req.Team.Endpoint),
+		"set apiKey to shell command '!s46 token --refresh'",
+		fmt.Sprintf("register %d S46 models", len(req.Team.Models)),
+	}
+	files := []harness.FilePlan{{
+		Path:        path,
+		DisplayPath: config.DisplayPath(path, req.Env),
+		Kind:        "json",
+		OldContent:  oldContent,
+		Content:     content,
+		JSONValue:   existing,
+		Mode:        0o600,
+	}}
+	if req.SetAsDefault {
+		settingsFile, err := defaultSettingsFilePlan(req)
+		if err != nil {
+			return harness.Plan{}, err
+		}
+		operations = append(operations, fmt.Sprintf("set Pi default provider/model to s46 · %s", connectModel(req)))
+		files = append(files, settingsFile)
+	}
+
 	verb := "writes"
 	if req.DryRun {
 		verb = "would write"
 	}
 	return harness.Plan{
-		Harness: "pi",
-		Title:   "Configure Pi custom provider for Sovereign46",
-		Env:     req.Env,
-		Summary: fmt.Sprintf("harness: pi (%s %s)", verb, config.DisplayPath(path, req.Env)),
-		Operations: []string{
-			"add or replace providers.s46 in Pi models.json",
-			fmt.Sprintf("set baseUrl to %s/v1", req.Team.Endpoint),
-			"set apiKey to shell command '!s46 token --refresh'",
-			fmt.Sprintf("register %d S46 models", len(req.Team.Models)),
-		},
-		Files: []harness.FilePlan{{
-			Path:        path,
-			DisplayPath: config.DisplayPath(path, req.Env),
-			Kind:        "json",
-			OldContent:  oldContent,
-			Content:     content,
-			JSONValue:   existing,
-			Mode:        0o600,
-		}},
+		Harness:    "pi",
+		Title:      "Configure Pi custom provider for Sovereign46",
+		Env:        req.Env,
+		Summary:    fmt.Sprintf("harness: pi (%s %s)", verb, config.DisplayPath(path, req.Env)),
+		Operations: operations,
+		Files:      files,
 	}, nil
+}
+
+func defaultSettingsFilePlan(req harness.ConnectRequest) (harness.FilePlan, error) {
+	path := settingsPath(req.Env)
+	oldContent, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		oldContent = nil
+	} else if err != nil {
+		return harness.FilePlan{}, err
+	}
+	settings := map[string]any{}
+	if err := config.ReadJSON(path, map[string]any{}, &settings); err != nil {
+		return harness.FilePlan{}, err
+	}
+	settings["defaultProvider"] = "s46"
+	settings["defaultModel"] = connectModel(req)
+	content, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return harness.FilePlan{}, err
+	}
+	content = append(content, '\n')
+	return harness.FilePlan{
+		Path:        path,
+		DisplayPath: config.DisplayPath(path, req.Env),
+		Kind:        "json",
+		OldContent:  oldContent,
+		Content:     content,
+		JSONValue:   settings,
+		Mode:        0o600,
+	}, nil
+}
+
+func connectModel(req harness.ConnectRequest) string {
+	if req.Model != "" {
+		return req.Model
+	}
+	return req.Team.DefaultModel
 }
 
 func (a Adapter) PlanDisconnect(ctx context.Context, req harness.DisconnectRequest) (harness.Plan, error) {
