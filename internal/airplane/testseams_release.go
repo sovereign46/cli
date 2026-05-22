@@ -2,14 +2,17 @@
 
 package airplane
 
-func (Service) seamInstallLlamacpp() (bool, error)         { return false, nil }
-func (Service) seamPullModel() (bool, error)               { return false, nil }
-func (Service) seamStartLlamacpp() (bool, error)           { return false, nil }
-func (Service) seamStartGateway() (bool, error)            { return false, nil }
-func (Service) seamInstallGateway() (bool, error)          { return false, nil }
-func (Service) seamLlamacppRunning() (bool, bool)          { return false, false }
-func (Service) seamModelDownloaded() (bool, bool)          { return false, false }
-func (Service) seamModelProbe() (bool, string, bool)       { return false, "", false }
+func (Service) seamInstallLlamacpp() (bool, error)   { return false, nil }
+func (Service) seamPullModel() (bool, error)         { return false, nil }
+func (Service) seamStartLlamacpp() (bool, error)     { return false, nil }
+func (Service) seamStartGateway() (bool, error)      { return false, nil }
+func (Service) seamInstallGateway() (bool, error)    { return false, nil }
+func (Service) seamLlamacppRunning() (bool, bool)    { return false, false }
+func (Service) seamModelDownloaded() (bool, bool)    { return false, false }
+func (Service) seamModelProbe() (bool, string, bool) { return false, "", false }
+func (Service) seamLlamacppServingVerifiedModel() (bool, string, bool) {
+	return false, "", false
+}
 func (Service) seamGatewayReady() (bool, bool)             { return false, false }
 func (Service) seamGatewayResponding() (bool, bool)        { return false, false }
 func (Service) seamGatewayDownloadAvailable() (bool, bool) { return false, false }

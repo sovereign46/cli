@@ -47,7 +47,7 @@ func Install(ctx context.Context, request InstallRequest) error {
 	if err := validateManifest(manifest.Manifest, request); err != nil {
 		return err
 	}
-	if ok, err := verifyInstalledReceiptForManifest(request, manifest.Manifest, false); err != nil {
+	if ok, err := verifyInstalledReceiptForManifest(request, manifest.Manifest, true); err != nil {
 		return err
 	} else if ok {
 		return nil
@@ -64,8 +64,7 @@ func VerifyInstalled(ctx context.Context, request InstallRequest) (bool, error) 
 	if err := validateInstallRequest(request); err != nil {
 		return false, err
 	}
-	strict := strs.Truthy(strs.EnvValue(request.Env, "S46_AIRPLANE_VERIFY_MODEL"))
-	return verifyInstalledReceipt(request, strict)
+	return verifyInstalledReceipt(request, true)
 }
 
 func BaseURL(env map[string]string) string {

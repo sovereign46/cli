@@ -51,6 +51,9 @@ func TestSeamsInactiveWithEmptyEnv(t *testing.T) {
 	if _, _, ok := service.seamModelProbe(); ok {
 		check("seamModelProbe", true)
 	}
+	if _, _, ok := service.seamLlamacppServingVerifiedModel(); ok {
+		check("seamLlamacppServingVerifiedModel", true)
+	}
 	if _, ok := service.seamGatewayReady(); ok {
 		check("seamGatewayReady", true)
 	}
@@ -133,5 +136,8 @@ func TestReleaseBinaryHasNoTestSeamStrings(t *testing.T) {
 	}
 	if strings.Contains(string(stdout), "S46_TEST_") {
 		t.Fatalf("release binary contains S46_TEST_ string literal; seam leak via missing build tag")
+	}
+	if strings.Contains(string(stdout), "S46_AIRPLANE_SKIP_SETUP_CHECKS") {
+		t.Fatalf("release binary contains setup-check bypass string")
 	}
 }

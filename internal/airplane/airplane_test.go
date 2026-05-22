@@ -119,6 +119,80 @@ func TestAirplaneRuntimeEnvDefaultsAndOverrides(t *testing.T) {
 	}
 }
 
+func TestCheckRefusesToProbeOrAcceptGatewayBeforeModelVerified(t *testing.T) {
+	report := Service{Env: map[string]string{
+		"S46_TEST_MEMORY_BYTES":            "68000000000",
+		"S46_TEST_FREE_DISK_BYTES":         "61000000000",
+		"S46_TEST_LLAMACPP_PATH":           "/opt/homebrew/bin/llama-server",
+		"S46_TEST_LLAMACPP_RUNNING":        "1",
+		"S46_TEST_LLAMACPP_VERIFIED_MODEL": "1",
+		"S46_TEST_MODEL_DOWNLOADED":        "0",
+		"S46_TEST_MODEL_PROBE":             "1",
+		"S46_TEST_GATEWAY_READY":           "1",
+	}}.Check(context.Background())
+
+	if check := findCheck(report, "llamacpp-model"); check.OK || !strings.Contains(check.Message, "model is not verified") {
+		t.Fatalf("unexpected llamacpp-model check: %#v", check)
+	}
+	if check := findCheck(report, "model-probe"); check.OK {
+		t.Fatalf("model probe must be skipped before verification: %#v", check)
+	}
+	if check := findCheck(report, "local-gateway"); check.OK || !strings.Contains(check.Message, "verified llama-server is not ready") {
+		t.Fatalf("unexpected local-gateway check: %#v", check)
+	}
+	if report.Ready {
+		t.Fatalf("unverified model must not be ready: %#v", report)
+	}
+}
+
+func TestCheckRefusesLlamacppServingDifferentModel(t *testing.T) {
+	report := Service{Env: map[string]string{
+		"S46_TEST_MEMORY_BYTES":            "68000000000",
+		"S46_TEST_FREE_DISK_BYTES":         "61000000000",
+		"S46_TEST_LLAMACPP_PATH":           "/opt/homebrew/bin/llama-server",
+		"S46_TEST_LLAMACPP_RUNNING":        "1",
+		"S46_TEST_MODEL_DOWNLOADED":        "1",
+		"S46_TEST_LLAMACPP_VERIFIED_MODEL": "0",
+		"S46_TEST_MODEL_PROBE":             "1",
+		"S46_TEST_GATEWAY_READY":           "1",
+	}}.Check(context.Background())
+
+	if check := findCheck(report, "llamacpp-model"); check.OK || !strings.Contains(check.Message, "not serving verified model") {
+		t.Fatalf("unexpected llamacpp-model check: %#v", check)
+	}
+	if check := findCheck(report, "model-probe"); check.OK {
+		t.Fatalf("model probe must be skipped for unverified runtime: %#v", check)
+	}
+	if check := findCheck(report, "local-gateway"); check.OK {
+		t.Fatalf("gateway must not be ready for unverified runtime: %#v", check)
+	}
+}
+
+func TestStartGatewayRequiresVerifiedRuntime(t *testing.T) {
+	err := Service{Env: map[string]string{
+		"S46_TEST_MODEL_DOWNLOADED":        "1",
+		"S46_TEST_LLAMACPP_RUNNING":        "1",
+		"S46_TEST_LLAMACPP_VERIFIED_MODEL": "0",
+		"S46_TEST_START_GATEWAY_OK":        "1",
+	}}.StartGateway()
+	if err == nil || !strings.Contains(err.Error(), "not serving verified model") {
+		t.Fatalf("expected verified-runtime error, got %v", err)
+	}
+}
+
+func TestStartLlamacppRequiresVerifiedModel(t *testing.T) {
+	err := Service{Env: map[string]string{
+		"S46_TEST_LLAMACPP_PATH":         "/opt/homebrew/bin/llama-server",
+		"S46_TEST_START_LLAMACPP_OK":     "1",
+		"S46_TEST_MODEL_DOWNLOADED":      "0",
+		"S46_TEST_LLAMACPP_RUNNING":      "0",
+		"S46_TEST_LLAMACPP_PROCESS_KIND": "none",
+	}}.StartLlamacpp()
+	if err == nil || !strings.Contains(err.Error(), "model is not verified") {
+		t.Fatalf("expected verified-model error, got %v", err)
+	}
+}
+
 func TestModelProbeUsesOpenAICompatibleChat(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/chat/completions" {
@@ -322,12 +396,13 @@ func TestCheckRequiresAirplaneReadyGateway(t *testing.T) {
 
 	report := Service{
 		Env: map[string]string{
-			"S46_LOCAL_LLAMACPP_URL":    server.URL,
-			"S46_AIRPLANE_GATEWAY_URL":  server.URL,
-			"S46_TEST_MEMORY_BYTES":     "68000000000",
-			"S46_TEST_FREE_DISK_BYTES":  "61000000000",
-			"S46_TEST_LLAMACPP_PATH":    "/opt/homebrew/bin/llama-server",
-			"S46_TEST_MODEL_DOWNLOADED": "1",
+			"S46_LOCAL_LLAMACPP_URL":           server.URL,
+			"S46_AIRPLANE_GATEWAY_URL":         server.URL,
+			"S46_TEST_MEMORY_BYTES":            "68000000000",
+			"S46_TEST_FREE_DISK_BYTES":         "61000000000",
+			"S46_TEST_LLAMACPP_PATH":           "/opt/homebrew/bin/llama-server",
+			"S46_TEST_MODEL_DOWNLOADED":        "1",
+			"S46_TEST_LLAMACPP_VERIFIED_MODEL": "1",
 		},
 		Client: server.Client(),
 	}.Check(context.Background())
@@ -353,12 +428,13 @@ func TestCheckReportsModelProbeHTTPError(t *testing.T) {
 
 	report := Service{
 		Env: map[string]string{
-			"S46_LOCAL_LLAMACPP_URL":    server.URL,
-			"S46_TEST_MEMORY_BYTES":     "68000000000",
-			"S46_TEST_FREE_DISK_BYTES":  "61000000000",
-			"S46_TEST_LLAMACPP_PATH":    "/opt/homebrew/bin/llama-server",
-			"S46_TEST_MODEL_DOWNLOADED": "1",
-			"S46_TEST_GATEWAY_READY":    "1",
+			"S46_LOCAL_LLAMACPP_URL":           server.URL,
+			"S46_TEST_MEMORY_BYTES":            "68000000000",
+			"S46_TEST_FREE_DISK_BYTES":         "61000000000",
+			"S46_TEST_LLAMACPP_PATH":           "/opt/homebrew/bin/llama-server",
+			"S46_TEST_MODEL_DOWNLOADED":        "1",
+			"S46_TEST_LLAMACPP_VERIFIED_MODEL": "1",
+			"S46_TEST_GATEWAY_READY":           "1",
 		},
 		Client:            server.Client(),
 		ModelProbeTimeout: time.Second,

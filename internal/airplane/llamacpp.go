@@ -61,11 +61,19 @@ func (s Service) PullModel(ctx context.Context) error {
 }
 
 func (s Service) StartLlamacpp() error {
-	if strs.Truthy(strs.EnvValue(s.Env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")) {
+	if s.setupChecksSkipped() {
 		return nil
 	}
-	if s.llamacppRunning(context.Background()) {
-		return nil
+	ctx := context.Background()
+	if err := s.requireVerifiedModel(ctx); err != nil {
+		return err
+	}
+	if s.llamacppRunning(ctx) {
+		if ok, message := s.llamacppServingVerifiedModel(ctx); ok {
+			return nil
+		} else {
+			return fmt.Errorf("llama-server is running but %s", message)
+		}
 	}
 	if handled, err := s.seamStartLlamacpp(); handled {
 		return err
@@ -74,12 +82,43 @@ func (s Service) StartLlamacpp() error {
 	if !ok {
 		return fmt.Errorf("llama-server is not installed")
 	}
-	if !fileExists(s.modelPath()) {
-		return fmt.Errorf("model file is not downloaded: %s", s.modelPath())
-	}
 	cmd := exec.Command(path, AirplaneLlamacppArgs(s.Env, s.modelPath())...)
 	cmd.Env = s.processEnv()
 	return s.startDetached(cmd, "llamacpp.log")
+}
+
+func (s Service) requireVerifiedModel(ctx context.Context) error {
+	if s.modelDownloaded(ctx) {
+		return nil
+	}
+	return fmt.Errorf("model is not verified by a signed S46 manifest: %s", s.modelPath())
+}
+
+func (s Service) requireVerifiedLlamacppRuntime(ctx context.Context) error {
+	if err := s.requireVerifiedModel(ctx); err != nil {
+		return err
+	}
+	if !s.llamacppRunning(ctx) {
+		return fmt.Errorf("llama-server is not responding")
+	}
+	if ok, message := s.llamacppServingVerifiedModel(ctx); !ok {
+		return fmt.Errorf("%s", message)
+	}
+	return nil
+}
+
+func (s Service) llamacppServingVerifiedModel(ctx context.Context) (bool, string) {
+	if verified, message, ok := s.seamLlamacppServingVerifiedModel(); ok {
+		return verified, message
+	}
+	process, ok := s.llamacppServeProcess(ctx)
+	if !ok {
+		return false, "could not verify llama-server process model path; restart it with `s46 airplane setup`"
+	}
+	if commandUsesModelPath(process.Command, s.modelPath()) {
+		return true, "serving verified model: " + s.modelPath()
+	}
+	return false, "llama-server is not serving verified model path: " + s.modelPath()
 }
 
 func (s Service) LlamacppRunning(ctx context.Context) bool {
@@ -131,6 +170,8 @@ func (s Service) llamacppServeProcess(ctx context.Context) (llamacppProcess, boo
 	if err != nil {
 		return llamacppProcess{}, false
 	}
+	var fallback *llamacppProcess
+	port := strconv.Itoa(llamacppPort(s.Env))
 	for _, line := range strings.Split(string(output), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 3 || filepath.Base(fields[2]) != "llama-server" {
@@ -140,7 +181,17 @@ func (s Service) llamacppServeProcess(ctx context.Context) (llamacppProcess, boo
 		if err != nil || pid <= 0 {
 			continue
 		}
-		return llamacppProcess{PID: pid, Command: strings.Join(fields[2:], " ")}, true
+		process := llamacppProcess{PID: pid, Command: strings.Join(fields[2:], " ")}
+		if commandUsesPort(process.Command, port) {
+			return process, true
+		}
+		if fallback == nil {
+			candidate := process
+			fallback = &candidate
+		}
+	}
+	if fallback != nil {
+		return *fallback, true
 	}
 	return llamacppProcess{}, false
 }
@@ -167,6 +218,46 @@ func classifyLlamacppServer(command string) string {
 		return "manual"
 	}
 	return "unknown"
+}
+
+func commandUsesModelPath(command string, modelPath string) bool {
+	value, ok := commandFlagValue(command, "-m", "--model")
+	return ok && sameModelPath(value, modelPath)
+}
+
+func commandUsesPort(command string, port string) bool {
+	value, ok := commandFlagValue(command, "--port")
+	return ok && value == port
+}
+
+func commandFlagValue(command string, names ...string) (string, bool) {
+	fields := strings.Fields(command)
+	for i, field := range fields {
+		name, value, hasValue := strings.Cut(field, "=")
+		for _, want := range names {
+			if hasValue && name == want {
+				return strings.Trim(value, "'\""), true
+			}
+			if field == want && i+1 < len(fields) {
+				return strings.Trim(fields[i+1], "'\""), true
+			}
+		}
+	}
+	return "", false
+}
+
+func sameModelPath(got string, want string) bool {
+	got = strings.TrimSpace(strings.Trim(got, "'\""))
+	want = strings.TrimSpace(want)
+	if got == "" || want == "" {
+		return false
+	}
+	gotAbs, gotErr := filepath.Abs(got)
+	wantAbs, wantErr := filepath.Abs(want)
+	if gotErr == nil && wantErr == nil {
+		return filepath.Clean(gotAbs) == filepath.Clean(wantAbs)
+	}
+	return filepath.Clean(got) == filepath.Clean(want)
 }
 
 func processEnvForPID(ctx context.Context, pid int) (map[string]string, bool) {
@@ -251,11 +342,6 @@ func (s Service) explicitModelPath() string {
 		return path
 	}
 	return ""
-}
-
-func fileExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
 }
 
 func (s Service) llamacppRunning(ctx context.Context) bool {

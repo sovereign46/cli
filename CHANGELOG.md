@@ -40,6 +40,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Security
 
+- Required signed-manifest SHA-256 verification before marking airplane models ready, probing llama.cpp, starting llama.cpp, or starting the local gateway.
 - Required Ed25519 manifest signature verification plus SHA-256 artifact verification before installing downloaded airplane models.
 - Required SHA-256 verification before installing downloaded S46 gateway release archives.
 - Disabled the gateway source clone fallback in release builds.

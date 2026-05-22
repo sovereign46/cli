@@ -977,7 +977,7 @@ func TestAirplaneSetupContinuesAfterInstallingLlamacpp(t *testing.T) {
 		"[s46] Install with Homebrew? [Y/n]",
 		"[s46] llama-server is installed but not running.",
 		"[s46] Start llama-server now? [Y/n]",
-		"Download devstral-small-2:24b-instruct-2512-q4_K_M",
+		"Download or verify devstral-small-2:24b-instruct-2512-q4_K_M",
 		"[s46] Start local gateway now? [Y/n]",
 		"[s46] airplane setup: ready",
 	} {
@@ -1003,7 +1003,7 @@ func TestAirplaneSetupDownloadsModelWithoutExternalDownloader(t *testing.T) {
 
 	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\nn\n"), "airplane", "setup"))
 	for _, want := range []string{
-		"Download devstral-small-2:24b-instruct-2512-q4_K_M",
+		"Download or verify devstral-small-2:24b-instruct-2512-q4_K_M",
 		"[s46] llama-server is installed but not running.",
 	} {
 		if !strings.Contains(out, want) {
@@ -1034,7 +1034,7 @@ func TestAirplaneSetupShowsManualModelInstructionsWhenDownloadIsSkipped(t *testi
 	for _, want := range []string{
 		"[s46] Model download skipped.",
 		"[s46] Download metadata: https://models.s46.dev/models/v1/s46/devstral-small-2-24b/manifest.json",
-		"[s46] Automatic setup verifies the signed manifest and model checksum before writing:",
+		"[s46] Automatic setup verifies the signed manifest and model checksum before writing or trusting:",
 		"[s46] Or set S46_LOCAL_MODEL_PATH=/path/to/Devstral-Small-2-24B-Instruct-2512-Q4_K_M.gguf",
 	} {
 		if !strings.Contains(out, want) {

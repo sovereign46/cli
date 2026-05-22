@@ -19,16 +19,20 @@ type gatewayCommand struct {
 }
 
 func (s Service) StartGateway() error {
-	if strs.Truthy(strs.EnvValue(s.Env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")) {
+	if s.setupChecksSkipped() {
 		return nil
 	}
-	if s.gatewayReady(context.Background()) {
+	ctx := context.Background()
+	if err := s.requireVerifiedLlamacppRuntime(ctx); err != nil {
+		return err
+	}
+	if s.gatewayReady(ctx) {
 		return nil
 	}
 	if handled, err := s.seamStartGateway(); handled {
 		return err
 	}
-	if s.gatewayResponding(context.Background()) {
+	if s.gatewayResponding(ctx) {
 		return fmt.Errorf("local S46 API at %s is running but is not airplane-ready; run `s46 airplane setup` to restart it in airplane mode", s.gatewayURL())
 	}
 	command, ok := s.gatewayCommand()

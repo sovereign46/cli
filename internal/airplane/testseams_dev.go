@@ -45,6 +45,7 @@ func (s Service) seamStartLlamacpp() (handled bool, err error) {
 		return false, nil
 	}
 	s.setEnv("S46_TEST_LLAMACPP_RUNNING", "1")
+	s.setEnv("S46_TEST_LLAMACPP_VERIFIED_MODEL", "1")
 	return true, nil
 }
 
@@ -98,6 +99,22 @@ func (s Service) seamModelProbe() (probeOK bool, message string, ok bool) {
 		return false, override, true
 	}
 	return false, "model probe failed", true
+}
+
+func (s Service) seamLlamacppServingVerifiedModel() (verified bool, message string, ok bool) {
+	value := strings.TrimSpace(strs.EnvValue(s.Env, "S46_TEST_LLAMACPP_VERIFIED_MODEL"))
+	if value != "" {
+		if strs.Truthy(value) {
+			return true, "serving verified model: " + s.modelPath(), true
+		}
+		return false, "llama-server is not serving verified model path: " + s.modelPath(), true
+	}
+	running, runningOK := s.seamLlamacppRunning()
+	downloaded, downloadedOK := s.seamModelDownloaded()
+	if runningOK && downloadedOK && running && downloaded {
+		return true, "serving verified model: " + s.modelPath(), true
+	}
+	return false, "", false
 }
 
 func (s Service) seamGatewayReady() (ready bool, ok bool) {

@@ -39,7 +39,7 @@ type Report struct {
 }
 
 func (s Service) Check(ctx context.Context) Report {
-	if strs.Truthy(strs.EnvValue(s.Env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")) {
+	if s.setupChecksSkipped() {
 		return s.skippedReport()
 	}
 
@@ -69,24 +69,32 @@ func (s Service) Check(ctx context.Context) Report {
 	report.add(Check{Name: "llamacpp-installed", OK: llamacppOK, Required: true, Message: strs.FirstNonEmpty(llamacppPath, "llama-server not found")})
 
 	modelDownloaded := s.modelDownloaded(ctx)
-	report.add(Check{Name: "model-downloaded", OK: modelDownloaded, Required: true, Message: boolMessage(modelDownloaded, s.modelPath(), "model file is not downloaded")})
+	report.add(Check{Name: "model-downloaded", OK: modelDownloaded, Required: true, Message: boolMessage(modelDownloaded, s.modelPath(), "model is not verified by a signed S46 manifest")})
 
 	llamacppRunning := s.runBoolCheck(ctx, s.checkTimeout(), s.llamacppRunning)
 	report.add(Check{Name: "llamacpp-running", OK: llamacppRunning, Required: true, Message: boolMessage(llamacppRunning, LlamacppURL(s.Env), "llama-server is not responding")})
 
+	llamacppModelOK, llamacppModelMessage := s.llamacppModelCheck(ctx, modelDownloaded, llamacppRunning)
+	report.add(Check{Name: "llamacpp-model", OK: llamacppModelOK, Required: true, Message: llamacppModelMessage})
+
 	modelProbe := false
-	modelProbeMessage := "skipped: llama-server is not running"
-	if llamacppRunning {
+	modelProbeMessage := "skipped: verified llama-server is not ready"
+	if llamacppModelOK {
 		modelProbeCtx, cancel := context.WithTimeout(ctx, s.modelProbeTimeout())
 		modelProbe, modelProbeMessage = s.modelProbeWithNotice(modelProbeCtx)
 		cancel()
 	}
 	report.add(Check{Name: "model-probe", OK: modelProbe, Required: true, Message: modelProbeMessage})
 
-	gatewayReady := s.runBoolCheck(ctx, s.checkTimeout(), s.gatewayReady)
+	gatewayReady := false
 	gatewayPath, _ := s.gatewayBinary()
 	report.GatewayBinary = gatewayPath
-	report.add(Check{Name: "local-gateway", OK: gatewayReady, Required: true, Message: s.gatewayMessage(ctx, gatewayReady, gatewayPath)})
+	gatewayMessage := "skipped: verified llama-server is not ready"
+	if llamacppModelOK {
+		gatewayReady = s.runBoolCheck(ctx, s.checkTimeout(), s.gatewayReady)
+		gatewayMessage = s.gatewayMessage(ctx, gatewayReady, gatewayPath)
+	}
+	report.add(Check{Name: "local-gateway", OK: gatewayReady, Required: true, Message: gatewayMessage})
 	report.Ready = report.allRequiredOK()
 	return report
 }
@@ -110,6 +118,7 @@ func (s Service) skippedReport() Report {
 		{Name: "llamacpp-installed", OK: true, Required: true, Message: "skipped"},
 		{Name: "model-downloaded", OK: true, Required: true, Message: s.modelPath()},
 		{Name: "llamacpp-running", OK: true, Required: true, Message: "skipped"},
+		{Name: "llamacpp-model", OK: true, Required: true, Message: "skipped"},
 		{Name: "model-probe", OK: true, Required: true, Message: LocalModelID + " responds"},
 		{Name: "local-gateway", OK: true, Required: true, Message: s.gatewayURL()},
 	}
@@ -140,11 +149,18 @@ func (s Service) modelDownloaded(ctx context.Context) bool {
 	if downloaded, ok := s.seamModelDownloaded(); ok {
 		return downloaded
 	}
-	if s.explicitModelPath() != "" {
-		return fileExists(s.modelPath())
-	}
 	ok, err := models.VerifyInstalled(ctx, models.InstallRequest{Env: s.Env, ModelID: LocalModelID, BackendModel: s.backendModel(), TargetPath: s.modelPath()})
 	return err == nil && ok
+}
+
+func (s Service) llamacppModelCheck(ctx context.Context, modelDownloaded bool, llamacppRunning bool) (bool, string) {
+	if !modelDownloaded {
+		return false, "skipped: model is not verified by a signed S46 manifest"
+	}
+	if !llamacppRunning {
+		return false, "skipped: llama-server is not running"
+	}
+	return s.llamacppServingVerifiedModel(ctx)
 }
 
 func (s Service) modelProbeWithNotice(ctx context.Context) (bool, string) {

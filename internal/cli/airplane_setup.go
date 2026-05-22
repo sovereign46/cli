@@ -93,10 +93,19 @@ func runAirplaneSetupWithOptions(ctx context.Context, app *app, options airplane
 				return report, fmt.Errorf("failed to start llama-server: %w", err)
 			}
 			changed = true
-			report = waitForAirplaneCheck(ctx, service, "llamacpp-running", 30*time.Second)
+			report = waitForAirplaneCheck(ctx, service, "llamacpp-model", 30*time.Second)
 		}
 	}
-	if missingCheck(report, "local-gateway") && service.GatewayResponding(ctx) && !service.GatewayReady(ctx) {
+	if checkOK(report, "llamacpp-installed") && checkOK(report, "model-downloaded") && checkOK(report, "llamacpp-running") && missingCheck(report, "llamacpp-model") {
+		if err := app.renderer.Lines(
+			"[s46] llama-server is running but not serving the verified S46 model.",
+			"[s46] Stop the existing llama-server and rerun `s46 airplane setup` so S46 can start the signed model.",
+		); err != nil {
+			return report, err
+		}
+		return report, nil
+	}
+	if checkOK(report, "llamacpp-model") && missingCheck(report, "local-gateway") && service.GatewayResponding(ctx) && !service.GatewayReady(ctx) {
 		var err error
 		report, changed, err = offerAirplaneGatewayRestart(ctx, app, service, report, options)
 		if err != nil {
@@ -105,14 +114,14 @@ func runAirplaneSetupWithOptions(ctx context.Context, app *app, options airplane
 		if !changed {
 			return report, nil
 		}
-		if missingCheck(report, "local-gateway") && service.GatewayResponding(ctx) && !service.GatewayReady(ctx) {
+		if checkOK(report, "llamacpp-model") && missingCheck(report, "local-gateway") && service.GatewayResponding(ctx) && !service.GatewayReady(ctx) {
 			if err := app.renderer.Lines(renderAirplaneReport(report)...); err != nil {
 				return report, err
 			}
 			return report, nil
 		}
 	}
-	if missingCheck(report, "local-gateway") {
+	if checkOK(report, "llamacpp-model") && missingCheck(report, "local-gateway") {
 		if _, ok := service.GatewayStartDescription(); !ok && service.GatewayDownloadAvailable() {
 			if yes, err := confirmAirplaneSetup(app, options, fmt.Sprintf("[s46] Local S46 gateway is not installed.\n[s46] Install %s? [Y/n] ", service.GatewayInstallDescription()), true); err != nil {
 				return report, err
@@ -128,7 +137,7 @@ func runAirplaneSetupWithOptions(ctx context.Context, app *app, options airplane
 			}
 		}
 	}
-	if missingCheck(report, "local-gateway") {
+	if checkOK(report, "llamacpp-model") && missingCheck(report, "local-gateway") {
 		if description, ok := service.GatewayStartDescription(); ok {
 			if yes, err := confirmAirplaneSetup(app, options, fmt.Sprintf("[s46] Local S46 gateway is available as %s.\n[s46] Start local gateway now? [Y/n] ", description), true); err != nil {
 				return report, err
@@ -167,14 +176,17 @@ func confirmAirplaneSetup(app *app, options airplaneSetupOptions, prompt string,
 }
 
 func offerAirplaneModelDownload(ctx context.Context, app *app, service airplane.Service, report airplane.Report, options airplaneSetupOptions) (airplane.Report, bool, error) {
-	if yes, err := confirmAirplaneSetup(app, options, fmt.Sprintf("[s46] Download %s (~15 GB)? [Y/n] ", airplane.BackendModel), true); err != nil {
+	if yes, err := confirmAirplaneSetup(app, options, fmt.Sprintf("[s46] Download or verify %s (~15 GB)? [Y/n] ", airplane.BackendModel), true); err != nil {
 		return report, false, err
 	} else if !yes {
 		return report, false, app.renderer.Lines(renderManualModelDownloadInstructions(report, "Model download skipped.")...)
 	}
 
+	if err := app.renderer.Lines("[s46] verifying signed model manifest and local artifact..."); err != nil {
+		return report, false, err
+	}
 	if err := service.PullModel(ctx); err != nil {
-		return report, false, fmt.Errorf("failed to download %s: %w", airplane.BackendModel, err)
+		return report, false, fmt.Errorf("failed to download or verify %s: %w", airplane.BackendModel, err)
 	}
 	return service.Check(ctx), true, nil
 }
@@ -184,8 +196,8 @@ func renderManualModelDownloadInstructions(report airplane.Report, reason string
 	return []string{
 		"[s46] " + reason,
 		fmt.Sprintf("[s46] Download metadata: %s", modelURL),
-		fmt.Sprintf("[s46] Automatic setup verifies the signed manifest and model checksum before writing: %s", report.ModelPath),
-		fmt.Sprintf("[s46] Or set S46_LOCAL_MODEL_PATH=/path/to/%s and rerun `s46 airplane setup` to use an explicit local model.", airplane.GGUFModelFile),
+		fmt.Sprintf("[s46] Automatic setup verifies the signed manifest and model checksum before writing or trusting: %s", report.ModelPath),
+		fmt.Sprintf("[s46] Or set S46_LOCAL_MODEL_PATH=/path/to/%s and rerun `s46 airplane setup`; the file must match the signed S46 manifest.", airplane.GGUFModelFile),
 	}
 }
 
@@ -418,7 +430,7 @@ func validateAirplaneSetupCommandOptions(app *app, options airplaneSetupCommandO
 }
 
 func airplaneRuntimeNeedsRestart(ctx context.Context, app *app, service airplane.Service) bool {
-	if strs.Truthy(app.runtime.Env["S46_AIRPLANE_SKIP_SETUP_CHECKS"]) {
+	if service.SetupChecksSkipped() {
 		return false
 	}
 	runtimeReport := service.LlamacppRuntime(ctx)
@@ -718,13 +730,13 @@ func startAirplaneRuntime(ctx context.Context, app *app, service airplane.Servic
 	if err := service.StartLlamacpp(); err != nil {
 		return fmt.Errorf("could not start llama-server: %w", err)
 	}
-	if !service.LlamacppRunning(ctx) && !strs.Truthy(app.runtime.Env["S46_AIRPLANE_SKIP_SETUP_CHECKS"]) {
+	if !service.LlamacppRunning(ctx) && !service.SetupChecksSkipped() {
 		return fmt.Errorf("llama-server did not become ready; run `s46 airplane setup`")
 	}
 	if err := service.StartGateway(); err != nil {
 		return fmt.Errorf("could not start local S46 gateway: %w", err)
 	}
-	if !strs.Truthy(app.runtime.Env["S46_AIRPLANE_SKIP_SETUP_CHECKS"]) && !waitForGatewayReady(ctx, service, 30*time.Second) {
+	if !service.SetupChecksSkipped() && !waitForGatewayReady(ctx, service, 30*time.Second) {
 		return fmt.Errorf("local S46 gateway did not become ready; check ~/.cache/s46/s46-api-airplane.log or rerun `s46 airplane setup`")
 	}
 	return nil

@@ -96,7 +96,7 @@ func TestInstallRejectsRedirectToUntrustedHost(t *testing.T) {
 	}
 }
 
-func TestVerifyInstalledStrictDetectsTampering(t *testing.T) {
+func TestVerifyInstalledDetectsTampering(t *testing.T) {
 	fixture := newModelFixture(t, []byte("model"))
 	server := fixture.server(t, nil)
 	defer server.Close()
@@ -111,13 +111,18 @@ func TestVerifyInstalledStrictDetectsTampering(t *testing.T) {
 		t.Fatal(err)
 	}
 	ok, err := VerifyInstalled(context.Background(), InstallRequest{Env: env, ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, TargetPath: target})
-	if err != nil || !ok {
-		t.Fatalf("quick receipt verification should pass: ok=%v err=%v", ok, err)
-	}
-	env["S46_AIRPLANE_VERIFY_MODEL"] = "1"
-	ok, err = VerifyInstalled(context.Background(), InstallRequest{Env: env, ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, TargetPath: target})
 	if err != nil || ok {
-		t.Fatalf("strict verification should fail: ok=%v err=%v", ok, err)
+		t.Fatalf("verification should fail: ok=%v err=%v", ok, err)
+	}
+	if err := Install(context.Background(), InstallRequest{Env: env, ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, TargetPath: target, HTTPClient: server.Client()}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "model" {
+		t.Fatalf("Install should replace tampered artifact, got %q", got)
 	}
 }
 
