@@ -12,7 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sovereign46/s46-cli/internal/strs"
+	"github.com/sovereign46/cli/internal/models"
+	"github.com/sovereign46/cli/internal/strs"
 )
 
 type Check struct {
@@ -139,7 +140,11 @@ func (s Service) modelDownloaded(ctx context.Context) bool {
 	if downloaded, ok := s.seamModelDownloaded(); ok {
 		return downloaded
 	}
-	return fileExists(s.modelPath())
+	if s.explicitModelPath() != "" {
+		return fileExists(s.modelPath())
+	}
+	ok, err := models.VerifyInstalled(ctx, models.InstallRequest{Env: s.Env, ModelID: LocalModelID, BackendModel: s.backendModel(), TargetPath: s.modelPath()})
+	return err == nil && ok
 }
 
 func (s Service) modelProbeWithNotice(ctx context.Context) (bool, string) {

@@ -38,7 +38,7 @@ func TestCompareVersions(t *testing.T) {
 
 func TestCheckUsesGitHubReleaseAndHomebrewInstruction(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, `{"tag_name":"v0.2.0","html_url":"https://github.com/sovereign46/s46-cli/releases/tag/v0.2.0","assets":[{"name":"s46_0.2.0_%s_%s.tar.gz"}]}`, runtime.GOOS, runtime.GOARCH)
+		fmt.Fprintf(w, `{"tag_name":"v0.2.0","html_url":"https://github.com/sovereign46/cli/releases/tag/v0.2.0","assets":[{"name":"s46_0.2.0_%s_%s.tar.gz"}]}`, runtime.GOOS, runtime.GOARCH)
 	}))
 	defer server.Close()
 
@@ -78,7 +78,7 @@ func TestCheckReportsMissingRelease(t *testing.T) {
 
 func TestCheckDoesNotCompareDevVersion(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"tag_name":"v0.2.0","html_url":"https://github.com/sovereign46/s46-cli/releases/tag/v0.2.0"}`))
+		_, _ = w.Write([]byte(`{"tag_name":"v0.2.0","html_url":"https://github.com/sovereign46/cli/releases/tag/v0.2.0"}`))
 	}))
 	defer server.Close()
 

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sovereign46/s46-cli/internal/strs"
+	"github.com/sovereign46/cli/internal/strs"
 )
 
 type LlamacppSetting struct {

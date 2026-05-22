@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/sovereign46/s46-cli/internal/strs"
+	"github.com/sovereign46/cli/internal/strs"
 )
 
 func (s Service) setEnv(key string, value string) {
@@ -22,14 +22,6 @@ func (s Service) seamInstallLlamacpp() (handled bool, err error) {
 		return false, nil
 	}
 	s.setEnv("S46_TEST_LLAMACPP_PATH", "/opt/homebrew/bin/llama-server")
-	return true, nil
-}
-
-func (s Service) seamInstallHuggingFaceCLI() (handled bool, err error) {
-	if !strs.Truthy(strs.EnvValue(s.Env, "S46_TEST_INSTALL_HF_CLI_OK")) {
-		return false, nil
-	}
-	s.setEnv("S46_TEST_HF_CLI_PATH", "/opt/homebrew/bin/hf")
 	return true, nil
 }
 
@@ -142,14 +134,6 @@ func (s Service) seamHomebrewAvailable() (available bool, ok bool) {
 
 func (s Service) seamLlamacppPath() (path string, installed bool, ok bool) {
 	raw := strings.TrimSpace(strs.FirstNonEmpty(strs.EnvValue(s.Env, "S46_TEST_LLAMACPP_PATH"), strs.EnvValue(s.Env, "S46_TEST_OLLAMA_PATH")))
-	if raw == "" {
-		return "", false, false
-	}
-	return raw, raw != "missing", true
-}
-
-func (s Service) seamHuggingFaceCLIPath() (path string, installed bool, ok bool) {
-	raw := strings.TrimSpace(strs.EnvValue(s.Env, "S46_TEST_HF_CLI_PATH"))
 	if raw == "" {
 		return "", false, false
 	}

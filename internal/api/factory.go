@@ -3,7 +3,7 @@ package api
 import (
 	"errors"
 
-	"github.com/sovereign46/s46-cli/internal/strs"
+	"github.com/sovereign46/cli/internal/strs"
 )
 
 const (

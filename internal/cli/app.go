@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/sovereign46/s46-cli/internal/auth"
-	"github.com/sovereign46/s46-cli/internal/config"
-	sessioncmd "github.com/sovereign46/s46-cli/internal/session"
+	"github.com/sovereign46/cli/internal/auth"
+	"github.com/sovereign46/cli/internal/config"
+	sessioncmd "github.com/sovereign46/cli/internal/session"
 )
 
 type inputReader struct {

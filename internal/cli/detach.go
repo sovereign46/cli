@@ -6,7 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/sovereign46/s46-cli/internal/api"
+	"github.com/sovereign46/cli/internal/api"
 )
 
 func detachCommand(runtime Runtime, opts *options) *cobra.Command {

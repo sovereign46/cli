@@ -6,10 +6,10 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/sovereign46/s46-cli/internal/config"
-	"github.com/sovereign46/s46-cli/internal/harness"
-	"github.com/sovereign46/s46-cli/internal/output"
-	"github.com/sovereign46/s46-cli/internal/strs"
+	"github.com/sovereign46/cli/internal/config"
+	"github.com/sovereign46/cli/internal/harness"
+	"github.com/sovereign46/cli/internal/output"
+	"github.com/sovereign46/cli/internal/strs"
 )
 
 func teamsCommand(runtime Runtime, opts *options) *cobra.Command {

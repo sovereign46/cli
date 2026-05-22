@@ -7,7 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	sessioncmd "github.com/sovereign46/s46-cli/internal/session"
+	sessioncmd "github.com/sovereign46/cli/internal/session"
 )
 
 func runCommand(runtime Runtime, opts *options) *cobra.Command {

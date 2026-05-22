@@ -6,7 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/sovereign46/s46-cli/internal/harness"
+	"github.com/sovereign46/cli/internal/harness"
 )
 
 func disconnectCommand(runtime Runtime, opts *options) *cobra.Command {

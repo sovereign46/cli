@@ -12,14 +12,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sovereign46/s46-cli/internal/airplane"
-	"github.com/sovereign46/s46-cli/internal/api"
-	"github.com/sovereign46/s46-cli/internal/auth"
-	"github.com/sovereign46/s46-cli/internal/config"
-	"github.com/sovereign46/s46-cli/internal/harness"
-	"github.com/sovereign46/s46-cli/internal/harness/pi"
-	"github.com/sovereign46/s46-cli/internal/keyring"
-	sharepkg "github.com/sovereign46/s46-cli/internal/share"
+	"github.com/sovereign46/cli/internal/airplane"
+	"github.com/sovereign46/cli/internal/api"
+	"github.com/sovereign46/cli/internal/auth"
+	"github.com/sovereign46/cli/internal/config"
+	"github.com/sovereign46/cli/internal/harness"
+	"github.com/sovereign46/cli/internal/harness/pi"
+	"github.com/sovereign46/cli/internal/keyring"
+	sharepkg "github.com/sovereign46/cli/internal/share"
 )
 
 func TestRunStoresSessionAndListReturnsLocalState(t *testing.T) {

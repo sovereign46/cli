@@ -3,8 +3,8 @@ package standard
 import (
 	"context"
 
-	"github.com/sovereign46/s46-cli/internal/harness"
-	"github.com/sovereign46/s46-cli/internal/share"
+	"github.com/sovereign46/cli/internal/harness"
+	"github.com/sovereign46/cli/internal/share"
 )
 
 type Adapter struct{}

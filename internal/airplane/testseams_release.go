@@ -3,7 +3,6 @@
 package airplane
 
 func (Service) seamInstallLlamacpp() (bool, error)         { return false, nil }
-func (Service) seamInstallHuggingFaceCLI() (bool, error)   { return false, nil }
 func (Service) seamPullModel() (bool, error)               { return false, nil }
 func (Service) seamStartLlamacpp() (bool, error)           { return false, nil }
 func (Service) seamStartGateway() (bool, error)            { return false, nil }
@@ -16,10 +15,7 @@ func (Service) seamGatewayResponding() (bool, bool)        { return false, false
 func (Service) seamGatewayDownloadAvailable() (bool, bool) { return false, false }
 func (Service) seamHomebrewAvailable() (bool, bool)        { return false, false }
 func (Service) seamLlamacppPath() (string, bool, bool)     { return "", false, false }
-func (Service) seamHuggingFaceCLIPath() (string, bool, bool) {
-	return "", false, false
-}
-func (Service) seamGatewayBinary() (string, bool, bool) { return "", false, false }
+func (Service) seamGatewayBinary() (string, bool, bool)    { return "", false, false }
 func (Service) seamLlamacppServeProcess() (llamacppProcess, bool, bool) {
 	return llamacppProcess{}, false, false
 }

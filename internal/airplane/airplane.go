@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sovereign46/s46-cli/internal/strs"
+	"github.com/sovereign46/cli/internal/strs"
 )
 
 const (
@@ -19,7 +19,6 @@ const (
 	LocalLlamacppURL           = "http://127.0.0.1:8081"
 	LocalModelID               = "s46/devstral-small-2-24b"
 	BackendModel               = "devstral-small-2:24b-instruct-2512-q4_K_M"
-	HuggingFaceRepo            = "unsloth/Devstral-Small-2-24B-Instruct-2512-GGUF"
 	GGUFModelFile              = "Devstral-Small-2-24B-Instruct-2512-Q4_K_M.gguf"
 	GatewayBinaryName          = "s46-api"
 	DefaultGatewayRepo         = "sovereign46/api"

@@ -12,13 +12,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/sovereign46/s46-cli/internal/airplane"
-	"github.com/sovereign46/s46-cli/internal/api"
-	"github.com/sovereign46/s46-cli/internal/config"
-	"github.com/sovereign46/s46-cli/internal/harness"
-	"github.com/sovereign46/s46-cli/internal/harness/pi"
-	"github.com/sovereign46/s46-cli/internal/strs"
-	"github.com/sovereign46/s46-cli/internal/workspace"
+	"github.com/sovereign46/cli/internal/airplane"
+	"github.com/sovereign46/cli/internal/api"
+	"github.com/sovereign46/cli/internal/config"
+	"github.com/sovereign46/cli/internal/harness"
+	"github.com/sovereign46/cli/internal/harness/pi"
+	"github.com/sovereign46/cli/internal/strs"
+	"github.com/sovereign46/cli/internal/workspace"
 )
 
 type airplaneSetupOptions struct {
@@ -173,45 +173,19 @@ func offerAirplaneModelDownload(ctx context.Context, app *app, service airplane.
 		return report, false, app.renderer.Lines(renderManualModelDownloadInstructions(report, "Model download skipped.")...)
 	}
 
-	if !service.HuggingFaceCLIAvailable() {
-		if _, err := offerHuggingFaceCLIInstall(ctx, app, service, options); err != nil {
-			return report, false, err
-		}
-	}
-	if !service.HuggingFaceCLIAvailable() {
-		return report, false, app.renderer.Lines(renderManualModelDownloadInstructions(report, "Hugging Face CLI is not available, so setup cannot download the model automatically.")...)
-	}
 	if err := service.PullModel(ctx); err != nil {
 		return report, false, fmt.Errorf("failed to download %s: %w", airplane.BackendModel, err)
 	}
 	return service.Check(ctx), true, nil
 }
 
-func offerHuggingFaceCLIInstall(ctx context.Context, app *app, service airplane.Service, options airplaneSetupOptions) (bool, error) {
-	if !service.HomebrewAvailable() {
-		return false, nil
-	}
-	if yes, err := confirmAirplaneSetup(app, options, "[s46] Hugging Face CLI is required to download the model automatically.\n[s46] Install Hugging Face CLI with Homebrew? [Y/n] ", true); err != nil {
-		return false, err
-	} else if !yes {
-		return false, nil
-	}
-	if err := app.renderer.Lines("[s46] installing Hugging Face CLI with Homebrew..."); err != nil {
-		return false, err
-	}
-	if err := service.InstallHuggingFaceCLI(ctx); err != nil {
-		return false, fmt.Errorf("failed to install Hugging Face CLI with Homebrew: %w", err)
-	}
-	return true, nil
-}
-
 func renderManualModelDownloadInstructions(report airplane.Report, reason string) []string {
-	modelURL := fmt.Sprintf("https://huggingface.co/%s/resolve/main/%s", airplane.HuggingFaceRepo, airplane.GGUFModelFile)
+	modelURL := "https://models.s46.dev/models/v1/s46/devstral-small-2-24b/manifest.json"
 	return []string{
 		"[s46] " + reason,
-		fmt.Sprintf("[s46] Download manually: %s", modelURL),
-		fmt.Sprintf("[s46] Place it at: %s", report.ModelPath),
-		fmt.Sprintf("[s46] Or set S46_LOCAL_MODEL_PATH=/path/to/%s and rerun `s46 airplane setup`.", airplane.GGUFModelFile),
+		fmt.Sprintf("[s46] Download metadata: %s", modelURL),
+		fmt.Sprintf("[s46] Automatic setup verifies the signed manifest and model checksum before writing: %s", report.ModelPath),
+		fmt.Sprintf("[s46] Or set S46_LOCAL_MODEL_PATH=/path/to/%s and rerun `s46 airplane setup` to use an explicit local model.", airplane.GGUFModelFile),
 	}
 }
 

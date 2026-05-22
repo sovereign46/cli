@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sovereign46/s46-cli/internal/airplane"
-	"github.com/sovereign46/s46-cli/internal/api"
-	"github.com/sovereign46/s46-cli/internal/harness"
+	"github.com/sovereign46/cli/internal/airplane"
+	"github.com/sovereign46/cli/internal/api"
+	"github.com/sovereign46/cli/internal/harness"
 )
 
 func TestPlanConnectUsesAirplaneModelLimits(t *testing.T) {

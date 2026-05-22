@@ -16,9 +16,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sovereign46/s46-cli/internal/airplane"
-	"github.com/sovereign46/s46-cli/internal/api"
-	"github.com/sovereign46/s46-cli/internal/config"
+	"github.com/sovereign46/cli/internal/airplane"
+	"github.com/sovereign46/cli/internal/api"
+	"github.com/sovereign46/cli/internal/config"
 )
 
 func TestResolveConnectModePrecedence(t *testing.T) {
@@ -342,7 +342,6 @@ func TestAskRunsAirplaneSetupWhenAccepted(t *testing.T) {
 	env["S46_TEST_BREW_PATH"] = "/opt/homebrew/bin/brew"
 	env["S46_TEST_INSTALL_LLAMACPP_OK"] = "1"
 	env["S46_TEST_MODEL_DOWNLOADED"] = "0"
-	env["S46_TEST_HF_CLI_PATH"] = "/opt/homebrew/bin/hf"
 	env["S46_TEST_PULL_MODEL_OK"] = "1"
 	env["S46_TEST_LLAMACPP_RUNNING"] = "0"
 	env["S46_TEST_START_LLAMACPP_OK"] = "1"
@@ -619,7 +618,7 @@ func TestLoginTellsUserToCheckEmail(t *testing.T) {
 func TestUpdateCommandUsesHomebrewInstruction(t *testing.T) {
 	env := testEnv(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"tag_name":"v999.0.0","html_url":"https://github.com/sovereign46/s46-cli/releases/tag/v999.0.0"}`))
+		_, _ = w.Write([]byte(`{"tag_name":"v999.0.0","html_url":"https://github.com/sovereign46/cli/releases/tag/v999.0.0"}`))
 	}))
 	defer server.Close()
 	env["S46_UPDATE_LATEST_URL"] = server.URL
@@ -635,7 +634,7 @@ func TestStartupUpdateCheckPrintsHomebrewInstruction(t *testing.T) {
 	env := testEnv(t)
 	delete(env, "S46_SKIP_STARTUP_UPDATE_CHECK")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"tag_name":"v999.0.0","html_url":"https://github.com/sovereign46/s46-cli/releases/tag/v999.0.0"}`))
+		_, _ = w.Write([]byte(`{"tag_name":"v999.0.0","html_url":"https://github.com/sovereign46/cli/releases/tag/v999.0.0"}`))
 	}))
 	defer server.Close()
 	env["S46_UPDATE_LATEST_URL"] = server.URL
@@ -966,7 +965,6 @@ func TestAirplaneSetupContinuesAfterInstallingLlamacpp(t *testing.T) {
 	env["S46_TEST_INSTALL_LLAMACPP_OK"] = "1"
 	env["S46_TEST_START_LLAMACPP_OK"] = "1"
 	env["S46_TEST_PULL_MODEL_OK"] = "1"
-	env["S46_TEST_HF_CLI_PATH"] = "/opt/homebrew/bin/hf"
 	env["S46_TEST_LLAMACPP_RUNNING"] = "0"
 	env["S46_TEST_MODEL_DOWNLOADED"] = "0"
 	env["S46_TEST_MODEL_PROBE"] = "0"
@@ -989,47 +987,14 @@ func TestAirplaneSetupContinuesAfterInstallingLlamacpp(t *testing.T) {
 	}
 }
 
-func TestAirplaneSetupInstallsHuggingFaceCLIOnlyForModelDownload(t *testing.T) {
+func TestAirplaneSetupDownloadsModelWithoutExternalDownloader(t *testing.T) {
 	env := testEnv(t)
 	delete(env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")
 	env["S46_TEST_MEMORY_BYTES"] = "68000000000"
 	env["S46_TEST_FREE_DISK_BYTES"] = "61000000000"
 	env["S46_TEST_LLAMACPP_PATH"] = "/opt/homebrew/bin/llama-server"
-	env["S46_TEST_HF_CLI_PATH"] = "missing"
 	env["S46_TEST_BREW_PATH"] = "brew"
-	env["S46_TEST_INSTALL_HF_CLI_OK"] = "1"
 	env["S46_TEST_PULL_MODEL_OK"] = "1"
-	env["S46_TEST_LLAMACPP_RUNNING"] = "0"
-	env["S46_TEST_MODEL_DOWNLOADED"] = "0"
-	env["S46_TEST_MODEL_PROBE"] = "0"
-	env["S46_TEST_GATEWAY_READY"] = "0"
-	env["S46_TEST_GATEWAY_DOWNLOAD_AVAILABLE"] = "0"
-
-	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\nY\nn\n"), "airplane", "setup"))
-	for _, want := range []string{
-		"Download devstral-small-2:24b-instruct-2512-q4_K_M",
-		"[s46] Hugging Face CLI is required to download the model automatically.",
-		"[s46] Install Hugging Face CLI with Homebrew? [Y/n]",
-		"[s46] installing Hugging Face CLI with Homebrew...",
-		"[s46] llama-server is installed but not running.",
-	} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("setup output missing %q:\n%s", want, out)
-		}
-	}
-	if strings.Contains(out, "installing llama.cpp with Homebrew") {
-		t.Fatalf("setup should not reinstall llama.cpp when only the model downloader is missing:\n%s", out)
-	}
-}
-
-func TestAirplaneSetupShowsManualModelInstructionsWhenHuggingFaceCLIIsSkipped(t *testing.T) {
-	env := testEnv(t)
-	delete(env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")
-	env["S46_TEST_MEMORY_BYTES"] = "68000000000"
-	env["S46_TEST_FREE_DISK_BYTES"] = "61000000000"
-	env["S46_TEST_LLAMACPP_PATH"] = "/opt/homebrew/bin/llama-server"
-	env["S46_TEST_HF_CLI_PATH"] = "missing"
-	env["S46_TEST_BREW_PATH"] = "brew"
 	env["S46_TEST_LLAMACPP_RUNNING"] = "0"
 	env["S46_TEST_MODEL_DOWNLOADED"] = "0"
 	env["S46_TEST_MODEL_PROBE"] = "0"
@@ -1038,9 +1003,38 @@ func TestAirplaneSetupShowsManualModelInstructionsWhenHuggingFaceCLIIsSkipped(t 
 
 	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\nn\n"), "airplane", "setup"))
 	for _, want := range []string{
-		"[s46] Hugging Face CLI is required to download the model automatically.",
-		"[s46] Hugging Face CLI is not available, so setup cannot download the model automatically.",
-		"[s46] Download manually: https://huggingface.co/unsloth/Devstral-Small-2-24B-Instruct-2512-GGUF/resolve/main/Devstral-Small-2-24B-Instruct-2512-Q4_K_M.gguf",
+		"Download devstral-small-2:24b-instruct-2512-q4_K_M",
+		"[s46] llama-server is installed but not running.",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("setup output missing %q:\n%s", want, out)
+		}
+	}
+	for _, unexpected := range []string{"Hugging Face", "installing llama.cpp with Homebrew"} {
+		if strings.Contains(out, unexpected) {
+			t.Fatalf("setup output should not contain %q:\n%s", unexpected, out)
+		}
+	}
+}
+
+func TestAirplaneSetupShowsManualModelInstructionsWhenDownloadIsSkipped(t *testing.T) {
+	env := testEnv(t)
+	delete(env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")
+	env["S46_TEST_MEMORY_BYTES"] = "68000000000"
+	env["S46_TEST_FREE_DISK_BYTES"] = "61000000000"
+	env["S46_TEST_LLAMACPP_PATH"] = "/opt/homebrew/bin/llama-server"
+	env["S46_TEST_BREW_PATH"] = "brew"
+	env["S46_TEST_LLAMACPP_RUNNING"] = "0"
+	env["S46_TEST_MODEL_DOWNLOADED"] = "0"
+	env["S46_TEST_MODEL_PROBE"] = "0"
+	env["S46_TEST_GATEWAY_READY"] = "0"
+	env["S46_TEST_GATEWAY_DOWNLOAD_AVAILABLE"] = "0"
+
+	out := requireOK(t, runWithStdin(t, env, strings.NewReader("n\n"), "airplane", "setup"))
+	for _, want := range []string{
+		"[s46] Model download skipped.",
+		"[s46] Download metadata: https://models.s46.dev/models/v1/s46/devstral-small-2-24b/manifest.json",
+		"[s46] Automatic setup verifies the signed manifest and model checksum before writing:",
 		"[s46] Or set S46_LOCAL_MODEL_PATH=/path/to/Devstral-Small-2-24B-Instruct-2512-Q4_K_M.gguf",
 	} {
 		if !strings.Contains(out, want) {

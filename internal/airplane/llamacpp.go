@@ -13,7 +13,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/sovereign46/s46-cli/internal/strs"
+	"github.com/sovereign46/cli/internal/models"
+	"github.com/sovereign46/cli/internal/strs"
 )
 
 type LlamacppRuntimeSetting struct {
@@ -43,18 +44,6 @@ func (s Service) InstallLlamacpp(ctx context.Context) error {
 	return s.runHomebrewInstall(ctx, "llama.cpp")
 }
 
-func (s Service) InstallHuggingFaceCLI(ctx context.Context) error {
-	if handled, err := s.seamInstallHuggingFaceCLI(); handled {
-		return err
-	}
-	return s.runHomebrewInstall(ctx, "hf")
-}
-
-func (s Service) HuggingFaceCLIAvailable() bool {
-	_, err := s.huggingFaceCLI()
-	return err == nil
-}
-
 func (s Service) PullModel(ctx context.Context) error {
 	if handled, err := s.seamPullModel(); handled {
 		return err
@@ -62,18 +51,13 @@ func (s Service) PullModel(ctx context.Context) error {
 	if err := s.ensureModelDir(); err != nil {
 		return err
 	}
-	if fileExists(s.modelPath()) {
-		return nil
-	}
-	hf, err := s.huggingFaceCLI()
-	if err != nil {
-		return err
-	}
-	cmd := exec.CommandContext(ctx, hf, "download", HuggingFaceRepo, GGUFModelFile, "--local-dir", s.modelDir())
-	cmd.Env = s.processEnv()
-	cmd.Stdout = s.Stdout
-	cmd.Stderr = s.Stderr
-	return cmd.Run()
+	return models.Install(ctx, models.InstallRequest{
+		Env:          s.Env,
+		ModelID:      LocalModelID,
+		BackendModel: s.backendModel(),
+		TargetPath:   s.modelPath(),
+		HTTPClient:   s.Client,
+	})
 }
 
 func (s Service) StartLlamacpp() error {
@@ -129,28 +113,6 @@ func (s Service) runHomebrewInstall(ctx context.Context, formula string) error {
 	cmd.Stdout = s.Stdout
 	cmd.Stderr = s.Stderr
 	return cmd.Run()
-}
-
-func (s Service) huggingFaceCLI() (string, error) {
-	if path, installed, ok := s.seamHuggingFaceCLIPath(); ok {
-		if installed {
-			return path, nil
-		}
-		return "", fmt.Errorf("hf or huggingface-cli is required to download the model")
-	}
-	return huggingFaceCLI(s.Env)
-}
-
-func huggingFaceCLI(env map[string]string) (string, error) {
-	if path := strings.TrimSpace(strs.EnvValue(env, "S46_HF_CLI")); path != "" {
-		return path, nil
-	}
-	for _, name := range []string{"hf", "huggingface-cli"} {
-		if path, err := exec.LookPath(name); err == nil {
-			return path, nil
-		}
-	}
-	return "", fmt.Errorf("hf or huggingface-cli is required to download the model")
 }
 
 func (s Service) llamacppPath() (string, bool) {
@@ -275,13 +237,20 @@ func (s Service) modelDir() string {
 }
 
 func (s Service) modelPath() string {
+	if path := s.explicitModelPath(); path != "" {
+		return path
+	}
+	return filepath.Join(s.modelDir(), GGUFModelFile)
+}
+
+func (s Service) explicitModelPath() string {
 	if path := strings.TrimSpace(strs.EnvValue(s.Env, "S46_LOCAL_MODEL_PATH")); path != "" {
 		return path
 	}
 	if path := strings.TrimSpace(strs.EnvValue(s.Env, "S46_AIRPLANE_MODEL_PATH")); path != "" {
 		return path
 	}
-	return filepath.Join(s.modelDir(), GGUFModelFile)
+	return ""
 }
 
 func fileExists(path string) bool {

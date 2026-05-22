@@ -14,8 +14,8 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
-	"github.com/sovereign46/s46-cli/internal/airplane"
-	askpkg "github.com/sovereign46/s46-cli/internal/ask"
+	"github.com/sovereign46/cli/internal/airplane"
+	askpkg "github.com/sovereign46/cli/internal/ask"
 )
 
 type askCommandResult struct {

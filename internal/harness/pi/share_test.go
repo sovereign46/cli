@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sovereign46/s46-cli/internal/api"
-	"github.com/sovereign46/s46-cli/internal/harness"
-	"github.com/sovereign46/s46-cli/internal/share"
+	"github.com/sovereign46/cli/internal/api"
+	"github.com/sovereign46/cli/internal/harness"
+	"github.com/sovereign46/cli/internal/share"
 )
 
 func TestShareArtifactIngestsPiJSONL(t *testing.T) {

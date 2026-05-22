@@ -75,17 +75,6 @@ func TestInstallLlamacppInstallsOnlyLlamacppFormula(t *testing.T) {
 	}
 }
 
-func TestInstallHuggingFaceCLIInstallsHFFormula(t *testing.T) {
-	logPath := fakeBrew(t)
-
-	if err := (Service{}).InstallHuggingFaceCLI(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if got := readText(t, logPath); strings.TrimSpace(got) != "install hf" {
-		t.Fatalf("unexpected brew args: %q", got)
-	}
-}
-
 func TestLogFilesUseExplicitLogDir(t *testing.T) {
 	logDir := t.TempDir()
 	files := Service{Env: map[string]string{"S46_LOG_DIR": logDir}}.LogFiles()

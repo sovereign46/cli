@@ -6,8 +6,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/sovereign46/s46-cli/internal/updater"
-	"github.com/sovereign46/s46-cli/internal/version"
+	"github.com/sovereign46/cli/internal/updater"
+	"github.com/sovereign46/cli/internal/version"
 )
 
 func updateCommand(runtime Runtime, opts *options) *cobra.Command {

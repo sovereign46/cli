@@ -18,6 +18,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Changed inferred `s46 share` output to show the short session ID, harness, model, and prompt for latest local sessions.
 - Changed `s46 share` with no session argument to share the latest listed session.
 - Changed airplane gateway setup to install verified release archives from the `sovereign46/api` repository.
+- Changed airplane model setup to download from the signed S46 model registry at `models.s46.dev` instead of Hugging Face.
 - Changed interactive harness selection to default to `claude-code`.
 - Changed `s46 airplane setup` to prompt for the harness to configure when enabling airplane mode interactively.
 - Changed airplane mode to configure local Ollama and supported harnesses with 64k context, 4096 max output tokens, one parallel request, one loaded model, Flash Attention, q8_0 KV cache, 10m keep-alive, and 10m gateway write-timeout defaults, overridable with environment variables.
@@ -39,6 +40,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Security
 
+- Required Ed25519 manifest signature verification plus SHA-256 artifact verification before installing downloaded airplane models.
 - Required SHA-256 verification before installing downloaded S46 gateway release archives.
 - Disabled the gateway source clone fallback in release builds.
 - Prevented unavailable mock API mode from falling through to production API traffic.
