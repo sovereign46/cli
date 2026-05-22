@@ -35,6 +35,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Fixed `make shell` to write S46 airplane logs to a stable host log directory via `S46_LOG_DIR` so logs survive temporary shell cleanup.
 - Fixed `make shell` to seed disposable Pi, Claude Code, and Codex config copies so harnesses keep normal model/provider settings without risking host config files.
 - Fixed `s46 airplane mode off` to remove local-only airplane teams instead of inventing hosted `*.s46.dev` team endpoints.
+- Fixed `s46 airplane setup` to install llama.cpp separately from the Hugging Face CLI, reuse an existing `hf` downloader, and show manual GGUF placement instructions when automatic model download is skipped.
 
 ### Security
 

@@ -64,6 +64,28 @@ func TestEnsureModelDirCreatesConfiguredDirectory(t *testing.T) {
 	}
 }
 
+func TestInstallLlamacppInstallsOnlyLlamacppFormula(t *testing.T) {
+	logPath := fakeBrew(t)
+
+	if err := (Service{}).InstallLlamacpp(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := readText(t, logPath); strings.TrimSpace(got) != "install llama.cpp" {
+		t.Fatalf("unexpected brew args: %q", got)
+	}
+}
+
+func TestInstallHuggingFaceCLIInstallsHFFormula(t *testing.T) {
+	logPath := fakeBrew(t)
+
+	if err := (Service{}).InstallHuggingFaceCLI(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := readText(t, logPath); strings.TrimSpace(got) != "install hf" {
+		t.Fatalf("unexpected brew args: %q", got)
+	}
+}
+
 func TestLogFilesUseExplicitLogDir(t *testing.T) {
 	logDir := t.TempDir()
 	files := Service{Env: map[string]string{"S46_LOG_DIR": logDir}}.LogFiles()
@@ -388,6 +410,25 @@ func writeExecutable(t *testing.T, path string, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func fakeBrew(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "brew.log")
+	t.Setenv("BREW_LOG", logPath)
+	writeExecutable(t, filepath.Join(dir, "brew"), "#!/bin/sh\necho \"$@\" > \"$BREW_LOG\"\n")
+	t.Setenv("PATH", dir)
+	return logPath
+}
+
+func readText(t *testing.T, path string) string {
+	t.Helper()
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(content)
 }
 
 func sha256Hex(content []byte) string {

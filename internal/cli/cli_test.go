@@ -303,6 +303,72 @@ func TestAskRunsShellCommandsAfterConfirmation(t *testing.T) {
 	}
 }
 
+func TestAskOffersAirplaneSetupWhenInteractive(t *testing.T) {
+	env := testEnv(t)
+	delete(env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")
+	env["S46_TEST_MEMORY_BYTES"] = "64000000000"
+	env["S46_TEST_FREE_DISK_BYTES"] = "30000000000"
+	env["S46_TEST_OLLAMA_PATH"] = "missing"
+	env["S46_TEST_OLLAMA_RUNNING"] = "0"
+	env["S46_TEST_GATEWAY_BINARY"] = "missing"
+	env["S46_TEST_GATEWAY_READY"] = "0"
+	env["S46_TEST_MODEL_DOWNLOADED"] = "0"
+	env["S46_TEST_MODEL_PROBE"] = "0"
+
+	result := runWithStdin(t, env, strings.NewReader("n\n"), "ask", "can I code offline?")
+	if result.err == nil || !strings.Contains(result.err.Error(), "local model setup is incomplete") || !strings.Contains(result.err.Error(), "s46 airplane setup") {
+		t.Fatalf("expected local runtime error, got %#v", result)
+	}
+	for _, want := range []string{
+		"[s46] ask uses the local S46 model.",
+		"[s46] local model setup is incomplete.",
+		"[s46] Install airplane mode now? [Y/n] ",
+	} {
+		if !strings.Contains(result.stdout, want) {
+			t.Fatalf("ask setup prompt missing %q:\n%s", want, result.stdout)
+		}
+	}
+	if strings.Contains(result.stdout, "airplane setup: checking") {
+		t.Fatalf("ask should not run setup after a decline:\n%s", result.stdout)
+	}
+}
+
+func TestAskRunsAirplaneSetupWhenAccepted(t *testing.T) {
+	env := testEnv(t)
+	delete(env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")
+	env["S46_TEST_MEMORY_BYTES"] = "64000000000"
+	env["S46_TEST_FREE_DISK_BYTES"] = "30000000000"
+	env["S46_TEST_LLAMACPP_PATH"] = "missing"
+	env["S46_TEST_BREW_PATH"] = "/opt/homebrew/bin/brew"
+	env["S46_TEST_INSTALL_LLAMACPP_OK"] = "1"
+	env["S46_TEST_MODEL_DOWNLOADED"] = "0"
+	env["S46_TEST_HF_CLI_PATH"] = "/opt/homebrew/bin/hf"
+	env["S46_TEST_PULL_MODEL_OK"] = "1"
+	env["S46_TEST_LLAMACPP_RUNNING"] = "0"
+	env["S46_TEST_START_LLAMACPP_OK"] = "1"
+	env["S46_TEST_GATEWAY_READY"] = "0"
+	env["S46_TEST_GATEWAY_DOWNLOAD_AVAILABLE"] = "1"
+	env["S46_TEST_INSTALL_GATEWAY_OK"] = "1"
+	env["S46_TEST_START_GATEWAY_OK"] = "1"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		content := `{"answer":"Airplane ask is ready.","commands":[]}`
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": content}}}})
+	}))
+	defer server.Close()
+	env["S46_AIRPLANE_GATEWAY_URL"] = server.URL
+
+	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\nY\nY\nY\nY\nY\n"), "ask", "can I code offline?"))
+	for _, want := range []string{
+		"[s46] Install airplane mode now? [Y/n] ",
+		"[s46] airplane setup: ready",
+		"Airplane ask is ready.",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("ask setup output missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestAskRequiresLocalRuntime(t *testing.T) {
 	env := testEnv(t)
 	delete(env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")
@@ -318,6 +384,9 @@ func TestAskRequiresLocalRuntime(t *testing.T) {
 	result := run(t, env, "ask", "can I code offline?")
 	if result.err == nil || !strings.Contains(result.err.Error(), "local model setup is incomplete") || !strings.Contains(result.err.Error(), "s46 airplane setup") {
 		t.Fatalf("expected local runtime error, got %#v", result)
+	}
+	if result.stdout != "" {
+		t.Fatalf("non-interactive ask should not prompt, got stdout:\n%s", result.stdout)
 	}
 }
 
@@ -897,6 +966,7 @@ func TestAirplaneSetupContinuesAfterInstallingLlamacpp(t *testing.T) {
 	env["S46_TEST_INSTALL_LLAMACPP_OK"] = "1"
 	env["S46_TEST_START_LLAMACPP_OK"] = "1"
 	env["S46_TEST_PULL_MODEL_OK"] = "1"
+	env["S46_TEST_HF_CLI_PATH"] = "/opt/homebrew/bin/hf"
 	env["S46_TEST_LLAMACPP_RUNNING"] = "0"
 	env["S46_TEST_MODEL_DOWNLOADED"] = "0"
 	env["S46_TEST_MODEL_PROBE"] = "0"
@@ -912,6 +982,66 @@ func TestAirplaneSetupContinuesAfterInstallingLlamacpp(t *testing.T) {
 		"Download devstral-small-2:24b-instruct-2512-q4_K_M",
 		"[s46] Start local gateway now? [Y/n]",
 		"[s46] airplane setup: ready",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("setup output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestAirplaneSetupInstallsHuggingFaceCLIOnlyForModelDownload(t *testing.T) {
+	env := testEnv(t)
+	delete(env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")
+	env["S46_TEST_MEMORY_BYTES"] = "68000000000"
+	env["S46_TEST_FREE_DISK_BYTES"] = "61000000000"
+	env["S46_TEST_LLAMACPP_PATH"] = "/opt/homebrew/bin/llama-server"
+	env["S46_TEST_HF_CLI_PATH"] = "missing"
+	env["S46_TEST_BREW_PATH"] = "brew"
+	env["S46_TEST_INSTALL_HF_CLI_OK"] = "1"
+	env["S46_TEST_PULL_MODEL_OK"] = "1"
+	env["S46_TEST_LLAMACPP_RUNNING"] = "0"
+	env["S46_TEST_MODEL_DOWNLOADED"] = "0"
+	env["S46_TEST_MODEL_PROBE"] = "0"
+	env["S46_TEST_GATEWAY_READY"] = "0"
+	env["S46_TEST_GATEWAY_DOWNLOAD_AVAILABLE"] = "0"
+
+	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\nY\nn\n"), "airplane", "setup"))
+	for _, want := range []string{
+		"Download devstral-small-2:24b-instruct-2512-q4_K_M",
+		"[s46] Hugging Face CLI is required to download the model automatically.",
+		"[s46] Install Hugging Face CLI with Homebrew? [Y/n]",
+		"[s46] installing Hugging Face CLI with Homebrew...",
+		"[s46] llama-server is installed but not running.",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("setup output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "installing llama.cpp with Homebrew") {
+		t.Fatalf("setup should not reinstall llama.cpp when only the model downloader is missing:\n%s", out)
+	}
+}
+
+func TestAirplaneSetupShowsManualModelInstructionsWhenHuggingFaceCLIIsSkipped(t *testing.T) {
+	env := testEnv(t)
+	delete(env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")
+	env["S46_TEST_MEMORY_BYTES"] = "68000000000"
+	env["S46_TEST_FREE_DISK_BYTES"] = "61000000000"
+	env["S46_TEST_LLAMACPP_PATH"] = "/opt/homebrew/bin/llama-server"
+	env["S46_TEST_HF_CLI_PATH"] = "missing"
+	env["S46_TEST_BREW_PATH"] = "brew"
+	env["S46_TEST_LLAMACPP_RUNNING"] = "0"
+	env["S46_TEST_MODEL_DOWNLOADED"] = "0"
+	env["S46_TEST_MODEL_PROBE"] = "0"
+	env["S46_TEST_GATEWAY_READY"] = "0"
+	env["S46_TEST_GATEWAY_DOWNLOAD_AVAILABLE"] = "0"
+
+	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\nn\n"), "airplane", "setup"))
+	for _, want := range []string{
+		"[s46] Hugging Face CLI is required to download the model automatically.",
+		"[s46] Hugging Face CLI is not available, so setup cannot download the model automatically.",
+		"[s46] Download manually: https://huggingface.co/unsloth/Devstral-Small-2-24B-Instruct-2512-GGUF/resolve/main/Devstral-Small-2-24B-Instruct-2512-Q4_K_M.gguf",
+		"[s46] Or set S46_LOCAL_MODEL_PATH=/path/to/Devstral-Small-2-24B-Instruct-2512-Q4_K_M.gguf",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("setup output missing %q:\n%s", want, out)

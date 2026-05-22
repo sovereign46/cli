@@ -71,7 +71,7 @@ Encrypted shares are uploaded to `S46_SHARE_API_URL` (default `https://gist.s46.
 
 Airplane mode runs everything through a local `llama-server` (llama.cpp) + S46 gateway, with no cloud auth required.
 
-- `s46 airplane setup` installs llama.cpp and `huggingface-cli`, downloads the local GGUF model, installs the verified gateway release from `sovereign46/api`, and starts `llama-server` with the recommended local coding settings.
+- `s46 airplane setup` installs llama.cpp, downloads the local GGUF model with an existing `hf`/`huggingface-cli` when available, offers to install the Hugging Face CLI only when automatic model download needs it, installs the verified gateway release from `sovereign46/api`, and starts `llama-server` with the recommended local coding settings.
 - `s46 airplane mode on` snapshots harness files, rewrites them for the local gateway at `http://127.0.0.1:8080`, and creates a `local` team if none exists. `off` restores the snapshot.
 - In airplane mode, `s46 token --refresh` returns a local token; cloud-only commands fail fast.
 - Output is prefixed `[s46✈]` (human) or undecorated (`--json`).

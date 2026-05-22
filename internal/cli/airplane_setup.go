@@ -74,15 +74,13 @@ func runAirplaneSetupWithOptions(ctx context.Context, app *app, options airplane
 		}
 	}
 	if checkOK(report, "llamacpp-installed") && missingCheck(report, "model-downloaded") {
-		if yes, err := confirmAirplaneSetup(app, options, fmt.Sprintf("[s46] Download %s (~15 GB)? [Y/n] ", airplane.BackendModel), true); err != nil {
+		var modelChanged bool
+		var err error
+		report, modelChanged, err = offerAirplaneModelDownload(ctx, app, service, report, options)
+		if err != nil {
 			return report, err
-		} else if yes {
-			if err := service.PullModel(ctx); err != nil {
-				return report, fmt.Errorf("failed to download %s: %w", airplane.BackendModel, err)
-			}
-			changed = true
-			report = service.Check(ctx)
 		}
+		changed = changed || modelChanged
 	}
 	if checkOK(report, "llamacpp-installed") && checkOK(report, "model-downloaded") && missingCheck(report, "llamacpp-running") {
 		if yes, err := confirmAirplaneSetup(app, options, "[s46] llama-server is installed but not running.\n[s46] Start llama-server now? [Y/n] ", true); err != nil {
@@ -166,6 +164,55 @@ func confirmAirplaneSetup(app *app, options airplaneSetupOptions, prompt string,
 		return true, nil
 	}
 	return promptYesNo(app, prompt, fallback)
+}
+
+func offerAirplaneModelDownload(ctx context.Context, app *app, service airplane.Service, report airplane.Report, options airplaneSetupOptions) (airplane.Report, bool, error) {
+	if yes, err := confirmAirplaneSetup(app, options, fmt.Sprintf("[s46] Download %s (~15 GB)? [Y/n] ", airplane.BackendModel), true); err != nil {
+		return report, false, err
+	} else if !yes {
+		return report, false, app.renderer.Lines(renderManualModelDownloadInstructions(report, "Model download skipped.")...)
+	}
+
+	if !service.HuggingFaceCLIAvailable() {
+		if _, err := offerHuggingFaceCLIInstall(ctx, app, service, options); err != nil {
+			return report, false, err
+		}
+	}
+	if !service.HuggingFaceCLIAvailable() {
+		return report, false, app.renderer.Lines(renderManualModelDownloadInstructions(report, "Hugging Face CLI is not available, so setup cannot download the model automatically.")...)
+	}
+	if err := service.PullModel(ctx); err != nil {
+		return report, false, fmt.Errorf("failed to download %s: %w", airplane.BackendModel, err)
+	}
+	return service.Check(ctx), true, nil
+}
+
+func offerHuggingFaceCLIInstall(ctx context.Context, app *app, service airplane.Service, options airplaneSetupOptions) (bool, error) {
+	if !service.HomebrewAvailable() {
+		return false, nil
+	}
+	if yes, err := confirmAirplaneSetup(app, options, "[s46] Hugging Face CLI is required to download the model automatically.\n[s46] Install Hugging Face CLI with Homebrew? [Y/n] ", true); err != nil {
+		return false, err
+	} else if !yes {
+		return false, nil
+	}
+	if err := app.renderer.Lines("[s46] installing Hugging Face CLI with Homebrew..."); err != nil {
+		return false, err
+	}
+	if err := service.InstallHuggingFaceCLI(ctx); err != nil {
+		return false, fmt.Errorf("failed to install Hugging Face CLI with Homebrew: %w", err)
+	}
+	return true, nil
+}
+
+func renderManualModelDownloadInstructions(report airplane.Report, reason string) []string {
+	modelURL := fmt.Sprintf("https://huggingface.co/%s/resolve/main/%s", airplane.HuggingFaceRepo, airplane.GGUFModelFile)
+	return []string{
+		"[s46] " + reason,
+		fmt.Sprintf("[s46] Download manually: %s", modelURL),
+		fmt.Sprintf("[s46] Place it at: %s", report.ModelPath),
+		fmt.Sprintf("[s46] Or set S46_LOCAL_MODEL_PATH=/path/to/%s and rerun `s46 airplane setup`.", airplane.GGUFModelFile),
+	}
 }
 
 func ensureLlamacppRuntimeSettings(ctx context.Context, app *app, service airplane.Service) error {

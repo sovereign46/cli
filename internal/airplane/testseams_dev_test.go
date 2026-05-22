@@ -29,6 +29,9 @@ func TestSeamsInactiveWithEmptyEnv(t *testing.T) {
 	if handled, _ := service.seamInstallLlamacpp(); handled {
 		check("seamInstallLlamacpp", true)
 	}
+	if handled, _ := service.seamInstallHuggingFaceCLI(); handled {
+		check("seamInstallHuggingFaceCLI", true)
+	}
 	if handled, _ := service.seamPullModel(); handled {
 		check("seamPullModel", true)
 	}
@@ -65,6 +68,9 @@ func TestSeamsInactiveWithEmptyEnv(t *testing.T) {
 	}
 	if _, _, ok := service.seamLlamacppPath(); ok {
 		check("seamLlamacppPath", true)
+	}
+	if _, _, ok := service.seamHuggingFaceCLIPath(); ok {
+		check("seamHuggingFaceCLIPath", true)
 	}
 	if _, _, ok := service.seamGatewayBinary(); ok {
 		check("seamGatewayBinary", true)

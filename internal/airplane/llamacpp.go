@@ -40,10 +40,19 @@ func (s Service) InstallLlamacpp(ctx context.Context) error {
 	if handled, err := s.seamInstallLlamacpp(); handled {
 		return err
 	}
-	cmd := exec.CommandContext(ctx, "brew", "install", "llama.cpp", "huggingface-cli")
-	cmd.Stdout = s.Stdout
-	cmd.Stderr = s.Stderr
-	return cmd.Run()
+	return s.runHomebrewInstall(ctx, "llama.cpp")
+}
+
+func (s Service) InstallHuggingFaceCLI(ctx context.Context) error {
+	if handled, err := s.seamInstallHuggingFaceCLI(); handled {
+		return err
+	}
+	return s.runHomebrewInstall(ctx, "hf")
+}
+
+func (s Service) HuggingFaceCLIAvailable() bool {
+	_, err := s.huggingFaceCLI()
+	return err == nil
 }
 
 func (s Service) PullModel(ctx context.Context) error {
@@ -56,7 +65,7 @@ func (s Service) PullModel(ctx context.Context) error {
 	if fileExists(s.modelPath()) {
 		return nil
 	}
-	hf, err := huggingFaceCLI(s.Env)
+	hf, err := s.huggingFaceCLI()
 	if err != nil {
 		return err
 	}
@@ -114,6 +123,23 @@ func (s Service) LlamacppRuntime(ctx context.Context) LlamacppRuntime {
 
 func (r LlamacppRuntime) NeedsLaunchctlUpdate() bool { return false }
 func (r LlamacppRuntime) NeedsProcessRestart() bool  { return false }
+
+func (s Service) runHomebrewInstall(ctx context.Context, formula string) error {
+	cmd := exec.CommandContext(ctx, "brew", "install", formula)
+	cmd.Stdout = s.Stdout
+	cmd.Stderr = s.Stderr
+	return cmd.Run()
+}
+
+func (s Service) huggingFaceCLI() (string, error) {
+	if path, installed, ok := s.seamHuggingFaceCLIPath(); ok {
+		if installed {
+			return path, nil
+		}
+		return "", fmt.Errorf("hf or huggingface-cli is required to download the model")
+	}
+	return huggingFaceCLI(s.Env)
+}
 
 func huggingFaceCLI(env map[string]string) (string, error) {
 	if path := strings.TrimSpace(strs.EnvValue(env, "S46_HF_CLI")); path != "" {
