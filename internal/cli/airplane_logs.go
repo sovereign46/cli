@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/sovereign46/s46-cli/internal/airplane"
+	"github.com/sovereign46/s46-cli/internal/contextx"
 	"github.com/sovereign46/s46-cli/internal/strs"
 )
 
@@ -303,18 +304,19 @@ func followAirplaneLogsJSONL(ctx context.Context, app *app, files []airplane.Log
 	if len(followers) == 0 {
 		return nil
 	}
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
 	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
 		for i := range followers {
 			if err := emitAvailableJSONLLogLines(app, &followers[i]); err != nil {
 				return err
 			}
 		}
-		time.Sleep(200 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
 	}
 }
 
@@ -359,7 +361,10 @@ func followAirplaneLogs(ctx context.Context, app *app, files []airplane.LogFile,
 	command := exec.CommandContext(ctx, "tail", args...)
 	command.Stdout = app.runtime.Stdout
 	command.Stderr = app.runtime.Stderr
-	return command.Run()
+	if err := command.Run(); err != nil {
+		return contextx.ExternalError(ctx, err)
+	}
+	return nil
 }
 
 func tailTextFile(path string, lines int) []string {

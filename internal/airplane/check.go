@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sovereign46/s46-cli/internal/contextx"
 	"github.com/sovereign46/s46-cli/internal/strs"
 )
 
@@ -87,9 +88,7 @@ func (s Service) Check(ctx context.Context) Report {
 	if !ollamaRunning {
 		modelProbeMessage = "skipped: Ollama is not running"
 	} else if modelDownloaded {
-		modelProbeCtx, cancel := context.WithTimeout(ctx, s.modelProbeTimeout())
-		modelProbe, modelProbeMessage = s.modelProbeWithNotice(modelProbeCtx)
-		cancel()
+		modelProbe, modelProbeMessage = s.modelProbeWithNotice(ctx)
 	}
 	report.add(Check{Name: "model-probe", OK: modelProbe, Required: true, Message: modelProbeMessage})
 
@@ -157,6 +156,8 @@ func (s Service) ollamaRunning(ctx context.Context) bool {
 	if running, ok := s.seamOllamaRunning(); ok {
 		return running
 	}
+	ctx, cancel := contextx.WithMaxTimeout(ctx, s.checkTimeout())
+	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(s.ollamaURL(), "/")+"/api/tags", nil)
 	if err != nil {
 		return false
@@ -225,6 +226,8 @@ func (s Service) modelProbe(ctx context.Context) (bool, string) {
 	if probeOK, message, ok := s.seamModelProbe(); ok {
 		return probeOK, message
 	}
+	ctx, cancel := contextx.WithMaxTimeout(ctx, s.modelProbeTimeout())
+	defer cancel()
 	body, _ := json.Marshal(map[string]any{"model": s.backendModel(), "prompt": "ping", "stream": false, "options": map[string]any{"num_ctx": ContextWindow(s.Env)}, "keep_alive": KeepAlive(s.Env)})
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(s.ollamaURL(), "/")+"/api/generate", bytes.NewReader(body))
 	if err != nil {
@@ -288,6 +291,8 @@ func (s Service) gatewayResponding(ctx context.Context) bool {
 	if responding, ok := s.seamGatewayResponding(); ok {
 		return responding
 	}
+	ctx, cancel := contextx.WithMaxTimeout(ctx, s.checkTimeout())
+	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(s.gatewayURL(), "/")+"/v1/models", nil)
 	if err != nil {
 		return false

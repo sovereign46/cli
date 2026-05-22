@@ -7,7 +7,22 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
+
+func TestHTTPClientReturnsContextCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	client := NewHTTPClient("http://127.0.0.1:1")
+	_, err := client.Team(ctx, "acme", TeamOptions{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
+	if errors.Is(err, ErrCloudUnavailable) {
+		t.Fatalf("canceled request should not be classified as cloud unavailable: %v", err)
+	}
+}
 
 func TestHTTPClientWrapsTransportErrorAsCloudUnavailable(t *testing.T) {
 	// Use a port that nothing is listening on. net.Listen + Close
@@ -29,6 +44,25 @@ func TestHTTPClientWrapsTransportErrorAsCloudUnavailable(t *testing.T) {
 	}
 	if !errors.Is(err, ErrCloudUnavailable) {
 		t.Fatalf("expected error to wrap ErrCloudUnavailable, got: %v", err)
+	}
+}
+
+func TestHTTPClientWrapsTimeoutAsCloudUnavailable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(50 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	client := NewHTTPClient(server.URL)
+	client.Timeout = time.Millisecond
+	client.Client = &http.Client{}
+
+	_, err := client.Team(context.Background(), "acme", TeamOptions{})
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	if !errors.Is(err, ErrCloudUnavailable) {
+		t.Fatalf("expected timeout to wrap ErrCloudUnavailable, got: %v", err)
 	}
 }
 

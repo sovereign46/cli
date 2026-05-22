@@ -12,6 +12,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/sovereign46/s46-cli/internal/contextx"
 )
 
 const DefaultHTTPTimeout = 30 * time.Second
@@ -310,16 +312,25 @@ func isS46Host(host string) bool {
 	return host == "s46.dev" || strings.HasSuffix(host, ".s46.dev")
 }
 
-func (c *HTTPClient) do(ctx context.Context, method string, endpoint string, bearer string, body any, target any) error {
-	if _, ok := ctx.Deadline(); !ok {
-		timeout := c.Timeout
-		if timeout == 0 {
-			timeout = DefaultHTTPTimeout
-		}
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, timeout)
-		defer cancel()
+func httpClientWithoutTimeout(client *http.Client) *http.Client {
+	if client == nil {
+		return &http.Client{}
 	}
+	if client.Timeout <= 0 {
+		return client
+	}
+	copy := *client
+	copy.Timeout = 0
+	return &copy
+}
+
+func (c *HTTPClient) do(ctx context.Context, method string, endpoint string, bearer string, body any, target any) error {
+	timeout := c.Timeout
+	if timeout == 0 {
+		timeout = DefaultHTTPTimeout
+	}
+	ctx, cancel := contextx.WithMaxTimeout(ctx, timeout)
+	defer cancel()
 	var reader *bytes.Reader
 	if body == nil {
 		reader = bytes.NewReader(nil)
@@ -341,12 +352,12 @@ func (c *HTTPClient) do(ctx context.Context, method string, endpoint string, bea
 	if bearer != "" {
 		request.Header.Set("Authorization", "Bearer "+bearer)
 	}
-	client := c.Client
-	if client == nil {
-		client = &http.Client{Timeout: DefaultHTTPTimeout}
-	}
+	client := httpClientWithoutTimeout(c.Client)
 	response, err := client.Do(request)
 	if err != nil {
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return ctx.Err()
+		}
 		// Transport failure: classify as ErrCloudUnavailable so callers
 		// can branch via errors.Is without inspecting message text.
 		return fmt.Errorf("%w: %s %s: %v", ErrCloudUnavailable, method, endpoint, err)
