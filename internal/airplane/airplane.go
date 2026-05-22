@@ -40,6 +40,7 @@ const (
 	modelProbeNoticeAfter    = 2 * time.Second
 	modelProbeProgressEvery  = time.Second
 	modelProbeBodyLimit      = 4 * 1024
+	quickCommandTimeout      = 5 * time.Second
 	gatewayDownloadTimeout   = 30 * time.Second
 	gatewaySourceInstallTime = 5 * time.Minute
 	githubLatestURLFormat    = "https://api.github.com/repos/%s/releases/latest"

@@ -10,9 +10,14 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/sovereign46/s46-cli/internal/contextx"
 )
 
-const responseBodyLimit = 64 * 1024
+const (
+	responseBodyLimit  = 64 * 1024
+	defaultChatTimeout = 2 * time.Minute
+)
 
 type Command struct {
 	Command string `json:"command"`
@@ -81,6 +86,9 @@ func (c Client) Plan(ctx context.Context, prompt string) (Plan, error) {
 }
 
 func (c Client) chat(ctx context.Context, messages []map[string]string) (string, error) {
+	httpClient, timeout := c.httpClient()
+	ctx, cancel := contextx.WithMaxTimeout(ctx, timeout)
+	defer cancel()
 	body, err := json.Marshal(map[string]any{
 		"model":       c.Model,
 		"stream":      false,
@@ -98,9 +106,9 @@ func (c Client) chat(ctx context.Context, messages []map[string]string) (string,
 		return "", err
 	}
 	request.Header.Set("Content-Type", "application/json")
-	response, err := c.httpClient().Do(request)
+	response, err := httpClient.Do(request)
 	if err != nil {
-		return "", err
+		return "", contextx.ExternalError(ctx, err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
@@ -122,11 +130,16 @@ func (c Client) chat(ctx context.Context, messages []map[string]string) (string,
 	return payload.Choices[0].Message.Content, nil
 }
 
-func (c Client) httpClient() *http.Client {
-	if c.HTTPClient != nil {
-		return c.HTTPClient
+func (c Client) httpClient() (*http.Client, time.Duration) {
+	if c.HTTPClient == nil {
+		return &http.Client{}, defaultChatTimeout
 	}
-	return &http.Client{Timeout: 2 * time.Minute}
+	if c.HTTPClient.Timeout <= 0 {
+		return c.HTTPClient, defaultChatTimeout
+	}
+	copy := *c.HTTPClient
+	copy.Timeout = 0
+	return &copy, c.HTTPClient.Timeout
 }
 
 func decisionPrompt() string {

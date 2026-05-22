@@ -15,6 +15,7 @@ import (
 	"github.com/sovereign46/s46-cli/internal/airplane"
 	"github.com/sovereign46/s46-cli/internal/api"
 	"github.com/sovereign46/s46-cli/internal/config"
+	"github.com/sovereign46/s46-cli/internal/contextx"
 	"github.com/sovereign46/s46-cli/internal/harness"
 	"github.com/sovereign46/s46-cli/internal/harness/pi"
 	"github.com/sovereign46/s46-cli/internal/strs"
@@ -85,11 +86,15 @@ func runAirplaneSetupWithOptions(ctx context.Context, app *app, options airplane
 			if err := app.renderer.Lines("[s46] starting Ollama..."); err != nil {
 				return report, err
 			}
-			if err := service.StartOllama(); err != nil {
+			if err := service.StartOllama(ctx); err != nil {
 				return report, fmt.Errorf("failed to start Ollama: %w", err)
 			}
 			changed = true
-			report = waitForAirplaneCheck(ctx, service, "ollama-running", 30*time.Second)
+			var err error
+			report, err = waitForAirplaneCheck(ctx, service, "ollama-running", 30*time.Second)
+			if err != nil {
+				return report, err
+			}
 		}
 	}
 	if checkOK(report, "ollama-running") && missingCheck(report, "model-downloaded") {
@@ -143,11 +148,15 @@ func runAirplaneSetupWithOptions(ctx context.Context, app *app, options airplane
 				if err := app.renderer.Lines("[s46] starting local S46 gateway..."); err != nil {
 					return report, err
 				}
-				if err := service.StartGateway(); err != nil {
+				if err := service.StartGateway(ctx); err != nil {
 					return report, fmt.Errorf("failed to start local S46 gateway: %w", err)
 				}
 				changed = true
-				report = waitForAirplaneCheck(ctx, service, "local-gateway", 30*time.Second)
+				var err error
+				report, err = waitForAirplaneCheck(ctx, service, "local-gateway", 30*time.Second)
+				if err != nil {
+					return report, err
+				}
 			}
 		} else if err := app.renderer.Lines(
 			"[s46] Local S46 gateway is not installed or running.",
@@ -265,16 +274,17 @@ func offerAirplaneGatewayRestart(ctx context.Context, app *app, service airplane
 	if err := app.renderer.Lines("[s46] stopping local S46 API..."); err != nil {
 		return report, false, err
 	}
-	if err := stopListeningProcess(app.runtime.Env, report.GatewayURL, listener.PID, 5*time.Second); err != nil {
+	if err := stopListeningProcess(ctx, app.runtime.Env, report.GatewayURL, listener.PID, 5*time.Second); err != nil {
 		return report, false, fmt.Errorf("failed to stop local S46 API: %w", err)
 	}
 	if err := app.renderer.Lines("[s46] starting local S46 gateway..."); err != nil {
 		return report, false, err
 	}
-	if err := service.StartGateway(); err != nil {
+	if err := service.StartGateway(ctx); err != nil {
 		return report, false, fmt.Errorf("failed to start local S46 gateway: %w", err)
 	}
-	return waitForAirplaneCheck(ctx, service, "local-gateway", 30*time.Second), true, nil
+	report, err := waitForAirplaneCheck(ctx, service, "local-gateway", 30*time.Second)
+	return report, true, err
 }
 
 func renderAirplaneGatewayConflict(gatewayURL string, listener listeningProcessStatus) []string {
@@ -337,7 +347,7 @@ func isS46APIProcess(command string) bool {
 	return filepath.Base(strings.TrimSpace(command)) == airplane.GatewayBinaryName
 }
 
-func stopListeningProcess(env map[string]string, gatewayURL string, pid string, timeout time.Duration) error {
+func stopListeningProcess(ctx context.Context, env map[string]string, gatewayURL string, pid string, timeout time.Duration) error {
 	port := localServerPort(gatewayURL)
 	if seamStopGateway(env, port) {
 		return nil
@@ -353,29 +363,26 @@ func stopListeningProcess(env map[string]string, gatewayURL string, pid string, 
 	if err := process.Signal(syscall.SIGTERM); err != nil && sameListeningPID(env, port, pid) {
 		return err
 	}
-	if waitForListenerToExit(env, port, pid, timeout) {
+	if exited, err := waitForListenerToExit(ctx, env, port, pid, timeout); err != nil {
+		return err
+	} else if exited {
 		return nil
 	}
 	if err := process.Kill(); err != nil && sameListeningPID(env, port, pid) {
 		return err
 	}
-	if waitForListenerToExit(env, port, pid, 2*time.Second) {
+	if exited, err := waitForListenerToExit(ctx, env, port, pid, 2*time.Second); err != nil {
+		return err
+	} else if exited {
 		return nil
 	}
 	return fmt.Errorf("process %s is still listening on port %s", pid, port)
 }
 
-func waitForListenerToExit(env map[string]string, port string, pid string, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for {
-		if !sameListeningPID(env, port, pid) {
-			return true
-		}
-		if time.Now().After(deadline) {
-			return false
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
+func waitForListenerToExit(ctx context.Context, env map[string]string, port string, pid string, timeout time.Duration) (bool, error) {
+	return pollUntil(ctx, timeout, 200*time.Millisecond, func(ctx context.Context) bool {
+		return !sameListeningPID(env, port, pid)
+	})
 }
 
 func sameListeningPID(env map[string]string, port string, pid string) bool {
@@ -386,28 +393,37 @@ func sameListeningPID(env map[string]string, port string, pid string) bool {
 	return listener.Status == "listening" && listener.PID == pid
 }
 
-func waitForAirplaneCheck(ctx context.Context, service airplane.Service, name string, timeout time.Duration) airplane.Report {
-	deadline := time.Now().Add(timeout)
+func waitForAirplaneCheck(ctx context.Context, service airplane.Service, name string, timeout time.Duration) (airplane.Report, error) {
 	var report airplane.Report
-	for {
+	_, err := pollUntil(ctx, timeout, 500*time.Millisecond, func(ctx context.Context) bool {
 		report = service.Check(ctx)
-		if checkOK(report, name) || time.Now().After(deadline) {
-			return report
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
+		return checkOK(report, name)
+	})
+	return report, err
 }
 
-func waitForGatewayReady(ctx context.Context, service airplane.Service, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
+func waitForGatewayReady(ctx context.Context, service airplane.Service, timeout time.Duration) (bool, error) {
+	return pollUntil(ctx, timeout, 500*time.Millisecond, service.GatewayReady)
+}
+
+func pollUntil(ctx context.Context, timeout time.Duration, interval time.Duration, condition func(context.Context) bool) (bool, error) {
+	parentCtx := ctx
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
 	for {
-		if service.GatewayReady(ctx) {
-			return true
+		if condition(ctx) {
+			return true, nil
 		}
-		if time.Now().After(deadline) {
-			return false
+		select {
+		case <-ctx.Done():
+			if err := parentCtx.Err(); err != nil {
+				return false, err
+			}
+			return false, nil
+		case <-ticker.C:
 		}
-		time.Sleep(500 * time.Millisecond)
 	}
 }
 
@@ -751,10 +767,12 @@ func prepareAirplaneRuntime(ctx context.Context, app *app, service airplane.Serv
 		if err := app.renderer.Lines("[s46] starting Ollama..."); err != nil {
 			return err
 		}
-		if err := service.StartOllama(); err != nil {
+		if err := service.StartOllama(ctx); err != nil {
 			return fmt.Errorf("could not start Ollama: %w", err)
 		}
-		time.Sleep(500 * time.Millisecond)
+		if err := contextx.Sleep(ctx, 500*time.Millisecond); err != nil {
+			return err
+		}
 		report = service.Check(ctx)
 	}
 	if report.Ready {
@@ -775,17 +793,21 @@ func prepareAirplaneRuntime(ctx context.Context, app *app, service airplane.Serv
 		return err
 	}
 	if checkOK(report, "ollama-installed") && !checkOK(report, "ollama-running") {
-		if err := service.StartOllama(); err != nil {
+		if err := service.StartOllama(ctx); err != nil {
 			return fmt.Errorf("could not start Ollama: %w", err)
 		}
-		time.Sleep(500 * time.Millisecond)
+		if err := contextx.Sleep(ctx, 500*time.Millisecond); err != nil {
+			return err
+		}
 		report = service.Check(ctx)
 	}
 	if !checkOK(report, "local-gateway") {
-		if err := service.StartGateway(); err != nil {
+		if err := service.StartGateway(ctx); err != nil {
 			return fmt.Errorf("could not start local S46 gateway: %w", err)
 		}
-		time.Sleep(500 * time.Millisecond)
+		if err := contextx.Sleep(ctx, 500*time.Millisecond); err != nil {
+			return err
+		}
 		report = service.Check(ctx)
 	}
 	if !report.Ready {
@@ -798,17 +820,23 @@ func prepareAirplaneRuntime(ctx context.Context, app *app, service airplane.Serv
 // and ready. Called after prepareAirplaneRuntime so a clean install
 // path lands here too.
 func startAirplaneRuntime(ctx context.Context, app *app, service airplane.Service) error {
-	if err := service.StartOllama(); err != nil {
+	if err := service.StartOllama(ctx); err != nil {
 		return fmt.Errorf("could not start Ollama: %w", err)
 	}
 	if !service.OllamaRunning(ctx) && !strs.Truthy(app.runtime.Env["S46_AIRPLANE_SKIP_SETUP_CHECKS"]) {
 		return fmt.Errorf("Ollama did not become ready; run `s46 airplane setup`")
 	}
-	if err := service.StartGateway(); err != nil {
+	if err := service.StartGateway(ctx); err != nil {
 		return fmt.Errorf("could not start local S46 gateway: %w", err)
 	}
-	if !strs.Truthy(app.runtime.Env["S46_AIRPLANE_SKIP_SETUP_CHECKS"]) && !waitForGatewayReady(ctx, service, 30*time.Second) {
-		return fmt.Errorf("local S46 gateway did not become ready; check ~/.cache/s46/s46-api-airplane.log or rerun `s46 airplane setup`")
+	if !strs.Truthy(app.runtime.Env["S46_AIRPLANE_SKIP_SETUP_CHECKS"]) {
+		ready, err := waitForGatewayReady(ctx, service, 30*time.Second)
+		if err != nil {
+			return err
+		}
+		if !ready {
+			return fmt.Errorf("local S46 gateway did not become ready; check ~/.cache/s46/s46-api-airplane.log or rerun `s46 airplane setup`")
+		}
 	}
 	return nil
 }
