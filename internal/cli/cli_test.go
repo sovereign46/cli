@@ -379,10 +379,10 @@ func TestTokenJSONAndAirplaneLogsJSONL(t *testing.T) {
 	if err := os.MkdirAll(logDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(logDir, "ollama.log"), []byte("one\ntwo\nthree\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(logDir, "llamacpp.log"), []byte("one\ntwo\nthree\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	logs := requireOK(t, run(t, env, "airplane", "logs", "ollama", "--jsonl", "--lines=2"))
+	logs := requireOK(t, run(t, env, "airplane", "logs", "llamacpp", "--jsonl", "--lines=2"))
 	lines := strings.Split(strings.TrimSpace(logs), "\n")
 	if len(lines) != 2 {
 		t.Fatalf("expected 2 jsonl lines, got %d: %s", len(lines), logs)
@@ -392,7 +392,7 @@ func TestTokenJSONAndAirplaneLogsJSONL(t *testing.T) {
 		if err := json.Unmarshal([]byte(line), &event); err != nil {
 			t.Fatalf("invalid jsonl line %q: %v", line, err)
 		}
-		if event["type"] != "log" || event["log"] != "ollama" || strings.HasPrefix(line, "[s46]") {
+		if event["type"] != "log" || event["log"] != "llamacpp" || strings.HasPrefix(line, "[s46]") {
 			t.Fatalf("unexpected jsonl event: %s", line)
 		}
 	}
@@ -887,17 +887,17 @@ func TestAirplaneSetupOffersToRestartExistingS46Gateway(t *testing.T) {
 	}
 }
 
-func TestAirplaneSetupContinuesAfterInstallingOllama(t *testing.T) {
+func TestAirplaneSetupContinuesAfterInstallingLlamacpp(t *testing.T) {
 	env := testEnv(t)
 	delete(env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")
 	env["S46_TEST_MEMORY_BYTES"] = "68000000000"
 	env["S46_TEST_FREE_DISK_BYTES"] = "61000000000"
-	env["S46_TEST_OLLAMA_PATH"] = "missing"
+	env["S46_TEST_LLAMACPP_PATH"] = "missing"
 	env["S46_TEST_BREW_PATH"] = "brew"
-	env["S46_TEST_INSTALL_OLLAMA_OK"] = "1"
-	env["S46_TEST_START_OLLAMA_OK"] = "1"
+	env["S46_TEST_INSTALL_LLAMACPP_OK"] = "1"
+	env["S46_TEST_START_LLAMACPP_OK"] = "1"
 	env["S46_TEST_PULL_MODEL_OK"] = "1"
-	env["S46_TEST_OLLAMA_RUNNING"] = "0"
+	env["S46_TEST_LLAMACPP_RUNNING"] = "0"
 	env["S46_TEST_MODEL_DOWNLOADED"] = "0"
 	env["S46_TEST_MODEL_PROBE"] = "0"
 	env["S46_TEST_GATEWAY_BINARY"] = "/tmp/s46-api"
@@ -907,8 +907,8 @@ func TestAirplaneSetupContinuesAfterInstallingOllama(t *testing.T) {
 	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\nY\nY\nY\nn\n"), "airplane", "setup"))
 	for _, want := range []string{
 		"[s46] Install with Homebrew? [Y/n]",
-		"[s46] Ollama is installed but not running.",
-		"[s46] Start Ollama now? [Y/n]",
+		"[s46] llama-server is installed but not running.",
+		"[s46] Start llama-server now? [Y/n]",
 		"Download devstral-small-2:24b-instruct-2512-q4_K_M",
 		"[s46] Start local gateway now? [Y/n]",
 		"[s46] airplane setup: ready",
@@ -919,61 +919,24 @@ func TestAirplaneSetupContinuesAfterInstallingOllama(t *testing.T) {
 	}
 }
 
-func TestStatusShowsOllamaRuntime(t *testing.T) {
+func TestStatusShowsLlamacppRuntime(t *testing.T) {
 	env := testEnv(t)
 	requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
 	requireOK(t, run(t, env, "connect", "acme", "--harness=standard"))
-	env["S46_TEST_OLLAMA_RUNNING"] = "1"
-	env["S46_TEST_OLLAMA_PROCESS_KIND"] = "manual"
-	env["S46_TEST_OLLAMA_PROCESS_ENV"] = "OLLAMA_CONTEXT_LENGTH=65536 OLLAMA_KEEP_ALIVE=10m OLLAMA_NUM_PARALLEL=1 OLLAMA_MAX_LOADED_MODELS=1 OLLAMA_FLASH_ATTENTION=1 OLLAMA_KV_CACHE_TYPE=q8_0"
-	env["S46_TEST_OLLAMA_LIST"] = airplane.BackendModel
-	env["S46_TEST_OLLAMA_PS"] = airplane.BackendModel + ":65536"
+	env["S46_TEST_LLAMACPP_RUNNING"] = "1"
+	env["S46_TEST_LLAMACPP_PROCESS_KIND"] = "manual"
+	env["S46_TEST_LLAMACPP_MODELS"] = airplane.BackendModel
 
 	out := requireOK(t, run(t, env, "--verbose", "status"))
 	for _, want := range []string{
-		"[s46] Ollama server: manual",
-		"[s46] ollama list: devstral-small-2:24b-instruct-2512-q4_K_M",
-		"[s46] ollama ps: devstral-small-2:24b-instruct-2512-q4_K_M · context 65536",
-		"[s46] Ollama OLLAMA_CONTEXT_LENGTH: want 65536 · process 65536 (ok)",
-		"[s46] Ollama OLLAMA_KV_CACHE_TYPE: want q8_0 · process q8_0 (ok)",
+		"[s46] llama.cpp server: manual",
+		"[s46] llama.cpp models: devstral-small-2:24b-instruct-2512-q4_K_M",
+		"[s46] llama.cpp --ctx-size: want 65536",
+		"[s46] llama.cpp --cache-type-k: want q8_0",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("status output missing %q:\n%s", want, out)
 		}
-	}
-}
-
-func TestAirplaneSetupConfiguresMacOSGUIOllamaLaunchctl(t *testing.T) {
-	env := testEnv(t)
-	delete(env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")
-	env["S46_TEST_MEMORY_BYTES"] = "68000000000"
-	env["S46_TEST_FREE_DISK_BYTES"] = "61000000000"
-	env["S46_TEST_OLLAMA_PATH"] = "/opt/homebrew/bin/ollama"
-	env["S46_TEST_OLLAMA_RUNNING"] = "1"
-	env["S46_TEST_MODEL_DOWNLOADED"] = "1"
-	env["S46_TEST_MODEL_PROBE"] = "1"
-	env["S46_TEST_GATEWAY_BINARY"] = "/tmp/s46-api"
-	env["S46_TEST_GATEWAY_READY"] = "1"
-	env["S46_TEST_OLLAMA_PROCESS_KIND"] = "macos-gui"
-	env["S46_TEST_LAUNCHCTL_ENV"] = "OLLAMA_CONTEXT_LENGTH=262144 OLLAMA_KEEP_ALIVE=60s OLLAMA_NUM_PARALLEL=4 OLLAMA_MAX_LOADED_MODELS=3 OLLAMA_FLASH_ATTENTION=0 OLLAMA_KV_CACHE_TYPE=f16"
-	env["S46_TEST_OLLAMA_PROCESS_ENV"] = env["S46_TEST_LAUNCHCTL_ENV"]
-	env["S46_TEST_CONFIGURE_LAUNCHCTL_OK"] = "1"
-
-	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\nn\n"), "airplane", "setup"))
-	for _, want := range []string{
-		"[s46] macOS GUI Ollama is running without the recommended airplane settings.",
-		"[s46] Configure macOS Ollama launchd settings now? [Y/n]",
-		"[s46] updated macOS Ollama launchd settings.",
-		"[s46] Fully quit and restart Ollama so the GUI app picks up the new settings.",
-		"[s46] airplane setup: ready",
-		"[s46] Airplane mode was not offered because Ollama needs to be restarted with airplane settings.",
-	} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("setup output missing %q:\n%s", want, out)
-		}
-	}
-	if !strings.Contains(env["S46_TEST_LAUNCHCTL_ENV"], "OLLAMA_CONTEXT_LENGTH=65536") {
-		t.Fatalf("expected launchctl env to be updated: %s", env["S46_TEST_LAUNCHCTL_ENV"])
 	}
 }
 
@@ -992,14 +955,14 @@ func TestAirplaneSetupCanTurnOnAirplaneModeWithoutLogin(t *testing.T) {
 			t.Fatalf("setup output missing %q:\n%s", want, out)
 		}
 	}
-	env["S46_TEST_LISTENER_11434"] = "111 ollama"
+	env["S46_TEST_LISTENER_8081"] = "111 llama-server"
 	env["S46_TEST_LISTENER_8080"] = "222 s46-api"
 	status := requireOK(t, run(t, env, "--verbose", "status"))
 	for _, want := range []string{
 		"[s46✈] team:    local",
 		"[s46✈] harness: claude-code",
 		"[s46✈] model:   s46/devstral-small-2-24b",
-		"[s46✈] local ollama: http://127.0.0.1:11434 · port 11434 · pid 111 (ollama)",
+		"[s46✈] local llamacpp: http://127.0.0.1:8081 · port 8081 · pid 111 (llama-server)",
 		"[s46✈] local api:    http://127.0.0.1:8080 · port 8080 · pid 222 (s46-api)",
 	} {
 		if !strings.Contains(status, want) {
@@ -1407,12 +1370,12 @@ func TestAirplaneLogsShowsKnownLogFiles(t *testing.T) {
 	if err := os.MkdirAll(logDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(logDir, "ollama.log"), []byte("one\ntwo\nthree\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(logDir, "llamacpp.log"), []byte("one\ntwo\nthree\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	out := requireOK(t, run(t, env, "airplane", "logs", "ollama", "--lines=2"))
-	for _, want := range []string{"[s46] ollama log:", "two", "three"} {
+	out := requireOK(t, run(t, env, "airplane", "logs", "llamacpp", "--lines=2"))
+	for _, want := range []string{"[s46] llamacpp log:", "two", "three"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("logs output missing %q:\n%s", want, out)
 		}
@@ -1436,8 +1399,8 @@ func TestAirplaneLogsCanUseDiscoveredExternalLog(t *testing.T) {
 }
 
 func TestParseLsofOpenLogPaths(t *testing.T) {
-	paths := parseLsofOpenLogPaths([]byte("p123\nf1\nn/tmp/s46/ollama.log\nf2\nn/tmp/s46/ollama.log\nf3\nn/tmp/s46/other.log\n"), "ollama.log")
-	if len(paths) != 1 || paths[0] != "/tmp/s46/ollama.log" {
+	paths := parseLsofOpenLogPaths([]byte("p123\nf1\nn/tmp/s46/llamacpp.log\nf2\nn/tmp/s46/llamacpp.log\nf3\nn/tmp/s46/other.log\n"), "llamacpp.log")
+	if len(paths) != 1 || paths[0] != "/tmp/s46/llamacpp.log" {
 		t.Fatalf("paths = %#v", paths)
 	}
 	ids := parseLsofProcessIDs([]byte("p123\nf5\np123\np456\n"))

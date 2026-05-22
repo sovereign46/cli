@@ -26,29 +26,24 @@ func TestSeamsInactiveWithEmptyEnv(t *testing.T) {
 	results := []result{}
 	check := func(name string, handled bool) { results = append(results, result{name, handled}) }
 
-	if handled, _ := service.seamInstallOllama(); handled {
-		check("seamInstallOllama", true)
+	if handled, _ := service.seamInstallLlamacpp(); handled {
+		check("seamInstallLlamacpp", true)
 	}
 	if handled, _ := service.seamPullModel(); handled {
 		check("seamPullModel", true)
 	}
-	if handled, _ := service.seamStartOllama(); handled {
-		check("seamStartOllama", true)
+	if handled, _ := service.seamStartLlamacpp(); handled {
+		check("seamStartLlamacpp", true)
 	}
-	if handled, _ := service.seamConfigureLaunchctl(nil); handled {
-		check("seamConfigureLaunchctl", true)
-	}
-	if handled, _ := service.seamStopLoadedModel(); handled {
-		check("seamStopLoadedModel", true)
-	}
+
 	if handled, _ := service.seamStartGateway(); handled {
 		check("seamStartGateway", true)
 	}
 	if handled, _ := service.seamInstallGateway(); handled {
 		check("seamInstallGateway", true)
 	}
-	if _, ok := service.seamOllamaRunning(); ok {
-		check("seamOllamaRunning", true)
+	if _, ok := service.seamLlamacppRunning(); ok {
+		check("seamLlamacppRunning", true)
 	}
 	if _, ok := service.seamModelDownloaded(); ok {
 		check("seamModelDownloaded", true)
@@ -68,29 +63,17 @@ func TestSeamsInactiveWithEmptyEnv(t *testing.T) {
 	if _, ok := service.seamHomebrewAvailable(); ok {
 		check("seamHomebrewAvailable", true)
 	}
-	if _, _, ok := service.seamOllamaPath(); ok {
-		check("seamOllamaPath", true)
+	if _, _, ok := service.seamLlamacppPath(); ok {
+		check("seamLlamacppPath", true)
 	}
 	if _, _, ok := service.seamGatewayBinary(); ok {
 		check("seamGatewayBinary", true)
 	}
-	if _, _, ok := service.seamLaunchctlEnv(); ok {
-		check("seamLaunchctlEnv", true)
+	if _, _, ok := service.seamLlamacppServeProcess(); ok {
+		check("seamLlamacppServeProcess", true)
 	}
-	if _, _, ok := service.seamOllamaServeProcess(); ok {
-		check("seamOllamaServeProcess", true)
-	}
-	if _, _, ok := service.seamOllamaProcessEnv(); ok {
-		check("seamOllamaProcessEnv", true)
-	}
-	if _, ok := service.seamInstalledOllamaModels(); ok {
-		check("seamInstalledOllamaModels", true)
-	}
-	if _, ok := service.seamLoadedOllamaModels("any"); ok {
-		check("seamLoadedOllamaModels", true)
-	}
-	if _, ok := service.seamLoadedBackendModelContext(); ok {
-		check("seamLoadedBackendModelContext", true)
+	if _, ok := service.seamAdvertisedLlamacppModels(); ok {
+		check("seamAdvertisedLlamacppModels", true)
 	}
 	if _, ok := service.seamMemoryBytes(); ok {
 		check("seamMemoryBytes", true)
@@ -98,10 +81,6 @@ func TestSeamsInactiveWithEmptyEnv(t *testing.T) {
 	if _, ok := service.seamFreeDiskBytes(); ok {
 		check("seamFreeDiskBytes", true)
 	}
-	if service.seamShouldUseLaunchctlEnv() {
-		check("seamShouldUseLaunchctlEnv", true)
-	}
-
 	if len(results) > 0 {
 		t.Fatalf("seams should be inactive with empty env, got triggered: %#v", results)
 	}

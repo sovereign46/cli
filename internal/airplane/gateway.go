@@ -37,7 +37,7 @@ func (s Service) StartGateway() error {
 	}
 	cmd := exec.Command(command.Path, command.Args...)
 	cmd.Dir = command.Dir
-	env := append([]string{"S46_ENV=airplane", "S46_ADDR=127.0.0.1:8080", "S46_LOCAL_OLLAMA_URL=" + s.ollamaURL(), "S46_LOCAL_MODEL=" + s.backendModel()}, AirplaneGatewayEnv(s.Env)...)
+	env := append([]string{"S46_ENV=airplane", "S46_ADDR=127.0.0.1:8080", "S46_LOCAL_MODEL=" + s.backendModel()}, AirplaneGatewayEnv(s.Env)...)
 	cmd.Env = s.processEnv(env...)
 	return s.startDetached(cmd, "s46-api-airplane.log")
 }

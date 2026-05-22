@@ -34,8 +34,8 @@ func TestCheckReportsInsufficientMemoryAndDisk(t *testing.T) {
 	report := Service{Env: map[string]string{
 		"S46_TEST_MEMORY_BYTES":     "16000000000",
 		"S46_TEST_FREE_DISK_BYTES":  "18000000000",
-		"S46_TEST_OLLAMA_PATH":      "missing",
-		"S46_TEST_OLLAMA_RUNNING":   "0",
+		"S46_TEST_LLAMACPP_PATH":    "missing",
+		"S46_TEST_LLAMACPP_RUNNING": "0",
 		"S46_TEST_GATEWAY_BINARY":   "missing",
 		"S46_TEST_GATEWAY_READY":    "0",
 		"S46_TEST_MODEL_DOWNLOADED": "0",
@@ -47,47 +47,37 @@ func TestCheckReportsInsufficientMemoryAndDisk(t *testing.T) {
 	if report.MemoryGB != 16 || report.FreeDiskGB != 18 {
 		t.Fatalf("unexpected resources: memory=%d disk=%d", report.MemoryGB, report.FreeDiskGB)
 	}
-	if checkOK(report, "memory") || checkOK(report, "disk") || checkOK(report, "ollama-installed") {
-		t.Fatalf("expected memory, disk and ollama checks to fail: %#v", report.Checks)
+	if checkOK(report, "memory") || checkOK(report, "disk") || checkOK(report, "llamacpp-installed") {
+		t.Fatalf("expected memory, disk and llama.cpp checks to fail: %#v", report.Checks)
 	}
 }
 
-func TestEnsureOllamaDirsCreatesHostHomeAndModelDirs(t *testing.T) {
-	sandboxHome := t.TempDir()
-	hostHome := t.TempDir()
-	models := filepath.Join(t.TempDir(), "ollama", "models")
-	service := Service{Env: map[string]string{"HOME": sandboxHome, "S46_HOST_HOME": hostHome, "OLLAMA_MODELS": models}}
+func TestEnsureModelDirCreatesConfiguredDirectory(t *testing.T) {
+	modelDir := filepath.Join(t.TempDir(), "models")
+	service := Service{Env: map[string]string{"S46_AIRPLANE_MODEL_DIR": modelDir}}
 
-	if err := service.ensureOllamaDirs(); err != nil {
+	if err := service.ensureModelDir(); err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{filepath.Join(hostHome, ".ollama"), models} {
-		if info, err := os.Stat(path); err != nil || !info.IsDir() {
-			t.Fatalf("expected %s to exist as directory, info=%#v err=%v", path, info, err)
-		}
-	}
-	if _, err := os.Stat(filepath.Join(sandboxHome, ".ollama")); !os.IsNotExist(err) {
-		t.Fatalf("expected sandbox Ollama home to stay unused, err=%v", err)
+	if info, err := os.Stat(modelDir); err != nil || !info.IsDir() {
+		t.Fatalf("expected %s to exist as directory, info=%#v err=%v", modelDir, info, err)
 	}
 }
 
 func TestLogFilesUseExplicitLogDir(t *testing.T) {
 	logDir := t.TempDir()
 	files := Service{Env: map[string]string{"S46_LOG_DIR": logDir}}.LogFiles()
-	if len(files) != 2 || files[0].Path != filepath.Join(logDir, "ollama.log") || files[1].Path != filepath.Join(logDir, "s46-api-airplane.log") {
+	if len(files) != 2 || files[0].Path != filepath.Join(logDir, "llamacpp.log") || files[1].Path != filepath.Join(logDir, "s46-api-airplane.log") {
 		t.Fatalf("unexpected log files: %#v", files)
 	}
 }
 
-func TestOllamaEnvUsesHostHomeWithoutDuplicateKeys(t *testing.T) {
-	sandboxHome := t.TempDir()
-	hostHome := t.TempDir()
-	models := filepath.Join(t.TempDir(), "models")
-	service := Service{Env: map[string]string{"HOME": sandboxHome, "S46_HOST_HOME": hostHome, "OLLAMA_MODELS": models}}
-
-	env := envListToMap(service.ollamaEnv("OLLAMA_FLASH_ATTENTION=1"))
-	if env["HOME"] != hostHome || env["OLLAMA_MODELS"] != models || env["OLLAMA_FLASH_ATTENTION"] != "1" {
-		t.Fatalf("unexpected ollama env: %#v", env)
+func TestAirplaneLlamacppArgsIncludeRuntimeLimits(t *testing.T) {
+	args := strings.Join(AirplaneLlamacppArgs(map[string]string{"S46_AIRPLANE_CONTEXT": "16384", "S46_AIRPLANE_MAX_TOKENS": "2048"}, "/tmp/model.gguf"), " ")
+	for _, want := range []string{"--port 8081", "--alias " + BackendModel, "-m /tmp/model.gguf", "--ctx-size 16384", "--n-predict 2048", "--parallel 1", "--flash-attn on", "--cache-type-k q8_0", "--cache-type-v q8_0", "--n-gpu-layers 99"} {
+		if !strings.Contains(args, want) {
+			t.Fatalf("args missing %q: %s", want, args)
+		}
 	}
 }
 
@@ -100,89 +90,55 @@ func TestHTTPClientUsesRequestedTimeout(t *testing.T) {
 }
 
 func TestAirplaneRuntimeEnvDefaultsAndOverrides(t *testing.T) {
-	if ContextWindow(nil) != 65536 || MaxTokens(nil) != 4096 || KeepAlive(nil) != "10m" || GatewayWriteTimeout(nil) != "10m" || NumParallel(nil) != 1 || MaxLoadedModels(nil) != 1 || FlashAttention(nil) != "1" || KVCacheType(nil) != "q8_0" {
+	if ContextWindow(nil) != 65536 || MaxTokens(nil) != 4096 || KeepAlive(nil) != "10m" || KeepAliveSeconds(nil) != 600 || GatewayWriteTimeout(nil) != "10m" || NumParallel(nil) != 1 || FlashAttention(nil) != "on" || KVCacheType(nil) != "q8_0" || GPULayers(nil) != "99" {
 		t.Fatalf("unexpected defaults")
 	}
 	env := map[string]string{
-		"S46_AIRPLANE_CONTEXT":           "32768",
-		"S46_AIRPLANE_MAX_TOKENS":        "8192",
-		"S46_AIRPLANE_KEEP_ALIVE":        "5m",
-		"S46_AIRPLANE_NUM_PARALLEL":      "2",
-		"S46_AIRPLANE_MAX_LOADED_MODELS": "3",
-		"S46_WRITE_TIMEOUT":              "7m",
-		"OLLAMA_FLASH_ATTENTION":         "0",
-		"OLLAMA_KV_CACHE_TYPE":           "q4_0",
+		"S46_AIRPLANE_CONTEXT":         "32768",
+		"S46_AIRPLANE_MAX_TOKENS":      "8192",
+		"S46_AIRPLANE_KEEP_ALIVE":      "5m",
+		"S46_AIRPLANE_NUM_PARALLEL":    "2",
+		"S46_WRITE_TIMEOUT":            "7m",
+		"S46_AIRPLANE_FLASH_ATTENTION": "off",
+		"S46_AIRPLANE_KV_CACHE_TYPE":   "q4_0",
+		"S46_AIRPLANE_GPU_LAYERS":      "30",
 	}
-	if ContextWindow(env) != 32768 || MaxTokens(env) != 8192 || KeepAlive(env) != "5m" || GatewayWriteTimeout(env) != "7m" || NumParallel(env) != 2 || MaxLoadedModels(env) != 3 || FlashAttention(env) != "0" || KVCacheType(env) != "q4_0" {
+	if ContextWindow(env) != 32768 || MaxTokens(env) != 8192 || KeepAlive(env) != "5m" || KeepAliveSeconds(env) != 300 || GatewayWriteTimeout(env) != "7m" || NumParallel(env) != 2 || FlashAttention(env) != "off" || KVCacheType(env) != "q4_0" || GPULayers(env) != "30" {
 		t.Fatalf("unexpected overrides")
 	}
 }
 
-func TestModelProbeSendsAirplaneRuntimeLimits(t *testing.T) {
+func TestModelProbeUsesOpenAICompatibleChat(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/generate" {
+		if r.URL.Path != "/v1/chat/completions" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
 		var body map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
-		options := body["options"].(map[string]any)
-		if options["num_ctx"] != float64(16384) || body["keep_alive"] != "30s" {
+		if body["model"] != BackendModel || body["max_tokens"] != float64(4) || body["n_predict"] != float64(4) {
 			t.Fatalf("unexpected probe body: %#v", body)
 		}
-		_, _ = w.Write([]byte(`{"response":"pong"}`))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
 	}))
 	defer server.Close()
 
-	ok, message := Service{Env: map[string]string{"S46_LOCAL_OLLAMA_URL": server.URL, "S46_AIRPLANE_CONTEXT": "16384", "S46_AIRPLANE_KEEP_ALIVE": "30s"}, Client: server.Client()}.modelProbe(context.Background())
+	ok, message := Service{Env: map[string]string{"S46_LOCAL_LLAMACPP_URL": server.URL}, Client: server.Client()}.modelProbe(context.Background())
 	if !ok || !strings.Contains(message, LocalModelID) {
 		t.Fatalf("unexpected probe result ok=%v message=%q", ok, message)
 	}
 }
 
-func TestStartOllamaStopsLoadedModelWhenContextIsTooLarge(t *testing.T) {
+func TestLlamacppRuntimeReportsSettingsAndModels(t *testing.T) {
 	env := map[string]string{
-		"S46_TEST_OLLAMA_RUNNING":        "1",
-		"S46_TEST_OLLAMA_LOADED_CONTEXT": "262144",
-		"S46_TEST_OLLAMA_PATH":           "/opt/homebrew/bin/ollama",
-		"S46_TEST_STOP_OLLAMA_MODEL_OK":  "1",
+		"S46_TEST_LLAMACPP_RUNNING":      "1",
+		"S46_TEST_LLAMACPP_PROCESS_KIND": "manual",
+		"S46_TEST_LLAMACPP_MODELS":       BackendModel,
 	}
-	if err := (Service{Env: env}).StartOllama(); err != nil {
-		t.Fatal(err)
-	}
-	if env["S46_TEST_OLLAMA_LOADED_CONTEXT"] != "65536" {
-		t.Fatalf("expected loaded model context to be reset, env=%#v", env)
-	}
-}
-
-func TestOllamaRuntimeReportsGUISettings(t *testing.T) {
-	env := map[string]string{
-		"S46_TEST_OLLAMA_RUNNING":      "1",
-		"S46_TEST_OLLAMA_PROCESS_KIND": "macos-gui",
-		"S46_TEST_LAUNCHCTL_ENV":       "OLLAMA_FLASH_ATTENTION=0 OLLAMA_KV_CACHE_TYPE=q8_0 OLLAMA_NUM_PARALLEL=1 OLLAMA_CONTEXT_LENGTH=65536 OLLAMA_KEEP_ALIVE=10m OLLAMA_MAX_LOADED_MODELS=1",
-		"S46_TEST_OLLAMA_PROCESS_ENV":  "OLLAMA_FLASH_ATTENTION=0 OLLAMA_KV_CACHE_TYPE=f16 OLLAMA_NUM_PARALLEL=2 OLLAMA_CONTEXT_LENGTH=262144 OLLAMA_KEEP_ALIVE=60s OLLAMA_MAX_LOADED_MODELS=3",
-		"S46_TEST_OLLAMA_LIST":         BackendModel,
-		"S46_TEST_OLLAMA_PS":           BackendModel + ":262144",
-	}
-	runtimeReport := Service{Env: env}.OllamaRuntime(context.Background())
-	if runtimeReport.Server != "macos-gui" || !runtimeReport.NeedsLaunchctlUpdate() || !runtimeReport.NeedsProcessRestart() {
+	runtimeReport := Service{Env: env}.LlamacppRuntime(context.Background())
+	if runtimeReport.Server != "manual" || len(runtimeReport.Settings) == 0 || len(runtimeReport.AdvertisedModels) != 1 {
 		t.Fatalf("unexpected runtime report: %#v", runtimeReport)
-	}
-	if len(runtimeReport.LoadedModels) != 1 || runtimeReport.LoadedModels[0].ContextLength != 262144 {
-		t.Fatalf("unexpected loaded models: %#v", runtimeReport.LoadedModels)
-	}
-}
-
-func TestConfigureMacOSOllamaLaunchdUsesAirplaneSettings(t *testing.T) {
-	env := map[string]string{"S46_TEST_CONFIGURE_LAUNCHCTL_OK": "1", "S46_AIRPLANE_CONTEXT": "32768"}
-	if err := (Service{Env: env}).ConfigureMacOSOllamaLaunchd(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{"OLLAMA_CONTEXT_LENGTH=32768", "OLLAMA_FLASH_ATTENTION=1", "OLLAMA_KV_CACHE_TYPE=q8_0", "OLLAMA_NUM_PARALLEL=1", "OLLAMA_MAX_LOADED_MODELS=1"} {
-		if !strings.Contains(env["S46_TEST_LAUNCHCTL_ENV"], want) {
-			t.Fatalf("launchctl env missing %q: %s", want, env["S46_TEST_LAUNCHCTL_ENV"])
-		}
 	}
 }
 
@@ -341,14 +297,12 @@ printf '#!/bin/sh\n' > "$out"
 func TestCheckRequiresAirplaneReadyGateway(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/tags":
-			_, _ = w.Write([]byte(`{"models":[{"name":"devstral-small-2:24b-instruct-2512-q4_K_M"}]}`))
-		case "/api/generate":
-			_, _ = w.Write([]byte(`{"response":"pong"}`))
 		case "/v1/models":
-			_, _ = w.Write([]byte(`{"data":[]}`))
+			_, _ = w.Write([]byte(`{"data":[{"id":"devstral-small-2:24b-instruct-2512-q4_K_M"}]}`))
+		case "/v1/chat/completions":
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"pong"}}]}`))
 		case "/v1/workers":
-			_, _ = w.Write([]byte(`{"workers":[{"id":"local-ollama","mode":"airplane","state":"not_configured","models":[{"id":"s46/devstral-small-2-24b","state":"missing"}]}]}`))
+			_, _ = w.Write([]byte(`{"workers":[{"id":"local-llamacpp","mode":"airplane","state":"not_configured","models":[{"id":"s46/devstral-small-2-24b","state":"missing"}]}]}`))
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
@@ -357,11 +311,12 @@ func TestCheckRequiresAirplaneReadyGateway(t *testing.T) {
 
 	report := Service{
 		Env: map[string]string{
-			"S46_LOCAL_OLLAMA_URL":     server.URL,
-			"S46_AIRPLANE_GATEWAY_URL": server.URL,
-			"S46_TEST_MEMORY_BYTES":    "68000000000",
-			"S46_TEST_FREE_DISK_BYTES": "61000000000",
-			"S46_TEST_OLLAMA_PATH":     "/opt/homebrew/bin/ollama",
+			"S46_LOCAL_LLAMACPP_URL":    server.URL,
+			"S46_AIRPLANE_GATEWAY_URL":  server.URL,
+			"S46_TEST_MEMORY_BYTES":     "68000000000",
+			"S46_TEST_FREE_DISK_BYTES":  "61000000000",
+			"S46_TEST_LLAMACPP_PATH":    "/opt/homebrew/bin/llama-server",
+			"S46_TEST_MODEL_DOWNLOADED": "1",
 		},
 		Client: server.Client(),
 	}.Check(context.Background())
@@ -375,9 +330,9 @@ func TestCheckRequiresAirplaneReadyGateway(t *testing.T) {
 func TestCheckReportsModelProbeHTTPError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/tags":
-			_, _ = w.Write([]byte(`{"models":[{"name":"devstral-small-2:24b-instruct-2512-q4_K_M"}]}`))
-		case "/api/generate":
+		case "/v1/models":
+			_, _ = w.Write([]byte(`{"data":[{"id":"devstral-small-2:24b-instruct-2512-q4_K_M"}]}`))
+		case "/v1/chat/completions":
 			http.Error(w, `{"error":"model load failed"}`, http.StatusInternalServerError)
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
@@ -387,18 +342,19 @@ func TestCheckReportsModelProbeHTTPError(t *testing.T) {
 
 	report := Service{
 		Env: map[string]string{
-			"S46_LOCAL_OLLAMA_URL":     server.URL,
-			"S46_TEST_MEMORY_BYTES":    "68000000000",
-			"S46_TEST_FREE_DISK_BYTES": "61000000000",
-			"S46_TEST_OLLAMA_PATH":     "/opt/homebrew/bin/ollama",
-			"S46_TEST_GATEWAY_READY":   "1",
+			"S46_LOCAL_LLAMACPP_URL":    server.URL,
+			"S46_TEST_MEMORY_BYTES":     "68000000000",
+			"S46_TEST_FREE_DISK_BYTES":  "61000000000",
+			"S46_TEST_LLAMACPP_PATH":    "/opt/homebrew/bin/llama-server",
+			"S46_TEST_MODEL_DOWNLOADED": "1",
+			"S46_TEST_GATEWAY_READY":    "1",
 		},
 		Client:            server.Client(),
 		ModelProbeTimeout: time.Second,
 	}.Check(context.Background())
 
 	check := findCheck(report, "model-probe")
-	if check.OK || !strings.Contains(check.Message, "Ollama returned HTTP 500") || !strings.Contains(check.Message, "model load failed") {
+	if check.OK || !strings.Contains(check.Message, "llama-server returned HTTP 500") || !strings.Contains(check.Message, "model load failed") {
 		t.Fatalf("unexpected model probe check: %#v", check)
 	}
 }

@@ -129,10 +129,10 @@ func statusCommand(runtime Runtime, opts *options) *cobra.Command {
 			}
 			showLocalRuntime := cfg.ActiveMode() == config.ModeAirplane || opts.verbose
 			var localServers []localServerStatus
-			var ollamaRuntime airplane.OllamaRuntime
+			var llamacppRuntime airplane.LlamacppRuntime
 			if showLocalRuntime {
 				localServers = statusLocalServers(app.runtime.Env, team)
-				ollamaRuntime = airplane.Service{Env: app.runtime.Env}.OllamaRuntime(cmd.Context())
+				llamacppRuntime = airplane.Service{Env: app.runtime.Env}.LlamacppRuntime(cmd.Context())
 			}
 			result := map[string]any{
 				"authenticated": state.Authenticated,
@@ -147,16 +147,16 @@ func statusCommand(runtime Runtime, opts *options) *cobra.Command {
 			}
 			if showLocalRuntime {
 				result["localServers"] = localServers
-				result["ollama"] = ollamaRuntime
+				result["llamacpp"] = llamacppRuntime
 			}
 			if ok, err := app.writeStructured(result); ok {
 				return err
 			}
 			var lines []string
 			if opts.verbose {
-				lines = renderStatusVerbose(app, cfg, state, team, localServers, ollamaRuntime, checks)
+				lines = renderStatusVerbose(app, cfg, state, team, localServers, llamacppRuntime, checks)
 			} else {
-				lines = renderStatusConcise(app, cfg, state, team, localServers, ollamaRuntime, checks)
+				lines = renderStatusConcise(app, cfg, state, team, localServers, llamacppRuntime, checks)
 			}
 			if err := app.renderer.Lines(lines...); err != nil {
 				return err
@@ -169,7 +169,7 @@ func statusCommand(runtime Runtime, opts *options) *cobra.Command {
 	}
 }
 
-func renderStatusConcise(app *app, cfg config.Config, state config.State, team *config.TeamConfig, localServers []localServerStatus, ollamaRuntime airplane.OllamaRuntime, checks []statusCheck) []string {
+func renderStatusConcise(app *app, cfg config.Config, state config.State, team *config.TeamConfig, localServers []localServerStatus, llamacppRuntime airplane.LlamacppRuntime, checks []statusCheck) []string {
 	lines := []string{fmt.Sprintf("[s46] auth:    %s", authStatus(state))}
 	if team == nil {
 		lines = append(lines, "[s46] team:    none")
@@ -182,10 +182,10 @@ func renderStatusConcise(app *app, cfg config.Config, state config.State, team *
 		)
 	}
 	if cfg.ActiveMode() == config.ModeAirplane {
-		lines = append(lines, renderOllamaRuntimeConcise(ollamaRuntime))
+		lines = append(lines, renderLlamacppRuntimeConcise(llamacppRuntime))
 		for _, server := range localServers {
-			if server.Name == "ollama" {
-				continue // Ollama runtime line above already reports this.
+			if server.Name == "llamacpp" {
+				continue
 			}
 			lines = append(lines, renderLocalServerStatusConcise(server))
 		}
@@ -198,7 +198,7 @@ func renderStatusConcise(app *app, cfg config.Config, state config.State, team *
 	return lines
 }
 
-func renderStatusVerbose(app *app, cfg config.Config, state config.State, team *config.TeamConfig, localServers []localServerStatus, ollamaRuntime airplane.OllamaRuntime, checks []statusCheck) []string {
+func renderStatusVerbose(app *app, cfg config.Config, state config.State, team *config.TeamConfig, localServers []localServerStatus, llamacppRuntime airplane.LlamacppRuntime, checks []statusCheck) []string {
 	lines := []string{
 		fmt.Sprintf("[s46] auth:    %s", authStatus(state)),
 		fmt.Sprintf("[s46] config:  %s", config.DisplayPath(app.config.ConfigPath, app.runtime.Env)),
@@ -218,7 +218,7 @@ func renderStatusVerbose(app *app, cfg config.Config, state config.State, team *
 	for _, server := range localServers {
 		lines = append(lines, renderLocalServerStatus(server))
 	}
-	lines = append(lines, renderOllamaRuntime(ollamaRuntime)...)
+	lines = append(lines, renderLlamacppRuntime(llamacppRuntime)...)
 	lines = append(lines, renderStatusChecks(checks)...)
 	lines = append(lines, fmt.Sprintf("[s46] sessions:%2d", len(state.Sessions)))
 	return lines
@@ -258,14 +258,11 @@ func renderLocalServerStatusConcise(status localServerStatus) string {
 	}
 }
 
-func renderOllamaRuntimeConcise(runtimeReport airplane.OllamaRuntime) string {
+func renderLlamacppRuntimeConcise(runtimeReport airplane.LlamacppRuntime) string {
 	if !runtimeReport.Running {
-		return "[s46] ollama:  not running"
+		return "[s46] llama.cpp: not running"
 	}
-	if runtimeReport.NeedsLaunchctlUpdate() || runtimeReport.NeedsProcessRestart() {
-		return "[s46] ollama:  running (settings drift; re-run with --verbose)"
-	}
-	return "[s46] ollama:  ok"
+	return "[s46] llama.cpp: ok"
 }
 
 func renderStatusChecks(checks []statusCheck) []string {
@@ -294,9 +291,9 @@ func statusChecksFailed(checks []statusCheck) bool {
 
 func statusLocalServers(env map[string]string, team *config.TeamConfig) []localServerStatus {
 	servers := []localServerStatus{}
-	ollamaURL := strs.FirstNonEmpty(env["S46_LOCAL_OLLAMA_URL"], airplane.LocalOllamaURL)
-	if isLocalURL(ollamaURL) {
-		servers = append(servers, describeLocalServer(env, "ollama", ollamaURL))
+	llamacppURL := airplane.LlamacppURL(env)
+	if isLocalURL(llamacppURL) {
+		servers = append(servers, describeLocalServer(env, "llamacpp", llamacppURL))
 	}
 	if apiURL := statusLocalAPIURL(env, team); apiURL != "" {
 		servers = append(servers, describeLocalServer(env, "api", apiURL))

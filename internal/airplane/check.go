@@ -15,8 +15,6 @@ import (
 	"github.com/sovereign46/s46-cli/internal/strs"
 )
 
-// Check is one health check entry in a Report. Required checks block the
-// report from being Ready.
 type Check struct {
 	Name     string `json:"name"`
 	OK       bool   `json:"ok"`
@@ -24,29 +22,27 @@ type Check struct {
 	Required bool   `json:"required"`
 }
 
-// Report aggregates the airplane health checks. Ready is true only when
-// all Required checks passed.
 type Report struct {
 	Mode          string  `json:"mode"`
 	Model         string  `json:"model"`
 	BackendModel  string  `json:"backendModel"`
 	GatewayURL    string  `json:"gatewayUrl"`
-	OllamaURL     string  `json:"ollamaUrl"`
+	LlamacppURL   string  `json:"llamacppUrl"`
 	Ready         bool    `json:"ready"`
 	Checks        []Check `json:"checks"`
 	MemoryGB      int64   `json:"memoryGb,omitempty"`
 	FreeDiskGB    int64   `json:"freeDiskGb,omitempty"`
-	OllamaPath    string  `json:"ollamaPath,omitempty"`
+	LlamacppPath  string  `json:"llamacppPath,omitempty"`
+	ModelPath     string  `json:"modelPath,omitempty"`
 	GatewayBinary string  `json:"gatewayBinary,omitempty"`
 }
 
-// Check returns a Report of the local airplane runtime state.
 func (s Service) Check(ctx context.Context) Report {
 	if strs.Truthy(strs.EnvValue(s.Env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")) {
 		return s.skippedReport()
 	}
 
-	report := Report{Mode: ModeAirplane, Model: LocalModelID, BackendModel: s.backendModel(), GatewayURL: s.gatewayURL(), OllamaURL: s.ollamaURL()}
+	report := Report{Mode: ModeAirplane, Model: LocalModelID, BackendModel: s.backendModel(), GatewayURL: s.gatewayURL(), LlamacppURL: LlamacppURL(s.Env), ModelPath: s.modelPath()}
 
 	osOK := runtime.GOOS == "darwin" || runtime.GOOS == "linux"
 	report.add(Check{Name: "os/arch", OK: osOK, Required: true, Message: runtime.GOOS + "/" + runtime.GOARCH})
@@ -67,26 +63,19 @@ func (s Service) Check(ctx context.Context) Report {
 		report.add(Check{Name: "disk", OK: freeDisk >= MinDiskBytes, Required: true, Message: fmt.Sprintf("%d GB free; about 30 GB recommended", gb(freeDisk))})
 	}
 
-	ollamaPath, ollamaOK := s.ollamaPath()
-	report.OllamaPath = ollamaPath
-	report.add(Check{Name: "ollama-installed", OK: ollamaOK, Required: true, Message: strs.FirstNonEmpty(ollamaPath, "ollama not found")})
+	llamacppPath, llamacppOK := s.llamacppPath()
+	report.LlamacppPath = llamacppPath
+	report.add(Check{Name: "llamacpp-installed", OK: llamacppOK, Required: true, Message: strs.FirstNonEmpty(llamacppPath, "llama-server not found")})
 
-	ollamaRunning := s.runBoolCheck(ctx, s.checkTimeout(), s.ollamaRunning)
-	report.add(Check{Name: "ollama-running", OK: ollamaRunning, Required: true, Message: boolMessage(ollamaRunning, s.ollamaURL(), "Ollama is not responding")})
+	modelDownloaded := s.modelDownloaded(ctx)
+	report.add(Check{Name: "model-downloaded", OK: modelDownloaded, Required: true, Message: boolMessage(modelDownloaded, s.modelPath(), "model file is not downloaded")})
 
-	modelDownloaded := false
-	modelDownloadedMessage := "skipped: Ollama is not running"
-	if ollamaRunning {
-		modelDownloaded = s.runBoolCheck(ctx, s.checkTimeout(), s.modelDownloaded)
-		modelDownloadedMessage = boolMessage(modelDownloaded, s.backendModel(), "model is not downloaded")
-	}
-	report.add(Check{Name: "model-downloaded", OK: modelDownloaded, Required: true, Message: modelDownloadedMessage})
+	llamacppRunning := s.runBoolCheck(ctx, s.checkTimeout(), s.llamacppRunning)
+	report.add(Check{Name: "llamacpp-running", OK: llamacppRunning, Required: true, Message: boolMessage(llamacppRunning, LlamacppURL(s.Env), "llama-server is not responding")})
 
 	modelProbe := false
-	modelProbeMessage := "skipped: model is not downloaded"
-	if !ollamaRunning {
-		modelProbeMessage = "skipped: Ollama is not running"
-	} else if modelDownloaded {
+	modelProbeMessage := "skipped: llama-server is not running"
+	if llamacppRunning {
 		modelProbeCtx, cancel := context.WithTimeout(ctx, s.modelProbeTimeout())
 		modelProbe, modelProbeMessage = s.modelProbeWithNotice(modelProbeCtx)
 		cancel()
@@ -101,9 +90,7 @@ func (s Service) Check(ctx context.Context) Report {
 	return report
 }
 
-func (r *Report) add(check Check) {
-	r.Checks = append(r.Checks, check)
-}
+func (r *Report) add(check Check) { r.Checks = append(r.Checks, check) }
 
 func (r Report) allRequiredOK() bool {
 	for _, check := range r.Checks {
@@ -114,21 +101,18 @@ func (r Report) allRequiredOK() bool {
 	return true
 }
 
-// skippedReport returns a synthetic "everything OK" Report. Used when
-// S46_AIRPLANE_SKIP_SETUP_CHECKS is set, typically in tests and in CI
-// where the local Ollama runtime is not available.
 func (s Service) skippedReport() Report {
 	checks := []Check{
 		{Name: "os/arch", OK: true, Required: true, Message: runtime.GOOS + "/" + runtime.GOARCH},
 		{Name: "memory", OK: true, Required: true, Message: "skipped"},
 		{Name: "disk", OK: true, Required: true, Message: "skipped"},
-		{Name: "ollama-installed", OK: true, Required: true, Message: "skipped"},
-		{Name: "ollama-running", OK: true, Required: true, Message: "skipped"},
-		{Name: "model-downloaded", OK: true, Required: true, Message: s.backendModel()},
+		{Name: "llamacpp-installed", OK: true, Required: true, Message: "skipped"},
+		{Name: "model-downloaded", OK: true, Required: true, Message: s.modelPath()},
+		{Name: "llamacpp-running", OK: true, Required: true, Message: "skipped"},
 		{Name: "model-probe", OK: true, Required: true, Message: LocalModelID + " responds"},
 		{Name: "local-gateway", OK: true, Required: true, Message: s.gatewayURL()},
 	}
-	return Report{Mode: ModeAirplane, Model: LocalModelID, BackendModel: s.backendModel(), GatewayURL: s.gatewayURL(), OllamaURL: s.ollamaURL(), Ready: true, Checks: checks, MemoryGB: 64, FreeDiskGB: 30}
+	return Report{Mode: ModeAirplane, Model: LocalModelID, BackendModel: s.backendModel(), GatewayURL: s.gatewayURL(), LlamacppURL: LlamacppURL(s.Env), ModelPath: s.modelPath(), Ready: true, Checks: checks, MemoryGB: 64, FreeDiskGB: 30}
 }
 
 func (s Service) runBoolCheck(ctx context.Context, timeout time.Duration, check func(context.Context) bool) bool {
@@ -151,34 +135,11 @@ func (s Service) modelProbeTimeout() time.Duration {
 	return modelProbeTimeout
 }
 
-// ollamaRunning is the private liveness probe (does Ollama answer on
-// /api/tags?). The public OllamaRunning wraps this.
-func (s Service) ollamaRunning(ctx context.Context) bool {
-	if running, ok := s.seamOllamaRunning(); ok {
-		return running
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(s.ollamaURL(), "/")+"/api/tags", nil)
-	if err != nil {
-		return false
-	}
-	response, err := s.httpClient().Do(request)
-	if err != nil {
-		return false
-	}
-	defer response.Body.Close()
-	return response.StatusCode >= 200 && response.StatusCode < 300
-}
-
 func (s Service) modelDownloaded(ctx context.Context) bool {
 	if downloaded, ok := s.seamModelDownloaded(); ok {
 		return downloaded
 	}
-	for _, model := range s.installedOllamaModels(ctx) {
-		if model == s.backendModel() {
-			return true
-		}
-	}
-	return false
+	return fileExists(s.modelPath())
 }
 
 func (s Service) modelProbeWithNotice(ctx context.Context) (bool, string) {
@@ -225,8 +186,14 @@ func (s Service) modelProbe(ctx context.Context) (bool, string) {
 	if probeOK, message, ok := s.seamModelProbe(); ok {
 		return probeOK, message
 	}
-	body, _ := json.Marshal(map[string]any{"model": s.backendModel(), "prompt": "ping", "stream": false, "options": map[string]any{"num_ctx": ContextWindow(s.Env)}, "keep_alive": KeepAlive(s.Env)})
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(s.ollamaURL(), "/")+"/api/generate", bytes.NewReader(body))
+	body, _ := json.Marshal(map[string]any{
+		"model":      s.backendModel(),
+		"messages":   []map[string]string{{"role": "user", "content": "Reply with: ok"}},
+		"stream":     false,
+		"max_tokens": 4,
+		"n_predict":  4,
+	})
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(LlamacppURL(s.Env), "/")+"/v1/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return false, "probe request failed: " + err.Error()
 	}
@@ -245,9 +212,9 @@ func (s Service) modelProbe(ctx context.Context) (bool, string) {
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		detail := readBodySnippet(response.Body)
 		if detail != "" {
-			return false, fmt.Sprintf("Ollama returned HTTP %d: %s", response.StatusCode, detail)
+			return false, fmt.Sprintf("llama-server returned HTTP %d: %s", response.StatusCode, detail)
 		}
-		return false, fmt.Sprintf("Ollama returned HTTP %d", response.StatusCode)
+		return false, fmt.Sprintf("llama-server returned HTTP %d", response.StatusCode)
 	}
 	return true, LocalModelID + " responds"
 }
@@ -272,7 +239,7 @@ func (s Service) gatewayReady(ctx context.Context) bool {
 		return false
 	}
 	for _, worker := range body.Workers {
-		if worker.ID != "local-ollama" || worker.Mode != ModeAirplane || worker.State != "ready" {
+		if worker.ID != "local-llamacpp" || worker.Mode != ModeAirplane || worker.State != "ready" {
 			continue
 		}
 		for _, model := range worker.Models {
@@ -310,27 +277,19 @@ func readBodySnippet(body io.Reader) string {
 
 func formatDuration(duration time.Duration) string {
 	if duration%time.Minute == 0 {
-		minutes := int(duration / time.Minute)
-		if minutes == 1 {
-			return "1 minute"
-		}
-		return fmt.Sprintf("%d minutes", minutes)
+		return fmt.Sprintf("%dm", int(duration/time.Minute))
 	}
 	if duration%time.Second == 0 {
-		seconds := int(duration / time.Second)
-		if seconds == 1 {
-			return "1 second"
-		}
-		return fmt.Sprintf("%d seconds", seconds)
+		return fmt.Sprintf("%ds", int(duration/time.Second))
 	}
 	return duration.String()
 }
 
-func boolMessage(ok bool, success string, failure string) string {
+func boolMessage(ok bool, good string, bad string) string {
 	if ok {
-		return success
+		return good
 	}
-	return failure
+	return bad
 }
 
 func gb(bytes int64) int64 {

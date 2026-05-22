@@ -115,7 +115,7 @@ check_share_server() {
   fi
 }
 
-mkdir -p "$sandbox/home" "$sandbox/home/.ollama" "$sandbox/home/.config" "$sandbox/home/.local/share" "$sandbox/home/.cache" "$sandbox/bin"
+mkdir -p "$sandbox/home" "$sandbox/home/.config" "$sandbox/home/.local/share" "$sandbox/home/.cache" "$sandbox/bin"
 
 cd "$repo_root"
 go build -o "$sandbox/bin/s46" ./cmd/s46
@@ -123,7 +123,7 @@ go build -o "$sandbox/bin/s46" ./cmd/s46
 export TMP_FOLDER="$sandbox"
 export HOME="$TMP_FOLDER/home"
 export S46_HOST_HOME="$host_home"
-export OLLAMA_MODELS="${OLLAMA_MODELS:-$host_home/.ollama/models}"
+export S46_AIRPLANE_MODEL_DIR="${S46_AIRPLANE_MODEL_DIR:-$host_home/.local/share/s46/models/devstral}"
 export XDG_CONFIG_HOME="$TMP_FOLDER/home/.config"
 export XDG_DATA_HOME="$TMP_FOLDER/home/.local/share"
 export XDG_CACHE_HOME="$TMP_FOLDER/home/.cache"
@@ -185,7 +185,7 @@ TMP_FOLDER: $TMP_FOLDER
 Temporary HOME: \$TMP_FOLDER/home
 Temporary binary: \$TMP_FOLDER/bin/s46
 API base: $api_base
-Ollama models: $OLLAMA_MODELS
+llama.cpp model dir: $S46_AIRPLANE_MODEL_DIR
 S46 logs: $S46_LOG_DIR
 S46 API repo: $api_repo_display
 Seeded harness configs: $seeded_harnesses_display

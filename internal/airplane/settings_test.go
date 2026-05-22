@@ -5,20 +5,21 @@ import (
 	"testing"
 )
 
-func TestAirplaneOllamaSettingsUsesDefaultsWhenEnvMissing(t *testing.T) {
+func TestAirplaneLlamacppSettingsUsesDefaultsWhenEnvMissing(t *testing.T) {
 	t.Parallel()
-	settings := AirplaneOllamaSettings(nil)
+	settings := AirplaneLlamacppSettings(nil)
 	want := map[string]string{
-		"OLLAMA_CONTEXT_LENGTH":    "65536",
-		"OLLAMA_KEEP_ALIVE":        DefaultKeepAlive,
-		"OLLAMA_NUM_PARALLEL":      "1",
-		"OLLAMA_MAX_LOADED_MODELS": "1",
-		"OLLAMA_FLASH_ATTENTION":   DefaultFlashAttention,
-		"OLLAMA_KV_CACHE_TYPE":     DefaultKVCacheType,
+		"--ctx-size":     "65536",
+		"--n-predict":    "4096",
+		"--parallel":     "1",
+		"--flash-attn":   DefaultFlashAttention,
+		"--cache-type-k": DefaultKVCacheType,
+		"--cache-type-v": DefaultKVCacheType,
+		"--timeout":      "600",
 	}
 	got := map[string]string{}
-	for _, s := range settings {
-		got[s.Key] = s.Value
+	for _, setting := range settings {
+		got[setting.Flag] = setting.Value
 	}
 	for k, v := range want {
 		if got[k] != v {
@@ -27,36 +28,42 @@ func TestAirplaneOllamaSettingsUsesDefaultsWhenEnvMissing(t *testing.T) {
 	}
 }
 
-func TestAirplaneOllamaSettingsHonorsEnvOverrides(t *testing.T) {
+func TestAirplaneLlamacppSettingsHonorsEnvOverrides(t *testing.T) {
 	t.Parallel()
 	env := map[string]string{
-		"S46_AIRPLANE_CONTEXT":          "32768",
-		"S46_AIRPLANE_NUM_PARALLEL":     "4",
-		"S46_AIRPLANE_MAX_LOADED_MODELS": "2",
-		"S46_AIRPLANE_KEEP_ALIVE":       "30m",
-		"OLLAMA_FLASH_ATTENTION":        "0",
-		"OLLAMA_KV_CACHE_TYPE":          "f16",
+		"S46_AIRPLANE_CONTEXT":         "32768",
+		"S46_AIRPLANE_MAX_TOKENS":      "2048",
+		"S46_AIRPLANE_NUM_PARALLEL":    "4",
+		"S46_AIRPLANE_KEEP_ALIVE":      "30m",
+		"S46_AIRPLANE_FLASH_ATTENTION": "off",
+		"S46_AIRPLANE_KV_CACHE_TYPE":   "f16",
 	}
 	got := map[string]string{}
-	for _, s := range AirplaneOllamaSettings(env) {
-		got[s.Key] = s.Value
+	for _, setting := range AirplaneLlamacppSettings(env) {
+		got[setting.Flag] = setting.Value
 	}
-	if got["OLLAMA_CONTEXT_LENGTH"] != "32768" || got["OLLAMA_NUM_PARALLEL"] != "4" || got["OLLAMA_MAX_LOADED_MODELS"] != "2" {
-		t.Errorf("env overrides ignored: %#v", got)
-	}
-	if got["OLLAMA_KEEP_ALIVE"] != "30m" || got["OLLAMA_FLASH_ATTENTION"] != "0" || got["OLLAMA_KV_CACHE_TYPE"] != "f16" {
-		t.Errorf("env overrides ignored: %#v", got)
+	for _, want := range []struct{ flag, value string }{
+		{"--ctx-size", "32768"},
+		{"--n-predict", "2048"},
+		{"--parallel", "4"},
+		{"--timeout", "1800"},
+		{"--flash-attn", "off"},
+		{"--cache-type-k", "f16"},
+		{"--cache-type-v", "f16"},
+	} {
+		if got[want.flag] != want.value {
+			t.Errorf("%s = %q, want %q (settings %#v)", want.flag, got[want.flag], want.value, got)
+		}
 	}
 }
 
-func TestAirplaneOllamaEnvIsKeyEqualsValueList(t *testing.T) {
+func TestAirplaneLlamacppArgsIncludesModelAndSettings(t *testing.T) {
 	t.Parallel()
-	env := map[string]string{"S46_AIRPLANE_CONTEXT": "16384"}
-	lines := AirplaneOllamaEnv(env)
-	joined := strings.Join(lines, " ")
-	for _, want := range []string{"OLLAMA_CONTEXT_LENGTH=16384", "OLLAMA_KEEP_ALIVE=" + DefaultKeepAlive} {
+	args := AirplaneLlamacppArgs(map[string]string{"S46_AIRPLANE_CONTEXT": "16384"}, "/models/devstral.gguf")
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"--host 127.0.0.1", "--port 8081", "--alias " + BackendModel, "-m /models/devstral.gguf", "--ctx-size 16384", "--n-gpu-layers 99", "--jinja"} {
 		if !strings.Contains(joined, want) {
-			t.Errorf("env list missing %q: %v", want, lines)
+			t.Errorf("args missing %q: %v", want, args)
 		}
 	}
 }
@@ -66,7 +73,7 @@ func TestAirplaneGatewayEnvProjectsSettings(t *testing.T) {
 	env := map[string]string{"S46_AIRPLANE_MAX_TOKENS": "256", "S46_WRITE_TIMEOUT": "5m"}
 	lines := AirplaneGatewayEnv(env)
 	joined := strings.Join(lines, " ")
-	for _, want := range []string{"S46_AIRPLANE_MAX_TOKENS=256", "S46_WRITE_TIMEOUT=5m"} {
+	for _, want := range []string{"S46_LOCAL_LLAMACPP_URL=http://127.0.0.1:8081", "S46_AIRPLANE_MAX_TOKENS=256", "S46_WRITE_TIMEOUT=5m"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("gateway env missing %q: %v", want, lines)
 		}
@@ -76,8 +83,8 @@ func TestAirplaneGatewayEnvProjectsSettings(t *testing.T) {
 func TestPositiveIntSettingFallsBackOnInvalid(t *testing.T) {
 	t.Parallel()
 	env := map[string]string{
-		"S46_AIRPLANE_CONTEXT":  "garbage",
-		"OLLAMA_CONTEXT_LENGTH": "0",
+		"S46_AIRPLANE_CONTEXT": "garbage",
+		"LLAMA_CONTEXT_LENGTH": "0",
 	}
 	if got := ContextWindow(env); got != DefaultContextWindow {
 		t.Errorf("ContextWindow = %d, want default %d", got, DefaultContextWindow)
@@ -87,8 +94,8 @@ func TestPositiveIntSettingFallsBackOnInvalid(t *testing.T) {
 func TestPositiveIntSettingHonorsFirstValidKey(t *testing.T) {
 	t.Parallel()
 	env := map[string]string{
-		"S46_AIRPLANE_CONTEXT":  "  ",
-		"OLLAMA_CONTEXT_LENGTH": "262144",
+		"S46_AIRPLANE_CONTEXT": "  ",
+		"LLAMA_CONTEXT_LENGTH": "262144",
 	}
 	if got := ContextWindow(env); got != 262144 {
 		t.Errorf("ContextWindow fallback chain broken: %d", got)
