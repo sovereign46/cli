@@ -16,7 +16,6 @@ import (
 
 	"github.com/sovereign46/s46-cli/internal/airplane"
 	askpkg "github.com/sovereign46/s46-cli/internal/ask"
-	"github.com/sovereign46/s46-cli/internal/contextx"
 )
 
 type askCommandResult struct {
@@ -162,14 +161,16 @@ func askCanUseANSIInputPrompt(app *app) bool {
 
 func decideAskWithSpinner(ctx context.Context, app *app, client askpkg.Client, prompt string, plan askpkg.Plan, response string) (askpkg.Decision, error) {
 	stop := startAskSpinner(app)
-	defer stop()
-	return client.Decide(ctx, prompt, plan, response)
+	decision, err := client.Decide(ctx, prompt, plan, response)
+	stop()
+	return decision, err
 }
 
 func askWithSpinner(app *app, fn func() (askpkg.Plan, error)) (askpkg.Plan, error) {
 	stop := startAskSpinner(app)
-	defer stop()
-	return fn()
+	plan, err := fn()
+	stop()
+	return plan, err
 }
 
 func strsFirstNonEmpty(values ...string) string {
@@ -239,10 +240,7 @@ func runAskShellCommand(ctx context.Context, app *app, command string) error {
 	if cwd := strings.TrimSpace(app.runtime.Env["PWD"]); filepath.IsAbs(cwd) {
 		cmd.Dir = cwd
 	}
-	if err := cmd.Run(); err != nil {
-		return contextx.ExternalError(ctx, err)
-	}
-	return nil
+	return cmd.Run()
 }
 
 func askCommandEnv(env map[string]string) []string {

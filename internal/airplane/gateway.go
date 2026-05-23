@@ -18,27 +18,18 @@ type gatewayCommand struct {
 	Description string
 }
 
-func (s Service) StartGateway(ctx context.Context) error {
+func (s Service) StartGateway() error {
 	if strs.Truthy(strs.EnvValue(s.Env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")) {
 		return nil
 	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if s.gatewayReady(ctx) {
+	if s.gatewayReady(context.Background()) {
 		return nil
-	}
-	if err := ctx.Err(); err != nil {
-		return err
 	}
 	if handled, err := s.seamStartGateway(); handled {
 		return err
 	}
-	if s.gatewayResponding(ctx) {
+	if s.gatewayResponding(context.Background()) {
 		return fmt.Errorf("local S46 API at %s is running but is not airplane-ready; run `s46 airplane setup` to restart it in airplane mode", s.gatewayURL())
-	}
-	if err := ctx.Err(); err != nil {
-		return err
 	}
 	command, ok := s.gatewayCommand()
 	if !ok {

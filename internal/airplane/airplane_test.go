@@ -148,7 +148,7 @@ func TestStartOllamaStopsLoadedModelWhenContextIsTooLarge(t *testing.T) {
 		"S46_TEST_OLLAMA_PATH":           "/opt/homebrew/bin/ollama",
 		"S46_TEST_STOP_OLLAMA_MODEL_OK":  "1",
 	}
-	if err := (Service{Env: env}).StartOllama(context.Background()); err != nil {
+	if err := (Service{Env: env}).StartOllama(); err != nil {
 		t.Fatal(err)
 	}
 	if env["S46_TEST_OLLAMA_LOADED_CONTEXT"] != "65536" {

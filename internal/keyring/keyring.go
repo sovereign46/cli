@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/sovereign46/s46-cli/internal/config"
-	"github.com/sovereign46/s46-cli/internal/contextx"
 	"github.com/sovereign46/s46-cli/internal/strs"
 )
 
@@ -44,9 +43,6 @@ func (s SecurityStore) Get(ctx context.Context, service string, account string) 
 	cmd := exec.CommandContext(ctx, "security", "find-generic-password", "-a", account, "-s", service, "-w")
 	out, err := cmd.Output()
 	if err != nil {
-		if ctxErr := contextx.Done(ctx, err); ctxErr != nil {
-			return "", ctxErr
-		}
 		return "", fmt.Errorf("credential not found in keychain")
 	}
 	return trimTrailingNewline(string(out)), nil
@@ -56,9 +52,6 @@ func (s SecurityStore) Set(ctx context.Context, service string, account string, 
 	cmd := exec.CommandContext(ctx, "security", "add-generic-password", "-a", account, "-s", service, "-U", "-w")
 	cmd.Stdin = strings.NewReader(secret)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		if ctxErr := contextx.Done(ctx, err); ctxErr != nil {
-			return ctxErr
-		}
 		return fmt.Errorf("cannot store credential in keychain: %s", trimTrailingNewline(string(out)))
 	}
 	return nil
@@ -67,9 +60,6 @@ func (s SecurityStore) Set(ctx context.Context, service string, account string, 
 func (s SecurityStore) Delete(ctx context.Context, service string, account string) error {
 	cmd := exec.CommandContext(ctx, "security", "delete-generic-password", "-a", account, "-s", service)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		if ctxErr := contextx.Done(ctx, err); ctxErr != nil {
-			return ctxErr
-		}
 		message := trimTrailingNewline(string(out))
 		if strings.Contains(message, "could not be found") || strings.Contains(message, "The specified item could not be found") {
 			return nil
@@ -85,9 +75,6 @@ func (s SecretToolStore) Get(ctx context.Context, service string, account string
 	cmd := exec.CommandContext(ctx, "secret-tool", "lookup", "service", service, "account", account)
 	out, err := cmd.Output()
 	if err != nil {
-		if ctxErr := contextx.Done(ctx, err); ctxErr != nil {
-			return "", ctxErr
-		}
 		return "", fmt.Errorf("credential not found in Linux secret service; install libsecret tools or set S46_KEYRING_BACKEND=file for tests")
 	}
 	return trimTrailingNewline(string(out)), nil
@@ -97,9 +84,6 @@ func (s SecretToolStore) Set(ctx context.Context, service string, account string
 	cmd := exec.CommandContext(ctx, "secret-tool", "store", "--label", service+" "+account, "service", service, "account", account)
 	cmd.Stdin = strings.NewReader(secret)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		if ctxErr := contextx.Done(ctx, err); ctxErr != nil {
-			return ctxErr
-		}
 		return fmt.Errorf("cannot store credential in Linux secret service: %s", trimTrailingNewline(string(out)))
 	}
 	return nil
@@ -108,9 +92,6 @@ func (s SecretToolStore) Set(ctx context.Context, service string, account string
 func (s SecretToolStore) Delete(ctx context.Context, service string, account string) error {
 	cmd := exec.CommandContext(ctx, "secret-tool", "clear", "service", service, "account", account)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		if ctxErr := contextx.Done(ctx, err); ctxErr != nil {
-			return ctxErr
-		}
 		message := trimTrailingNewline(string(out))
 		if strings.Contains(message, "No such secret") || strings.Contains(message, "not found") {
 			return nil
@@ -125,9 +106,6 @@ type FileStore struct {
 }
 
 func (s FileStore) Get(ctx context.Context, service string, account string) (string, error) {
-	if err := ctx.Err(); err != nil {
-		return "", err
-	}
 	entries, err := s.read()
 	if err != nil {
 		return "", err
@@ -140,9 +118,6 @@ func (s FileStore) Get(ctx context.Context, service string, account string) (str
 }
 
 func (s FileStore) Set(ctx context.Context, service string, account string, secret string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
 	entries, err := s.read()
 	if err != nil {
 		return err
@@ -152,9 +127,6 @@ func (s FileStore) Set(ctx context.Context, service string, account string, secr
 }
 
 func (s FileStore) Delete(ctx context.Context, service string, account string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
 	entries, err := s.read()
 	if err != nil {
 		return err

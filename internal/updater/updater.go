@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sovereign46/s46-cli/internal/contextx"
 	"github.com/sovereign46/s46-cli/internal/strs"
 )
 
@@ -225,9 +224,6 @@ func normalizeVersion(version string) string {
 }
 
 func (u Updater) latestRelease(ctx context.Context) (Release, error) {
-	httpClient, timeout := u.httpClient()
-	ctx, cancel := contextx.WithMaxTimeout(ctx, timeout)
-	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, u.latestReleaseURL(), nil)
 	if err != nil {
 		return Release{}, err
@@ -238,9 +234,9 @@ func (u Updater) latestRelease(ctx context.Context) (Release, error) {
 		request.Header.Set("Authorization", "Bearer "+token)
 	}
 
-	response, err := httpClient.Do(request)
+	response, err := u.httpClient().Do(request)
 	if err != nil {
-		return Release{}, contextx.ExternalError(ctx, err)
+		return Release{}, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusNotFound {
@@ -291,16 +287,11 @@ func (u Updater) currentVersion() string {
 	return strs.FirstNonEmpty(u.CurrentVersion, "dev")
 }
 
-func (u Updater) httpClient() (*http.Client, time.Duration) {
-	if u.Client == nil {
-		return &http.Client{}, defaultTimeout
+func (u Updater) httpClient() *http.Client {
+	if u.Client != nil {
+		return u.Client
 	}
-	if u.Client.Timeout <= 0 {
-		return u.Client, defaultTimeout
-	}
-	copy := *u.Client
-	copy.Timeout = 0
-	return &copy, u.Client.Timeout
+	return &http.Client{Timeout: defaultTimeout}
 }
 
 func (u Updater) executablePath() (string, error) {

@@ -16,7 +16,6 @@ import (
 
 	"github.com/sovereign46/s46-cli/internal/api"
 	"github.com/sovereign46/s46-cli/internal/config"
-	"github.com/sovereign46/s46-cli/internal/contextx"
 	"github.com/sovereign46/s46-cli/internal/harness"
 	"github.com/sovereign46/s46-cli/internal/keyring"
 	sharepkg "github.com/sovereign46/s46-cli/internal/share"
@@ -734,12 +733,8 @@ func currentWorkDir(env map[string]string) string {
 	return wd
 }
 
-const gitCommandTimeout = 2 * time.Second
-
 func gitRoot(ctx context.Context, wd string) string {
-	cmdCtx, cancel := contextx.WithMaxTimeout(ctx, gitCommandTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(cmdCtx, "git", "-C", wd, "rev-parse", "--show-toplevel")
+	cmd := exec.CommandContext(ctx, "git", "-C", wd, "rev-parse", "--show-toplevel")
 	raw, err := cmd.Output()
 	if err != nil {
 		return ""
@@ -874,9 +869,7 @@ func enrichLandWithGit(ctx context.Context, result api.LandResult) api.LandResul
 }
 
 func gitOutput(ctx context.Context, args ...string) string {
-	cmdCtx, cancel := contextx.WithMaxTimeout(ctx, gitCommandTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(cmdCtx, "git", args...)
+	cmd := exec.CommandContext(ctx, "git", args...)
 	raw, err := cmd.Output()
 	if err != nil {
 		return ""

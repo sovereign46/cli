@@ -11,7 +11,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/sovereign46/s46-cli/internal/contextx"
 	"github.com/sovereign46/s46-cli/internal/strs"
 )
 
@@ -74,10 +73,7 @@ func (s Service) InstallOllama(ctx context.Context) error {
 	cmd := exec.CommandContext(ctx, "brew", "install", "ollama")
 	cmd.Stdout = s.Stdout
 	cmd.Stderr = s.Stderr
-	if err := cmd.Run(); err != nil {
-		return contextx.ExternalError(ctx, err)
-	}
-	return nil
+	return cmd.Run()
 }
 
 func (s Service) PullModel(ctx context.Context) error {
@@ -91,18 +87,15 @@ func (s Service) PullModel(ctx context.Context) error {
 	cmd.Env = s.ollamaEnv()
 	cmd.Stdout = s.Stdout
 	cmd.Stderr = s.Stderr
-	if err := cmd.Run(); err != nil {
-		return contextx.ExternalError(ctx, err)
-	}
-	return nil
+	return cmd.Run()
 }
 
-func (s Service) StartOllama(ctx context.Context) error {
+func (s Service) StartOllama() error {
 	if strs.Truthy(strs.EnvValue(s.Env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")) {
 		return nil
 	}
-	if s.ollamaRunning(ctx) {
-		return s.ensureOllamaContextLimit(ctx)
+	if s.ollamaRunning(context.Background()) {
+		return s.ensureOllamaContextLimit(context.Background())
 	}
 	if handled, err := s.seamStartOllama(); handled {
 		return err
@@ -226,13 +219,10 @@ func (s Service) ConfigureMacOSOllamaLaunchd(ctx context.Context) error {
 		return fmt.Errorf("launchctl Ollama configuration is only available on macOS")
 	}
 	for _, setting := range settings {
-		cmdCtx, cancel := contextx.WithMaxTimeout(ctx, quickCommandTimeout)
-		cmd := exec.CommandContext(cmdCtx, "launchctl", "setenv", setting.Key, setting.Value)
+		cmd := exec.CommandContext(ctx, "launchctl", "setenv", setting.Key, setting.Value)
 		cmd.Stdout = s.Stdout
 		cmd.Stderr = s.Stderr
-		err := contextx.ExternalError(cmdCtx, cmd.Run())
-		cancel()
-		if err != nil {
+		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("launchctl setenv %s: %w", setting.Key, err)
 		}
 	}
@@ -256,9 +246,7 @@ func (s Service) launchctlOllamaEnv(ctx context.Context) (map[string]string, boo
 	}
 	values := map[string]string{}
 	for _, setting := range AirplaneOllamaSettings(s.Env) {
-		cmdCtx, cancel := contextx.WithMaxTimeout(ctx, quickCommandTimeout)
-		output, err := exec.CommandContext(cmdCtx, "launchctl", "getenv", setting.Key).Output()
-		cancel()
+		output, err := exec.CommandContext(ctx, "launchctl", "getenv", setting.Key).Output()
 		if err != nil {
 			return nil, false
 		}
@@ -271,9 +259,7 @@ func (s Service) ollamaServeProcess(ctx context.Context) (ollamaProcess, bool) {
 	if process, found, ok := s.seamOllamaServeProcess(); ok {
 		return process, found
 	}
-	cmdCtx, cancel := contextx.WithMaxTimeout(ctx, quickCommandTimeout)
-	defer cancel()
-	output, err := exec.CommandContext(cmdCtx, "ps", "-axo", "pid=,ppid=,args=").Output()
+	output, err := exec.CommandContext(ctx, "ps", "-axo", "pid=,ppid=,args=").Output()
 	if err != nil {
 		return ollamaProcess{}, false
 	}
@@ -337,9 +323,7 @@ func processEnvForPID(ctx context.Context, pid int) (map[string]string, bool) {
 			return parseEnvFields(strings.ReplaceAll(string(raw), "\x00", "\n")), true
 		}
 	}
-	cmdCtx, cancel := contextx.WithMaxTimeout(ctx, quickCommandTimeout)
-	defer cancel()
-	output, err := exec.CommandContext(cmdCtx, "ps", "eww", "-p", strconv.Itoa(pid), "-o", "command=").Output()
+	output, err := exec.CommandContext(ctx, "ps", "eww", "-p", strconv.Itoa(pid), "-o", "command=").Output()
 	if err != nil || len(bytes.TrimSpace(output)) == 0 {
 		return nil, false
 	}
@@ -467,16 +451,11 @@ func (s Service) stopLoadedBackendModel(ctx context.Context) error {
 	if !ok {
 		path = "ollama"
 	}
-	cmdCtx, cancel := contextx.WithMaxTimeout(ctx, quickCommandTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(cmdCtx, path, "stop", s.backendModel())
+	cmd := exec.CommandContext(ctx, path, "stop", s.backendModel())
 	cmd.Env = s.ollamaEnv()
 	cmd.Stdout = s.Stdout
 	cmd.Stderr = s.Stderr
-	if err := cmd.Run(); err != nil {
-		return contextx.ExternalError(cmdCtx, err)
-	}
-	return nil
+	return cmd.Run()
 }
 
 func (s Service) ollamaEnv(extra ...string) []string {

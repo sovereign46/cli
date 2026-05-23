@@ -9,8 +9,6 @@ import (
 	"net/http"
 	"strings"
 	"time"
-
-	"github.com/sovereign46/s46-cli/internal/contextx"
 )
 
 const (
@@ -84,21 +82,7 @@ func (c Client) Delete(ctx context.Context, id string, revokeKey string) (Delete
 	return out, nil
 }
 
-const defaultShareHTTPTimeout = 20 * time.Second
-
 func (c Client) doJSON(ctx context.Context, method string, path string, body any, out any, revokeKey string) error {
-	httpClient := c.HTTPClient
-	timeout := defaultShareHTTPTimeout
-	if httpClient == nil {
-		httpClient = &http.Client{}
-	} else if httpClient.Timeout > 0 {
-		timeout = httpClient.Timeout
-		copy := *httpClient
-		copy.Timeout = 0
-		httpClient = &copy
-	}
-	ctx, cancel := contextx.WithMaxTimeout(ctx, timeout)
-	defer cancel()
 	baseURL := strings.TrimRight(c.BaseURL, "/")
 	if baseURL == "" {
 		baseURL = DefaultAPIBaseURL
@@ -125,9 +109,13 @@ func (c Client) doJSON(ctx context.Context, method string, path string, body any
 	if revokeKey != "" {
 		req.Header.Set("X-S46-Revoke-Key", revokeKey)
 	}
+	httpClient := c.HTTPClient
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 20 * time.Second}
+	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return contextx.ExternalError(ctx, err)
+		return err
 	}
 	defer resp.Body.Close()
 	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
