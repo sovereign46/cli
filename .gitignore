@@ -7,3 +7,6 @@
 
 # Local test state
 .coverage/
+
+# Local agent state
+.pi/
