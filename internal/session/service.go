@@ -313,6 +313,13 @@ func (s Service) Share(ctx context.Context, sessionID string, ttl string) (Share
 	if err != nil {
 		return ShareResult{}, err
 	}
+	if s.Config.Env["S46_SHARE_BACKEND"] != "mock" {
+		if ensureAnonymousClientID(&ctxState.State) {
+			if err := s.Config.SaveState(ctxState.State); err != nil {
+				return ShareResult{}, err
+			}
+		}
+	}
 	result, err := s.buildShare(ctx, ctxState, sessionID, normalizedTTL)
 	if err != nil {
 		return ShareResult{}, err
@@ -349,7 +356,7 @@ func (s Service) RevokeShare(ctx context.Context, target string) (RevokeResult, 
 	}
 	mock := s.Config.Env["S46_SHARE_BACKEND"] == "mock" || record.Mock
 	if !mock {
-		client := sharepkg.Client{BaseURL: shareAPIBaseURL(s.Config.Env), UploadToken: shareUploadToken(s.Config.Env)}
+		client := sharepkg.Client{BaseURL: shareAPIBaseURL(s.Config.Env)}
 		if _, err := client.Delete(ctx, record.ID, record.RevokeKey); err != nil {
 			return RevokeResult{}, err
 		}
@@ -394,17 +401,13 @@ func (s Service) mockShare(ctx context.Context, ctxState workspaceContext, sessi
 }
 
 func (s Service) gistShare(ctx context.Context, ctxState workspaceContext, sessionID string, ttl string) (ShareResult, error) {
-	uploadToken := shareUploadToken(s.Config.Env)
-	if uploadToken == "" {
-		return ShareResult{}, fmt.Errorf("missing S46_SHARE_UPLOAD_TOKEN for s46-gist uploads")
-	}
 	session := findOrDefault(ctxState.State, sessionID, ctxState.Team, ctxState.TeamConfig)
 	existing := ctxState.State.Shares[sessionID]
 	encrypted, err := s.encryptedArtifactForShare(ctx, ctxState, session, existing)
 	if err != nil {
 		return ShareResult{}, err
 	}
-	client := sharepkg.Client{BaseURL: shareAPIBaseURL(s.Config.Env), UploadToken: uploadToken}
+	client := sharepkg.Client{BaseURL: shareAPIBaseURL(s.Config.Env), AnonymousClientID: ctxState.State.AnonymousClientID}
 	request := sharepkg.UploadRequest{Blob: encrypted.Blob, TTL: ttl, ContentType: sharepkg.BlobContentType}
 	if existing.ID != "" && existing.RevokeKey != "" {
 		request.RevokeKey = existing.RevokeKey
@@ -508,8 +511,14 @@ func shareAPIBaseURL(env map[string]string) string {
 	return firstNonEmpty(env["S46_SHARE_API_URL"], env["S46_GIST_URL"], sharepkg.DefaultAPIBaseURL)
 }
 
-func shareUploadToken(env map[string]string) string {
-	return firstNonEmpty(env["S46_SHARE_UPLOAD_TOKEN"], env["S46_GIST_UPLOAD_TOKEN"])
+const anonymousClientIDPrefix = "anon_"
+
+func ensureAnonymousClientID(state *config.State) bool {
+	if strings.TrimSpace(state.AnonymousClientID) != "" {
+		return false
+	}
+	state.AnonymousClientID = anonymousClientIDPrefix + secureToken(16)
+	return true
 }
 
 func firstNonEmpty(values ...string) string {

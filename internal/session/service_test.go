@@ -120,8 +120,7 @@ func TestGistShareCreateUpdateAndRevoke(t *testing.T) {
 	var sawDelete bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if r.Method != http.MethodDelete && r.Header.Get("Authorization") != "Bearer upload" {
-			http.Error(w, "missing auth", http.StatusUnauthorized)
+		if handleShareChallenge(t, w, r) {
 			return
 		}
 		switch {
@@ -154,7 +153,7 @@ func TestGistShareCreateUpdateAndRevoke(t *testing.T) {
 	}))
 	defer server.Close()
 
-	service, store := newTestService(t, api.Team{Name: "s46", Endpoint: "https://s46.s46.dev", Lane: "EU-OPO", DefaultModel: api.DefaultModel}, config.ModeCloud, map[string]string{"S46_SHARE_API_URL": server.URL, "S46_SHARE_UPLOAD_TOKEN": "upload", "S46_SHARE_VIEWER_URL": "https://share.test"})
+	service, store := newTestService(t, api.Team{Name: "s46", Endpoint: "https://s46.s46.dev", Lane: "EU-OPO", DefaultModel: api.DefaultModel}, config.ModeCloud, map[string]string{"S46_SHARE_API_URL": server.URL, "S46_SHARE_VIEWER_URL": "https://share.test"})
 	first, err := service.Share(context.Background(), "@nunojob/task", "7d")
 	if err != nil {
 		t.Fatal(err)
@@ -198,6 +197,9 @@ func TestShareBuildsArtifactFromPiJSONL(t *testing.T) {
 	var createBlob string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if handleShareChallenge(t, w, r) {
+			return
+		}
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/shares" {
 			http.NotFound(w, r)
 			return
@@ -211,7 +213,7 @@ func TestShareBuildsArtifactFromPiJSONL(t *testing.T) {
 	}))
 	defer server.Close()
 
-	service, _ := newTestService(t, api.Team{Name: "s46", Endpoint: "https://s46.s46.dev", Lane: "EU-OPO", DefaultModel: api.DefaultModel}, config.ModeCloud, map[string]string{"S46_SHARE_API_URL": server.URL, "S46_SHARE_UPLOAD_TOKEN": "upload", "S46_SHARE_VIEWER_URL": "https://share.test"})
+	service, _ := newTestService(t, api.Team{Name: "s46", Endpoint: "https://s46.s46.dev", Lane: "EU-OPO", DefaultModel: api.DefaultModel}, config.ModeCloud, map[string]string{"S46_SHARE_API_URL": server.URL, "S46_SHARE_VIEWER_URL": "https://share.test"})
 	writeSessionJSONL(t, filepath.Join(service.Config.Env["HOME"], ".pi", "agent", "sessions", "--Users-nuno-dev-app--", "2026-05-21T10-00-00-000Z_"+sessionID+".jsonl"), `
 {"type":"session","id":"019e4ad2-ba3a-71f7-b34a-205e84be280e","timestamp":"2026-05-21T10:00:00.000Z","cwd":"/Users/nuno/dev/app"}
 {"type":"message","timestamp":"2026-05-21T10:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"actual pi prompt"}],"timestamp":"2026-05-21T10:00:01.000Z"}}
@@ -240,6 +242,22 @@ func TestShareBuildsArtifactFromPiJSONL(t *testing.T) {
 	if strings.Contains(string(plaintext), "private chain") {
 		t.Fatalf("artifact leaked reasoning: %s", plaintext)
 	}
+}
+
+func handleShareChallenge(t *testing.T, w http.ResponseWriter, r *http.Request) bool {
+	t.Helper()
+	if r.Method != http.MethodPost || r.URL.Path != "/v1/share-challenges" {
+		return false
+	}
+	var req sharepkg.ChallengeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		t.Fatal(err)
+	}
+	if req.ClientID == "" || req.BodyHash == "" || req.Operation == "" {
+		t.Fatalf("bad challenge request: %#v", req)
+	}
+	_ = json.NewEncoder(w).Encode(sharepkg.ChallengeResponse{Algorithm: "sha256", Nonce: "nonce", Difficulty: 0, BodyHash: req.BodyHash, ClientID: req.ClientID, Operation: req.Operation, Challenge: "signed"})
+	return true
 }
 
 func serverURL(r *http.Request) string {

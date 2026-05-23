@@ -36,6 +36,9 @@ func TestShareBuildsArtifactsFromPublicHarnessFixtures(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var blob string
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if handleShareChallenge(t, w, r) {
+					return
+				}
 				if r.Method != http.MethodPost || r.URL.Path != "/v1/shares" {
 					http.NotFound(w, r)
 					return
@@ -49,7 +52,7 @@ func TestShareBuildsArtifactsFromPublicHarnessFixtures(t *testing.T) {
 			}))
 			defer server.Close()
 
-			service, _ := newTestService(t, api.Team{Name: "fixture", Endpoint: "https://fixture.s46.dev", Lane: "EU-OPO", DefaultModel: api.DefaultModel}, config.ModeCloud, map[string]string{"S46_SHARE_API_URL": server.URL, "S46_SHARE_UPLOAD_TOKEN": "upload", "S46_SHARE_VIEWER_URL": "https://share.test"})
+			service, _ := newTestService(t, api.Team{Name: "fixture", Endpoint: "https://fixture.s46.dev", Lane: "EU-OPO", DefaultModel: api.DefaultModel}, config.ModeCloud, map[string]string{"S46_SHARE_API_URL": server.URL, "S46_SHARE_VIEWER_URL": "https://share.test"})
 			service.Harness = harness.NewRegistry(claude.New(), codex.New(), pi.New())
 			copyFixtureTree(t, tc.fixtureDir, filepath.Join(service.Config.Env["HOME"], tc.homeRel), service.Config.Env["HOME"])
 

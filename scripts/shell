@@ -144,7 +144,8 @@ share_api_default="http://127.0.0.1:8789"
 share_viewer_default="http://127.0.0.1:5173"
 export S46_SHARE_API_URL="${S46_SHARE_API_URL:-$share_api_default}"
 export S46_SHARE_VIEWER_URL="${S46_SHARE_VIEWER_URL:-$share_viewer_default}"
-export S46_SHARE_UPLOAD_TOKEN="${S46_SHARE_UPLOAD_TOKEN:-dev-upload-token}"
+unset S46_SHARE_UPLOAD_TOKEN
+unset S46_GIST_UPLOAD_TOKEN
 unset S46_SHARE_BACKEND
 share_gist_status="$(check_share_server "s46-gist" "$S46_SHARE_API_URL")"
 share_viewer_status="$(check_share_server "s46-share" "$S46_SHARE_VIEWER_URL")"

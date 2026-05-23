@@ -51,6 +51,7 @@ type State struct {
 	CurrentUser       string                 `json:"currentUser,omitempty"`
 	CurrentDeviceID   string                 `json:"currentDeviceId,omitempty"`
 	CurrentDeviceName string                 `json:"currentDeviceName,omitempty"`
+	AnonymousClientID string                 `json:"anonymousClientId,omitempty"`
 	Authenticated     bool                   `json:"authenticated"`
 	LastLoginAt       string                 `json:"lastLoginAt,omitempty"`
 	Sessions          map[string]api.Session `json:"sessions"`
