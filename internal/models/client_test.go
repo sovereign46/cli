@@ -1,18 +1,23 @@
 package models
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestInstallDownloadsSignedModelAndWritesReceipt(t *testing.T) {
@@ -77,6 +82,143 @@ func TestInstallReportsDownloadProgress(t *testing.T) {
 	if !last.Done || last.Current != int64(len(fixture.artifact)) || last.Total != int64(len(fixture.artifact)) {
 		t.Fatalf("unexpected final progress event: %#v", last)
 	}
+}
+
+func TestInstallDownloadsArtifactWithParallelRanges(t *testing.T) {
+	fixture := newModelFixture(t, bytes.Repeat([]byte("0123456789abcdef"), 320*1024))
+	var activeRanges int32
+	var maxActiveRanges int32
+	server := fixture.rangeServer(t, func(r *http.Request) {
+		if r.Header.Get("Range") == "" {
+			return
+		}
+		active := atomic.AddInt32(&activeRanges, 1)
+		for {
+			maxActive := atomic.LoadInt32(&maxActiveRanges)
+			if active <= maxActive || atomic.CompareAndSwapInt32(&maxActiveRanges, maxActive, active) {
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+		atomic.AddInt32(&activeRanges, -1)
+	})
+	defer server.Close()
+	fixture.manifest.URL = server.URL + "/artifacts/model.gguf"
+	fixture.sign(t)
+
+	target := filepath.Join(t.TempDir(), "model.gguf")
+	env := fixture.env(server.URL)
+	env["S46_MODELS_DOWNLOAD_PARALLELISM"] = "4"
+	env["S46_MODELS_DOWNLOAD_CHUNK_BYTES"] = fmt.Sprint(minArtifactDownloadChunkSize)
+	if err := Install(context.Background(), InstallRequest{Env: env, ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, BackendModel: fixture.manifest.BackendModel, TargetPath: target, HTTPClient: server.Client()}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, fixture.artifact) {
+		t.Fatal("downloaded artifact mismatch")
+	}
+	if atomic.LoadInt32(&maxActiveRanges) < 2 {
+		t.Fatalf("expected concurrent range downloads, max active ranges was %d", maxActiveRanges)
+	}
+	assertMissing(t, artifactPartPath(target))
+	assertMissing(t, artifactDownloadStatePath(target))
+}
+
+func TestInstallRangeDownloadsUseHTTP11(t *testing.T) {
+	fixture := newModelFixture(t, bytes.Repeat([]byte("x"), 2*minArtifactDownloadChunkSize))
+	var mu sync.Mutex
+	var protocols []string
+	server := fixture.rangeTLSServer(t, func(r *http.Request) {
+		if r.Header.Get("Range") == "" {
+			return
+		}
+		mu.Lock()
+		protocols = append(protocols, r.Proto)
+		mu.Unlock()
+	})
+	defer server.Close()
+	fixture.manifest.URL = server.URL + "/artifacts/model.gguf"
+	fixture.sign(t)
+
+	target := filepath.Join(t.TempDir(), "model.gguf")
+	env := fixture.env(server.URL)
+	env["S46_MODELS_DOWNLOAD_PARALLELISM"] = "2"
+	env["S46_MODELS_DOWNLOAD_CHUNK_BYTES"] = fmt.Sprint(minArtifactDownloadChunkSize)
+	if err := Install(context.Background(), InstallRequest{Env: env, ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, BackendModel: fixture.manifest.BackendModel, TargetPath: target, HTTPClient: server.Client()}); err != nil {
+		t.Fatal(err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(protocols) == 0 {
+		t.Fatal("expected range requests")
+	}
+	for _, protocol := range protocols {
+		if protocol != "HTTP/1.1" {
+			t.Fatalf("range request used %s, want HTTP/1.1; protocols=%#v", protocol, protocols)
+		}
+	}
+}
+
+func TestInstallResumesCompletedRangeChunks(t *testing.T) {
+	chunkSize := int64(minArtifactDownloadChunkSize)
+	artifact := make([]byte, 3*chunkSize)
+	for i := range artifact {
+		artifact[i] = byte(i % 251)
+	}
+	fixture := newModelFixture(t, artifact)
+	var mu sync.Mutex
+	var ranges []string
+	server := fixture.rangeServer(t, func(r *http.Request) {
+		if value := r.Header.Get("Range"); value != "" {
+			mu.Lock()
+			ranges = append(ranges, value)
+			mu.Unlock()
+		}
+	})
+	defer server.Close()
+	fixture.manifest.URL = server.URL + "/artifacts/model.gguf"
+	fixture.sign(t)
+
+	target := filepath.Join(t.TempDir(), "model.gguf")
+	if err := os.WriteFile(artifactPartPath(target), artifact[:chunkSize], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state := newArtifactDownloadState(fixture.manifest, chunkSize)
+	state.Completed[0] = true
+	if err := writeArtifactDownloadState(artifactDownloadStatePath(target), state); err != nil {
+		t.Fatal(err)
+	}
+
+	env := fixture.env(server.URL)
+	env["S46_MODELS_DOWNLOAD_PARALLELISM"] = "3"
+	env["S46_MODELS_DOWNLOAD_CHUNK_BYTES"] = fmt.Sprint(chunkSize)
+	if err := Install(context.Background(), InstallRequest{Env: env, ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, BackendModel: fixture.manifest.BackendModel, TargetPath: target, HTTPClient: server.Client()}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, fixture.artifact) {
+		t.Fatal("downloaded artifact mismatch")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if containsString(ranges, fmt.Sprintf("bytes=0-%d", chunkSize-1)) {
+		t.Fatalf("completed first chunk was downloaded again: %#v", ranges)
+	}
+	for _, want := range []string{fmt.Sprintf("bytes=%d-%d", chunkSize, 2*chunkSize-1), fmt.Sprintf("bytes=%d-%d", 2*chunkSize, 3*chunkSize-1)} {
+		if !containsString(ranges, want) {
+			t.Fatalf("missing range %s in %#v", want, ranges)
+		}
+	}
+	assertMissing(t, artifactPartPath(target))
+	assertMissing(t, artifactDownloadStatePath(target))
 }
 
 func TestInstallRejectsBadSignature(t *testing.T) {
@@ -228,6 +370,53 @@ func (f *modelFixture) server(t *testing.T, overrides map[string][]byte) *httpte
 			http.NotFound(w, r)
 		}
 	}))
+}
+
+func (f *modelFixture) rangeServer(t *testing.T, onArtifact func(*http.Request)) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(f.rangeHandler(onArtifact))
+}
+
+func (f *modelFixture) rangeTLSServer(t *testing.T, onArtifact func(*http.Request)) *httptest.Server {
+	t.Helper()
+	server := httptest.NewUnstartedServer(f.rangeHandler(onArtifact))
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	return server
+}
+
+func (f *modelFixture) rangeHandler(onArtifact func(*http.Request)) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/models/v1/s46/test-model/manifest.json":
+			_, _ = w.Write(f.body)
+		case "/models/v1/s46/test-model/manifest.json.sig":
+			_ = json.NewEncoder(w).Encode(f.signature)
+		case "/artifacts/model.gguf":
+			if onArtifact != nil {
+				onArtifact(r)
+			}
+			http.ServeContent(w, r, f.manifest.Filename, time.Unix(0, 0), bytes.NewReader(f.artifact))
+		default:
+			http.NotFound(w, r)
+		}
+	})
+}
+
+func assertMissing(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("expected %s to be missing, got %v", path, err)
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func (f *modelFixture) env(serverURL string) map[string]string {

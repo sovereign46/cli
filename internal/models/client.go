@@ -71,11 +71,13 @@ func Install(ctx context.Context, request InstallRequest) error {
 	if ok, err := verifyInstalledReceiptForManifest(request, manifest.Manifest, true); err != nil {
 		return err
 	} else if ok {
+		removeArtifactDownloadFiles(request.TargetPath)
 		return nil
 	}
 	if ok, err := verifyExistingArtifact(request, manifest.Manifest); err != nil {
 		return err
 	} else if ok {
+		removeArtifactDownloadFiles(request.TargetPath)
 		return writeReceipt(request.TargetPath, manifest)
 	}
 	return downloadAndInstallArtifact(ctx, request, manifest)
@@ -234,42 +236,7 @@ func downloadAndInstallArtifact(ctx context.Context, request InstallRequest, man
 	if err := policy.validate(manifest.Manifest.URL); err != nil {
 		return err
 	}
-	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, manifest.Manifest.URL, nil)
-	if err != nil {
-		return err
-	}
-	response, err := httpClient(request.HTTPClient, policy).Do(httpRequest)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("download model artifact failed: HTTP %d", response.StatusCode)
-	}
-	if response.ContentLength >= 0 && response.ContentLength != manifest.Manifest.Size {
-		return fmt.Errorf("model artifact size mismatch from content-length: got %d, want %d", response.ContentLength, manifest.Manifest.Size)
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(request.TargetPath), "."+filepath.Base(request.TargetPath)+"-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	defer func() { _ = os.Remove(tmpPath) }()
-	hash := sha256.New()
-	written, err := copyWithInstallProgress(io.MultiWriter(tmp, hash), response.Body, request.Progress, installProgress(request, manifest.Manifest, InstallProgressDownloading))
-	if closeErr := tmp.Close(); err == nil {
-		err = closeErr
-	}
-	if err != nil {
-		return err
-	}
-	if err := verifyArtifactDigest(written, hash.Sum(nil), manifest.Manifest); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmpPath, 0o600); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpPath, request.TargetPath); err != nil {
+	if err := downloadArtifact(ctx, request, manifest, policy); err != nil {
 		return err
 	}
 	return writeReceipt(request.TargetPath, manifest)

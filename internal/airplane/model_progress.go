@@ -20,13 +20,14 @@ const (
 )
 
 type modelInstallProgressRenderer struct {
-	out         io.Writer
-	prefix      string
-	lineWidth   int
-	phase       models.InstallProgressPhase
-	startedAt   time.Time
-	lastUpdate  time.Time
-	lastLineLen int
+	out            io.Writer
+	prefix         string
+	lineWidth      int
+	phase          models.InstallProgressPhase
+	startedAt      time.Time
+	startedCurrent int64
+	lastUpdate     time.Time
+	lastLineLen    int
 }
 
 func (s Service) modelInstallProgress() models.InstallProgressFunc {
@@ -48,6 +49,7 @@ func (r *modelInstallProgressRenderer) Update(progress models.InstallProgress) {
 		}
 		r.phase = progress.Phase
 		r.startedAt = now
+		r.startedCurrent = clampProgress(progress.Current, progress.Total)
 		r.lastUpdate = time.Time{}
 		r.lastLineLen = 0
 	}
@@ -65,6 +67,7 @@ func (r *modelInstallProgressRenderer) Update(progress models.InstallProgress) {
 	if progress.Done {
 		_, _ = fmt.Fprintln(r.out)
 		r.startedAt = time.Time{}
+		r.startedCurrent = 0
 		r.lastUpdate = time.Time{}
 		r.lastLineLen = 0
 		return
@@ -193,10 +196,11 @@ func (r *modelInstallProgressRenderer) progressSuffix(current int64, total int64
 		}
 		return ""
 	}
-	if current <= 0 || current >= total {
+	transferred := current - r.startedCurrent
+	if transferred <= 0 || current >= total {
 		return ""
 	}
-	rate := float64(current) / elapsed.Seconds()
+	rate := float64(transferred) / elapsed.Seconds()
 	if rate <= 0 {
 		return ""
 	}

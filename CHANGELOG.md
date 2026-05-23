@@ -8,6 +8,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Added resumable parallel downloads for signed airplane model artifacts when the registry supports HTTP ranges.
 - Added `s46 teams list` for discovering connected team configurations and the active team.
 - Added current-project local Pi, Claude Code, and Codex transcript discovery to `s46 sessions`.
 - Added local transcript cost extraction from Pi, Claude Code, and Codex harness metadata when available.
@@ -29,6 +30,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Fixed parallel airplane model downloads to use HTTP/1.1 range requests so workers open independent transfer connections.
 - Fixed `s46 airplane mode off` to restore harness files to their pre-airplane state instead of regenerating generic cloud config.
 - Fixed airplane-mode harness snapshot restoration to preserve exact file bytes/modes and roll back config/harness state if restore fails.
 - Fixed `s46 airplane setup` to offer restarting an existing `s46-api` listener in airplane mode when it owns the local gateway port but is not airplane-ready.
