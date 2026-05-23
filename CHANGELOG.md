@@ -6,6 +6,10 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed release automation so rerun release jobs replace existing GitHub release assets after partial publishes.
+
 ## [0.2.0] - 2026-05-23
 
 ### Added
