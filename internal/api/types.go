@@ -129,6 +129,7 @@ type ResumeRequest struct {
 	SessionID   string  `json:"sessionId"`
 	Session     Session `json:"session"`
 	Team        Team    `json:"team"`
+	Target      string  `json:"target,omitempty"`
 	AccessToken string  `json:"-"`
 }
 

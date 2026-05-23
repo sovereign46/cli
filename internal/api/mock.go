@@ -199,8 +199,13 @@ func (c *MockClient) Detach(ctx context.Context, req DetachRequest) (Session, er
 func (c *MockClient) Resume(ctx context.Context, req ResumeRequest) (Session, error) {
 	session := req.Session
 	session.ID = req.SessionID
-	session.State = "resumed"
-	session.Location = "localhost"
+	if req.Target == "local" {
+		session.State = "resumed"
+		session.Location = "localhost"
+	} else {
+		session.State = "queued"
+		session.Location = "scheduler"
+	}
 	session.Age = "0m"
 	return session, nil
 }

@@ -116,7 +116,7 @@ func TestInstallLlamacppInstallsOnlyLlamacppFormula(t *testing.T) {
 func TestLogFilesUseExplicitLogDir(t *testing.T) {
 	logDir := t.TempDir()
 	files := Service{Env: map[string]string{"S46_LOG_DIR": logDir}}.LogFiles()
-	if len(files) != 2 || files[0].Path != filepath.Join(logDir, "llamacpp.log") || files[1].Path != filepath.Join(logDir, "s46-api-airplane.log") {
+	if len(files) != 2 || files[0].Path != filepath.Join(logDir, "llamacpp.log") || files[1].Path != filepath.Join(logDir, "s46-gateway-airplane.log") {
 		t.Fatalf("unexpected log files: %#v", files)
 	}
 }
@@ -431,7 +431,7 @@ func TestInstallGatewayFallsBackToGitClone(t *testing.T) {
 	writeExecutable(t, filepath.Join(bin, "git"), `#!/bin/sh
 echo git "$@" >> "$S46_TEST_COMMAND_LOG"
 if [ "$1" = clone ]; then
-  /bin/mkdir -p "$5/cmd/s46-api"
+  /bin/mkdir -p "$5/cmd/s46-gateway"
   exit 0
 fi
 exit 1
@@ -476,7 +476,7 @@ printf '#!/bin/sh\n' > "$out"
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"git clone --depth 1 git@github.com:sovereign46/api.git", "go build -o " + path + " ./cmd/s46-api"} {
+	for _, want := range []string{"git clone --depth 1 git@github.com:sovereign46/api.git", "go build -o " + path + " ./cmd/s46-gateway"} {
 		if !strings.Contains(string(log), want) {
 			t.Fatalf("command log missing %q:\n%s", want, string(log))
 		}

@@ -939,7 +939,7 @@ func TestAirplaneSetupExplainsUnknownExistingGatewayThatIsNotAirplaneReady(t *te
 	env["S46_TEST_OLLAMA_RUNNING"] = "1"
 	env["S46_TEST_MODEL_DOWNLOADED"] = "1"
 	env["S46_TEST_MODEL_PROBE"] = "1"
-	env["S46_TEST_GATEWAY_BINARY"] = "/tmp/s46-api"
+	env["S46_TEST_GATEWAY_BINARY"] = "/tmp/s46-gateway"
 	env["S46_TEST_GATEWAY_READY"] = "0"
 	env["S46_TEST_GATEWAY_RESPONDING"] = "1"
 	env["S46_TEST_LISTENER_8080"] = "444 node"
@@ -947,7 +947,7 @@ func TestAirplaneSetupExplainsUnknownExistingGatewayThatIsNotAirplaneReady(t *te
 	out := requireOK(t, run(t, env, "airplane", "setup"))
 	for _, want := range []string{
 		"[s46] [fail] local-gateway: responding at http://127.0.0.1:8080 but not airplane-ready",
-		"[s46] Local S46 API is already running at http://127.0.0.1:8080, but it is not airplane-ready.",
+		"[s46] Local S46 gateway is already running at http://127.0.0.1:8080, but it is not airplane-ready.",
 		"[s46] Process: pid 444 (node)",
 		"[s46] Setup will not stop an unknown or non-S46 process automatically.",
 	} {
@@ -972,19 +972,19 @@ func TestAirplaneSetupOffersToRestartExistingS46Gateway(t *testing.T) {
 	env["S46_TEST_OLLAMA_RUNNING"] = "1"
 	env["S46_TEST_MODEL_DOWNLOADED"] = "1"
 	env["S46_TEST_MODEL_PROBE"] = "1"
-	env["S46_TEST_GATEWAY_BINARY"] = "/tmp/s46-api"
+	env["S46_TEST_GATEWAY_BINARY"] = "/tmp/s46-gateway"
 	env["S46_TEST_GATEWAY_READY"] = "0"
 	env["S46_TEST_GATEWAY_RESPONDING"] = "1"
-	env["S46_TEST_LISTENER_8080"] = "444 s46-api"
+	env["S46_TEST_LISTENER_8080"] = "444 s46-gateway"
 	env["S46_TEST_STOP_GATEWAY_OK"] = "1"
 	env["S46_TEST_START_GATEWAY_OK"] = "1"
 
 	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\nn\n"), "airplane", "setup"))
 	for _, want := range []string{
-		"[s46] Local S46 API is already running at http://127.0.0.1:8080, but it is not airplane-ready.",
-		"[s46] Process: pid 444 (s46-api)",
-		"[s46] Restart the local S46 API in airplane mode now? [Y/n]",
-		"[s46] stopping local S46 API...",
+		"[s46] Local S46 gateway is already running at http://127.0.0.1:8080, but it is not airplane-ready.",
+		"[s46] Process: pid 444 (s46-gateway)",
+		"[s46] Restart the local S46 gateway in airplane mode now? [Y/n]",
+		"[s46] stopping local S46 gateway...",
 		"[s46] starting local S46 gateway...",
 		"[s46] airplane setup: ready",
 	} {
@@ -1043,7 +1043,7 @@ func TestAirplaneSetupContinuesAfterInstallingLlamacpp(t *testing.T) {
 	env["S46_TEST_LLAMACPP_RUNNING"] = "0"
 	env["S46_TEST_MODEL_DOWNLOADED"] = "0"
 	env["S46_TEST_MODEL_PROBE"] = "0"
-	env["S46_TEST_GATEWAY_BINARY"] = "/tmp/s46-api"
+	env["S46_TEST_GATEWAY_BINARY"] = "/tmp/s46-gateway"
 	env["S46_TEST_GATEWAY_READY"] = "0"
 	env["S46_TEST_START_GATEWAY_OK"] = "1"
 
@@ -1155,14 +1155,14 @@ func TestAirplaneSetupCanTurnOnAirplaneModeWithoutLogin(t *testing.T) {
 		}
 	}
 	env["S46_TEST_LISTENER_8081"] = "111 llama-server"
-	env["S46_TEST_LISTENER_8080"] = "222 s46-api"
+	env["S46_TEST_LISTENER_8080"] = "222 s46-gateway"
 	status := requireOK(t, run(t, env, "--verbose", "status"))
 	for _, want := range []string{
 		"[s46✈] team:    local",
 		"[s46✈] harness: claude-code",
 		"[s46✈] model:   s46/devstral-small-2-24b",
 		"[s46✈] local llamacpp: http://127.0.0.1:8081 · port 8081 · pid 111 (llama-server)",
-		"[s46✈] local api:    http://127.0.0.1:8080 · port 8080 · pid 222 (s46-api)",
+		"[s46✈] local gateway: http://127.0.0.1:8080 · port 8080 · pid 222 (s46-gateway)",
 	} {
 		if !strings.Contains(status, want) {
 			t.Fatalf("unexpected airplane status without login missing %q:\n%s", want, status)
@@ -1668,7 +1668,7 @@ func TestAirplaneLogsShowsKnownLogFiles(t *testing.T) {
 
 func TestAirplaneLogsCanUseDiscoveredExternalLog(t *testing.T) {
 	env := testEnv(t)
-	external := filepath.Join(t.TempDir(), "s46-api-airplane.log")
+	external := filepath.Join(t.TempDir(), "s46-gateway-airplane.log")
 	if err := os.WriteFile(external, []byte("outside shell\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -1872,8 +1872,11 @@ func TestSessionLifecycleAndRunSlug(t *testing.T) {
 	if out := requireOK(t, run(t, env, "detach", "@dscape/auth-redirect-fix")); !strings.Contains(out, "detached standard session") {
 		t.Fatalf("unexpected detach: %s", out)
 	}
-	if out := requireOK(t, run(t, env, "resume", "@dscape/auth-redirect-fix")); !strings.Contains(out, "resumed @dscape/auth-redirect-fix on localhost") {
-		t.Fatalf("unexpected resume: %s", out)
+	if out := requireOK(t, run(t, env, "resume", "@dscape/auth-redirect-fix")); !strings.Contains(out, "queued remote resume for @dscape/auth-redirect-fix") {
+		t.Fatalf("unexpected remote resume: %s", out)
+	}
+	if out := requireOK(t, run(t, env, "resume", "@dscape/auth-redirect-fix", "--local")); !strings.Contains(out, "resumed @dscape/auth-redirect-fix on localhost") {
+		t.Fatalf("unexpected local resume: %s", out)
 	}
 	if out := requireOK(t, run(t, env, "session", "land")); !strings.Contains(out, "Review package:") || !strings.Contains(out, "gh pr create --fill") {
 		t.Fatalf("unexpected land output: %s", out)

@@ -59,7 +59,7 @@ func TestDetachAndResumePersistSessionState(t *testing.T) {
 	if detached.State != "running" || detached.Harness != "standard" {
 		t.Fatalf("detached = %#v", detached)
 	}
-	resumed, previous, err := service.Resume(context.Background(), detached.ID)
+	resumed, previous, err := service.Resume(context.Background(), detached.ID, "local")
 	if err != nil {
 		t.Fatal(err)
 	}

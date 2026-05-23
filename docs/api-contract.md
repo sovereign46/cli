@@ -132,10 +132,12 @@ Response: session object.
 
 ### `POST /v1/sessions/{sessionId}/resume?team={team}`
 
+Remote resume is the default. Use `target:"local"` to request local materialization.
+
 Request:
 
 ```json
-{"sessionId":"@dscape/auth-redirect-fix","session":{"id":"@dscape/auth-redirect-fix"},"team":{"name":"acme"}}
+{"sessionId":"@dscape/auth-redirect-fix","session":{"id":"@dscape/auth-redirect-fix"},"team":{"name":"acme"},"target":"remote"}
 ```
 
 Response: session object.

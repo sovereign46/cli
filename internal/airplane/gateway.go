@@ -49,7 +49,7 @@ func (s Service) startGateway(assumeVerifiedModel bool) error {
 		return err
 	}
 	if s.gatewayResponding(ctx) {
-		return fmt.Errorf("local S46 API at %s is running but is not airplane-ready; run `s46 airplane setup` to restart it in airplane mode", s.gatewayURL())
+		return fmt.Errorf("local S46 gateway at %s is running but is not airplane-ready; run `s46 airplane setup` to restart it in airplane mode", s.gatewayURL())
 	}
 	command, ok := s.gatewayCommand()
 	if !ok {
@@ -59,7 +59,7 @@ func (s Service) startGateway(assumeVerifiedModel bool) error {
 	cmd.Dir = command.Dir
 	env := append([]string{"S46_ENV=airplane", "S46_ADDR=127.0.0.1:8080", "S46_LOCAL_MODEL=" + s.backendModel()}, AirplaneGatewayEnv(s.Env)...)
 	cmd.Env = s.processEnv(env...)
-	return s.startDetached(cmd, "s46-api-airplane.log")
+	return s.startDetached(cmd, "s46-gateway-airplane.log")
 }
 
 func (s Service) GatewayInstallDescription() string {

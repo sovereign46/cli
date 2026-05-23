@@ -176,7 +176,7 @@ unset S46_SHARE_BACKEND
 share_gist_status="$(endpoint_status "$share_api")"
 share_viewer_status="$(endpoint_status "$share_viewer")"
 seed_harness_configs
-if [ -z "${S46_API_REPO:-}" ] && [ -d "$api_repo_default/cmd/s46-api" ]; then
+if [ -z "${S46_API_REPO:-}" ] && [ -d "$api_repo_default/cmd/s46-gateway" ]; then
   ln -s "$api_repo_default" "$sandbox/s46-api"
   export S46_API_REPO="$sandbox/s46-api"
 elif [ -n "${S46_API_REPO:-}" ]; then

@@ -173,7 +173,7 @@ func runAirplaneSetupWithOptions(ctx context.Context, app *app, options airplane
 			"[s46] Local S46 gateway is not installed or running.",
 			"[s46] In development, set S46_API_REPO=/path/to/api or use make shell with ../s46-api present.",
 			"[s46] In production, connect to the network and rerun setup to install the verified gateway release.",
-			"[s46] Or set S46_API_BINARY=/path/to/s46-api.",
+			"[s46] Or set S46_API_BINARY=/path/to/s46-gateway.",
 		); err != nil {
 			return report, err
 		}
@@ -295,16 +295,16 @@ func offerAirplaneGatewayRestart(ctx context.Context, app *app, service airplane
 		}
 		return report, false, nil
 	}
-	if yes, err := confirmAirplaneSetup(app, options, "[s46] Restart the local S46 API in airplane mode now? [Y/n] ", true); err != nil {
+	if yes, err := confirmAirplaneSetup(app, options, "[s46] Restart the local S46 gateway in airplane mode now? [Y/n] ", true); err != nil {
 		return report, false, err
 	} else if !yes {
 		return report, false, nil
 	}
-	if err := app.renderer.Lines("[s46] stopping local S46 API..."); err != nil {
+	if err := app.renderer.Lines("[s46] stopping local S46 gateway..."); err != nil {
 		return report, false, err
 	}
 	if err := stopListeningProcess(app.runtime.Env, report.GatewayURL, listener.PID, 5*time.Second); err != nil {
-		return report, false, fmt.Errorf("failed to stop local S46 API: %w", err)
+		return report, false, fmt.Errorf("failed to stop local S46 gateway: %w", err)
 	}
 	if err := app.renderer.Lines("[s46] starting local S46 gateway..."); err != nil {
 		return report, false, err
@@ -317,8 +317,8 @@ func offerAirplaneGatewayRestart(ctx context.Context, app *app, service airplane
 
 func renderAirplaneGatewayConflict(gatewayURL string, listener listeningProcessStatus) []string {
 	return []string{
-		fmt.Sprintf("[s46] Local S46 API is already running at %s, but it is not airplane-ready.", gatewayURL),
-		"[s46] This usually means another s46-api process owns the port without the local llama.cpp worker configured.",
+		fmt.Sprintf("[s46] Local S46 gateway is already running at %s, but it is not airplane-ready.", gatewayURL),
+		"[s46] This usually means another s46-gateway process owns the port without the local llama.cpp worker configured.",
 		renderAirplaneGatewayProcess(listener),
 	}
 }
@@ -363,10 +363,10 @@ func localServerPort(rawURL string) string {
 }
 
 func canRestartAirplaneGateway(listener listeningProcessStatus) bool {
-	return listener.Status == "listening" && listener.PID != "" && isS46APIProcess(listener.Command)
+	return listener.Status == "listening" && listener.PID != "" && isS46GatewayProcess(listener.Command)
 }
 
-func isS46APIProcess(command string) bool {
+func isS46GatewayProcess(command string) bool {
 	for _, field := range strings.Fields(command) {
 		if filepath.Base(field) == airplane.GatewayBinaryName {
 			return true
@@ -821,7 +821,7 @@ func startAirplaneRuntime(ctx context.Context, app *app, service airplane.Servic
 		return fmt.Errorf("could not start local S46 gateway: %w", err)
 	}
 	if !service.SetupChecksSkipped() && !waitForGatewayReady(ctx, service, 30*time.Second) {
-		return fmt.Errorf("local S46 gateway did not become ready; check ~/.cache/s46/s46-api-airplane.log or rerun `s46 airplane setup`")
+		return fmt.Errorf("local S46 gateway did not become ready; check ~/.cache/s46/s46-gateway-airplane.log or rerun `s46 airplane setup`")
 	}
 	return nil
 }

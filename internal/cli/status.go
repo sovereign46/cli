@@ -292,7 +292,11 @@ func statusLocalServers(env map[string]string, team *config.TeamConfig) []localS
 		servers = append(servers, describeLocalServer(env, "llamacpp", llamacppURL))
 	}
 	if apiURL := statusLocalAPIURL(env, team); apiURL != "" {
-		servers = append(servers, describeLocalServer(env, "api", apiURL))
+		name := "api"
+		if env["S46_AIRPLANE_GATEWAY_URL"] != "" || teamEndpoint(team) == airplane.LocalGatewayURL {
+			name = "gateway"
+		}
+		servers = append(servers, describeLocalServer(env, name, apiURL))
 	}
 	return servers
 }

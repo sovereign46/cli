@@ -20,7 +20,7 @@ const (
 	LocalModelID               = "s46/devstral-small-2-24b"
 	BackendModel               = "devstral-small-2:24b-instruct-2512-q4_K_M"
 	GGUFModelFile              = "Devstral-Small-2-24B-Instruct-2512-Q4_K_M.gguf"
-	GatewayBinaryName          = "s46-api"
+	GatewayBinaryName          = "s46-gateway"
 	DefaultGatewayRepo         = "sovereign46/api"
 	DefaultContextWindow       = 65536
 	DefaultMaxTokens           = 4096
@@ -67,7 +67,7 @@ func (s Service) LogFiles() []LogFile {
 	cache := cacheDir(s.Env)
 	return []LogFile{
 		{Name: "llamacpp", Path: filepath.Join(cache, "llamacpp.log")},
-		{Name: "gateway", Path: filepath.Join(cache, "s46-api-airplane.log")},
+		{Name: "gateway", Path: filepath.Join(cache, "s46-gateway-airplane.log")},
 	}
 }
 
