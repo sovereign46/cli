@@ -152,7 +152,7 @@ func (s Service) LoginWithDeviceCallback(ctx context.Context, req LoginRequest, 
 func (s Service) resolveLoginRequest(req LoginRequest) (api.DeviceLoginRequest, error) {
 	req.Email = strings.TrimSpace(strings.ToLower(req.Email))
 	if req.Email == "" {
-		return api.DeviceLoginRequest{}, fmt.Errorf("email is required; pass --email <email>")
+		return api.DeviceLoginRequest{}, fmt.Errorf("email is required; pass --user <email>")
 	}
 	state, err := s.Config.LoadState()
 	if err != nil {

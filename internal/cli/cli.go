@@ -1,11 +1,13 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 
 	"github.com/sovereign46/s46-cli/internal/airplane"
 	"github.com/sovereign46/s46-cli/internal/api"
+	"github.com/sovereign46/s46-cli/internal/auth"
 	"github.com/sovereign46/s46-cli/internal/config"
 	"github.com/sovereign46/s46-cli/internal/harness"
 	"github.com/sovereign46/s46-cli/internal/harness/claude"
@@ -21,6 +24,7 @@ import (
 	"github.com/sovereign46/s46-cli/internal/harness/standard"
 	"github.com/sovereign46/s46-cli/internal/keyring"
 	"github.com/sovereign46/s46-cli/internal/output"
+	sessioncmd "github.com/sovereign46/s46-cli/internal/session"
 	"github.com/sovereign46/s46-cli/internal/strs"
 	"github.com/sovereign46/s46-cli/internal/updater"
 	"github.com/sovereign46/s46-cli/internal/version"
@@ -37,6 +41,8 @@ const (
 	startupUpdateCheckTimeout = 2 * time.Second
 	localAirplaneTeamName     = "local"
 )
+
+var errInteractiveCanceled = errors.New("interactive prompt canceled")
 
 type options struct {
 	configPath string
@@ -55,6 +61,11 @@ type app struct {
 	harness      *harness.Registry
 	renderer     output.Renderer
 	promptReader *inputReader
+}
+
+type inputReader struct {
+	*bufio.Reader
+	source io.Reader
 }
 
 func (o *options) machineReadable() bool {
@@ -288,4 +299,1523 @@ func newApp(runtime Runtime, opts *options) (*app, error) {
 	}
 	app.debug("config=%s state=%s api=%T", store.ConfigPath, store.StatePath, app.api)
 	return app, nil
+}
+
+func loginCommand(runtime Runtime, opts *options) *cobra.Command {
+	var email string
+	var team string
+	var deviceID string
+	var deviceName string
+	cmd := &cobra.Command{
+		Use:   "login",
+		Short: "authenticate with Sovereign46 using magic-link device auth",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := newApp(runtime, opts)
+			if err != nil {
+				return err
+			}
+			if err := app.requireCloudFeature("login"); err != nil {
+				return err
+			}
+			service := app.authService()
+			req := auth.LoginRequest{Email: email, Team: team, DeviceID: deviceID, DeviceName: deviceName}
+			interactive := app.canPrompt() && !loginFlagChanged(cmd)
+			alreadyAuthenticated := false
+			var result auth.LoginResult
+			if err := app.withLock(cmd.Context(), func() error {
+				var err error
+				if interactive {
+					if current, ok := service.CurrentLogin(cmd.Context()); ok {
+						result = current
+						alreadyAuthenticated = true
+						return nil
+					}
+					req, err = promptLoginRequest(app, req)
+					if err != nil {
+						return err
+					}
+				}
+				if opts.machineReadable() {
+					result, err = service.LoginWithDeviceCallback(cmd.Context(), req, nil)
+					return err
+				}
+				result, err = service.LoginWithDeviceCallback(cmd.Context(), req, func(device api.DeviceLogin) error {
+					emailLine := "[s46] check your Sovereign46 email and open the magic link to approve this device"
+					if emailHint := strings.TrimSpace(req.Email); emailHint != "" {
+						emailLine = fmt.Sprintf("[s46] check your email at %s and open the magic link to approve this device", emailHint)
+					}
+					return app.renderer.Lines(
+						fmt.Sprintf("[s46] pairing code: %s", device.UserCode),
+						emailLine,
+						"[s46] waiting for magic-link approval...",
+					)
+				})
+				return err
+			}); err != nil {
+				return err
+			}
+			if ok, err := app.writeStructured(result); ok {
+				return err
+			}
+			lines := []string{}
+			if alreadyAuthenticated {
+				lines = append(lines, fmt.Sprintf("[s46] already authenticated as %s", result.User))
+			} else {
+				lines = append(lines, fmt.Sprintf("[s46] authenticated as %s", result.User))
+			}
+			if result.Team != "" {
+				lines = append(lines, fmt.Sprintf("[s46] next: s46 connect %s --harness=<pi|claude-code|codex|standard>", result.Team))
+			}
+			return app.renderer.Lines(lines...)
+		},
+	}
+	cmd.Flags().StringVar(&email, "user", "", "email address")
+	cmd.Flags().StringVar(&email, "email", "", "email address")
+	cmd.Flags().StringVar(&team, "team", "", "team slug")
+	cmd.Flags().StringVar(&deviceID, "device-id", "", "stable device id to pair")
+	cmd.Flags().StringVar(&deviceName, "device-name", "", "human-readable device name")
+	return cmd
+}
+
+func loginFlagChanged(cmd *cobra.Command) bool {
+	for _, name := range []string{"user", "email", "team", "device-id", "device-name"} {
+		if cmd.Flags().Changed(name) {
+			return true
+		}
+	}
+	return false
+}
+
+func logoutCommand(runtime Runtime, opts *options) *cobra.Command {
+	return &cobra.Command{
+		Use:   "logout",
+		Short: "clear local credentials",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := newApp(runtime, opts)
+			if err != nil {
+				return err
+			}
+			service := app.authService()
+			var user string
+			if err := app.withLock(cmd.Context(), func() error {
+				var err error
+				user, err = service.Logout(cmd.Context())
+				return err
+			}); err != nil {
+				return err
+			}
+			if ok, err := app.writeStructured(map[string]any{"authenticated": false, "previousUser": user}); ok {
+				return err
+			}
+			if user == "" {
+				return app.renderer.Lines("[s46] logged out")
+			}
+			return app.renderer.Lines(fmt.Sprintf("[s46] logged out %s", user))
+		},
+	}
+}
+
+func whoamiCommand(runtime Runtime, opts *options) *cobra.Command {
+	return &cobra.Command{
+		Use:   "whoami",
+		Short: "print the authenticated user",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := newApp(runtime, opts)
+			if err != nil {
+				return err
+			}
+			service := app.authService()
+			user, err := service.Whoami(cmd.Context())
+			if err != nil {
+				return err
+			}
+			if ok, err := app.writeStructured(map[string]any{"authenticated": true, "user": user}); ok {
+				return err
+			}
+			return app.renderer.Lines(user)
+		},
+	}
+}
+
+func tokenCommand(runtime Runtime, opts *options) *cobra.Command {
+	var refresh bool
+	cmd := &cobra.Command{
+		Use:   "token --refresh",
+		Short: "print a bearer token for harness helpers",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := newApp(runtime, opts)
+			if err != nil {
+				return err
+			}
+			service := app.authService()
+			token, err := service.Token(cmd.Context(), refresh)
+			if err != nil {
+				return err
+			}
+			if ok, err := app.writeStructured(map[string]any{"token": token}); ok {
+				return err
+			}
+			_, err = fmt.Fprintln(runtime.Stdout, token)
+			return err
+		},
+	}
+	cmd.Flags().BoolVar(&refresh, "refresh", false, "refresh before printing")
+	return cmd
+}
+
+func devicesCommand(runtime Runtime, opts *options) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "devices",
+		Short: "list and revoke paired devices",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := newApp(runtime, opts)
+			if err != nil {
+				return err
+			}
+			if err := app.requireCloudFeature("devices"); err != nil {
+				return err
+			}
+			service := app.authService()
+			devices, err := service.Devices(cmd.Context())
+			if err != nil {
+				return err
+			}
+			if ok, err := app.writeStructured(map[string]any{"devices": devices}); ok {
+				return err
+			}
+			return app.renderer.Lines(renderDevices(devices)...)
+		},
+	}
+	cmd.AddCommand(deleteDeviceCommand(runtime, opts))
+	return cmd
+}
+
+func deleteDeviceCommand(runtime Runtime, opts *options) *cobra.Command {
+	return &cobra.Command{
+		Use:     "delete <device-id>",
+		Aliases: []string{"revoke", "rm"},
+		Short:   "delete and revoke a paired device",
+		Args:    exactArgs("s46 devices delete <device-id>", 1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := newApp(runtime, opts)
+			if err != nil {
+				return err
+			}
+			if err := app.requireCloudFeature("device revocation"); err != nil {
+				return err
+			}
+			service := app.authService()
+			var revokedCurrent bool
+			if err := app.withLock(cmd.Context(), func() error {
+				var err error
+				revokedCurrent, err = service.DeleteDevice(cmd.Context(), args[0])
+				return err
+			}); err != nil {
+				return err
+			}
+			if ok, err := app.writeStructured(map[string]any{"deleted": true, "deviceId": args[0], "loggedOut": revokedCurrent}); ok {
+				return err
+			}
+			lines := []string{fmt.Sprintf("[s46] revoked device %s", args[0])}
+			if revokedCurrent {
+				lines = append(lines, "[s46] revoked current device; logged out")
+			}
+			return app.renderer.Lines(lines...)
+		},
+	}
+}
+
+func renderDevices(devices []api.Device) []string {
+	if len(devices) == 0 {
+		return []string{"[s46] no paired devices"}
+	}
+	lines := []string{"ID  NAME  LAST SEEN  IP ADDRESS"}
+	for _, device := range devices {
+		lines = append(lines, fmt.Sprintf("%s  %s  %s  %s", device.ID, device.Name, formatDeviceTime(device.LastSeenAt), formatDeviceIP(device.LastSeenIP)))
+	}
+	return lines
+}
+
+func formatDeviceIP(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "-"
+	}
+	return value
+}
+
+func formatDeviceTime(value time.Time) string {
+	if value.IsZero() {
+		return "never"
+	}
+	return value.Format(time.RFC3339)
+}
+
+func versionCommand(runtime Runtime, opts *options) *cobra.Command {
+	return &cobra.Command{
+		Use:   "version",
+		Short: "print build version information",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := newApp(runtime, opts)
+			if err != nil {
+				return err
+			}
+			info := version.Get()
+			if ok, err := app.writeStructured(info); ok {
+				return err
+			}
+			return app.renderer.Lines(
+				fmt.Sprintf("s46 %s", info.Version),
+				fmt.Sprintf("commit: %s", info.Commit),
+				fmt.Sprintf("date:   %s", info.Date),
+				fmt.Sprintf("go:     %s", info.GoVersion),
+			)
+		},
+	}
+}
+
+func updateCommand(runtime Runtime, opts *options) *cobra.Command {
+	return &cobra.Command{
+		Use:   "update",
+		Short: "check for updates using Homebrew-safe instructions",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := newApp(runtime, opts)
+			if err != nil {
+				return err
+			}
+			if err := app.requireCloudFeature("update"); err != nil {
+				return err
+			}
+			out := runtime.Stdout
+			if out == nil {
+				out = io.Discard
+			}
+			renderer := output.Renderer{JSON: opts.json, JSONL: opts.jsonl, Out: out}
+			check, err := updater.Updater{CurrentVersion: version.Get().Version, Env: runtime.Env}.Check(cmd.Context())
+			if opts.machineReadable() {
+				if errors.Is(err, updater.ErrCheckDisabled) || errors.Is(err, updater.ErrNoRelease) {
+					if opts.jsonl {
+						return renderer.WriteJSONL(check)
+					}
+					return renderer.WriteJSON(check)
+				}
+				if err != nil {
+					return err
+				}
+				if opts.jsonl {
+					return renderer.WriteJSONL(check)
+				}
+				return renderer.WriteJSON(check)
+			}
+			if errors.Is(err, updater.ErrCheckDisabled) {
+				return renderer.Lines("[s46] update check disabled")
+			}
+			if errors.Is(err, updater.ErrNoRelease) {
+				return renderer.Lines(renderUpdateCheck(check)...)
+			}
+			if err != nil {
+				return err
+			}
+			return renderer.Lines(renderUpdateCheck(check)...)
+		},
+	}
+}
+
+func renderUpdateCheck(check updater.CheckResult) []string {
+	if check.LatestVersion == "" {
+		return []string{"[s46] no release information available"}
+	}
+	if !check.Comparable {
+		return []string{
+			fmt.Sprintf("[s46] latest release: %s", check.LatestVersion),
+			fmt.Sprintf("[s46] current build version %q is not a released version", check.CurrentVersion),
+			fmt.Sprintf("[s46] update with: %s", check.Instruction),
+		}
+	}
+	if check.UpdateAvailable {
+		return []string{
+			fmt.Sprintf("[s46] update available: %s (current %s)", check.LatestVersion, check.CurrentVersion),
+			fmt.Sprintf("[s46] update with: %s", check.Instruction),
+		}
+	}
+	return []string{fmt.Sprintf("[s46] s46 is already up to date (%s)", check.CurrentVersion)}
+}
+
+func connectCommand(runtime Runtime, opts *options) *cobra.Command {
+	var harnessName string
+	var lane string
+	var model string
+	var endpoint string
+	var mode string
+	var scope string
+	cmd := &cobra.Command{
+		Use:   "connect [team]",
+		Short: "connect a team and configure a harness",
+		Args:  maxArgs("s46 connect [team]", 1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := newApp(runtime, opts)
+			if err != nil {
+				return err
+			}
+			return app.withLock(cmd.Context(), func() error {
+				req := connectRequest{
+					Harness:  harnessName,
+					Lane:     lane,
+					Model:    model,
+					Endpoint: endpoint,
+					Mode:     mode,
+					Scope:    scope,
+				}
+				if len(args) == 1 {
+					req.TeamName = args[0]
+				}
+				if err := validateConnectRequest(req); err != nil {
+					return err
+				}
+				if err := app.requireCloudAuthBeforeConnectPrompt(cmd.Context(), req); err != nil {
+					return err
+				}
+				if app.canPrompt() && !connectFlagChanged(cmd) {
+					var err error
+					req, err = promptConnectRequest(app, req)
+					if err != nil {
+						return err
+					}
+				}
+				return runConnect(cmd.Context(), app, req)
+			})
+		},
+	}
+	cmd.Flags().StringVar(&harnessName, "harness", "", "harness to configure: pi, claude-code, codex, standard")
+	cmd.Flags().StringVar(&lane, "lane", "", "sovereign lane")
+	cmd.Flags().StringVar(&model, "model", "", "default S46 model")
+	cmd.Flags().StringVar(&endpoint, "endpoint", "", "tenant endpoint")
+	cmd.Flags().StringVar(&mode, "mode", "", "operating mode")
+	cmd.Flags().StringVar(&scope, "scope", "user", "settings scope for supported harnesses: user or project")
+	return cmd
+}
+
+func connectFlagChanged(cmd *cobra.Command) bool {
+	for _, name := range []string{"harness", "lane", "model", "endpoint", "mode", "scope"} {
+		if cmd.Flags().Changed(name) {
+			return true
+		}
+	}
+	return false
+}
+
+type connectRequest struct {
+	TeamName string
+	Harness  string
+	Lane     string
+	Model    string
+	Endpoint string
+	Mode     string
+	Scope    string
+}
+
+func runConnect(ctx context.Context, app *app, req connectRequest) error {
+	if err := validateConnectRequest(req); err != nil {
+		return err
+	}
+	harnessName, adapter, err := selectConnectHarness(ctx, app, req)
+	if err != nil {
+		return err
+	}
+	cfg, err := app.config.LoadConfig()
+	if err != nil {
+		return err
+	}
+	req, err = fillMissingTeamForConnect(cfg, req)
+	if err != nil {
+		return err
+	}
+	existing := cfg.Teams[req.TeamName]
+	targetMode := resolveConnectMode(cfg, existing, req)
+	team, err := connectTeam(ctx, app, targetMode, existing, req)
+	if err != nil {
+		return err
+	}
+	selectedModel := strs.FirstNonEmpty(req.Model, team.DefaultModel, api.DefaultModel)
+	plan, err := adapter.PlanConnect(ctx, harness.ConnectRequest{Env: app.runtime.Env, Team: team, Model: selectedModel, Mode: targetMode, Scope: req.Scope})
+	if err != nil {
+		return err
+	}
+	result := connectResult(team, harnessName, selectedModel, targetMode, plan)
+	cfgBefore, cfgAfter := buildConnectConfigs(cfg, team, harnessName, selectedModel, targetMode, existing)
+	applied, err := applyAtomicConfigAndHarness(ctx, app, cfgBefore, cfgAfter, adapter, plan, "connect")
+	if err != nil {
+		return err
+	}
+	result["files"] = applied.Files
+	return renderConnectApplied(app, team, plan, applied, result)
+}
+
+func (a *app) requireCloudAuthBeforeConnectPrompt(ctx context.Context, req connectRequest) error {
+	cfg, err := a.config.LoadConfig()
+	if err != nil {
+		return err
+	}
+	teamName := req.TeamName
+	if teamName == "" {
+		teamName = cfg.ActiveTeam
+	}
+	if resolveConnectMode(cfg, cfg.Teams[teamName], req) == config.ModeAirplane {
+		return nil
+	}
+	_, err = a.requireAccessToken(ctx)
+	return err
+}
+
+func validateConnectRequest(req connectRequest) error {
+	if req.Scope != "" && req.Scope != "user" && req.Scope != "project" {
+		return fmt.Errorf("unknown scope %q; expected user or project", req.Scope)
+	}
+	return nil
+}
+
+func selectConnectHarness(ctx context.Context, app *app, req connectRequest) (string, harness.Adapter, error) {
+	name, err := resolveHarnessName(ctx, app, req.Harness)
+	if err != nil {
+		var selection *harnessSelectionError
+		if app.canPrompt() && errors.As(err, &selection) {
+			if name, err = promptMissingHarness(app, req); err != nil {
+				return "", nil, err
+			}
+		} else {
+			return "", nil, err
+		}
+	}
+	adapter, err := app.harness.Get(name)
+	if err != nil {
+		return "", nil, err
+	}
+	return name, adapter, nil
+}
+
+func fillMissingTeamForConnect(cfg config.Config, req connectRequest) (connectRequest, error) {
+	if req.TeamName == "" && (cfg.ActiveMode() == config.ModeAirplane || req.Mode == config.ModeAirplane) {
+		req.TeamName = strs.FirstNonEmpty(cfg.ActiveTeam, localAirplaneTeamName)
+	}
+	if req.TeamName == "" {
+		return req, fmt.Errorf("team is required; pass `s46 connect <team>` or run bare `s46 connect` interactively")
+	}
+	return req, nil
+}
+
+func connectResult(team api.Team, harnessName, model, mode string, plan harness.Plan) map[string]any {
+	return map[string]any{
+		"team":       team.Name,
+		"lane":       team.Lane,
+		"mode":       mode,
+		"harness":    harnessName,
+		"model":      model,
+		"endpoint":   team.Endpoint,
+		"operations": plan.Operations,
+		"files":      plan.Files,
+	}
+}
+
+func buildConnectConfigs(cfg config.Config, team api.Team, harnessName, model, mode string, existing config.TeamConfig) (config.Config, config.Config) {
+	before := cfg.Clone()
+	after := cfg.Clone()
+	after.ActiveTeam = team.Name
+	after.Mode = mode
+	teamConfig := config.TeamConfigFromAPI(team, harnessName, model, mode)
+	if mode == config.ModeAirplane && existing.APISnapshot.Endpoint != "" && !isLocalEndpoint(existing.APISnapshot.Endpoint) {
+		teamConfig.APISnapshot = existing.APISnapshot
+	}
+	after.Teams[team.Name] = teamConfig
+	return before, after
+}
+
+// applyAtomicConfigAndHarness writes `after` to disk, then applies the
+// harness plan. If the harness apply fails partway through, it rolls
+// back the files that were touched and restores the original config.
+// All three failure modes (apply error, rollback error, config-restore
+// error) are joined into a single error so the user sees the original
+// cause plus any cleanup failures that may need manual reconciliation.
+func applyAtomicConfigAndHarness(ctx context.Context, app *app, before, after config.Config, adapter harness.Adapter, plan harness.Plan, op string) (harness.AppliedPlan, error) {
+	if err := app.config.SaveConfig(after); err != nil {
+		return harness.AppliedPlan{}, fmt.Errorf("%s: save config: %w", op, err)
+	}
+	applied, err := adapter.Apply(ctx, plan)
+	if err == nil {
+		return applied, nil
+	}
+	rollbackErr := harness.RollbackPlan(applied)
+	saveErr := app.config.SaveConfig(before)
+	return applied, joinAtomicErrors(op, err, rollbackErr, saveErr)
+}
+
+func joinAtomicErrors(op string, primary error, rollbackErr, saveErr error) error {
+	parts := []string{fmt.Sprintf("%s failed: %v", op, primary)}
+	if rollbackErr != nil {
+		parts = append(parts, fmt.Sprintf("rollback: %v", rollbackErr))
+	}
+	if saveErr != nil {
+		parts = append(parts, fmt.Sprintf("config restore: %v", saveErr))
+	}
+	return errors.New(strings.Join(parts, "; "))
+}
+
+func resolveConnectMode(cfg config.Config, existing config.TeamConfig, req connectRequest) string {
+	if req.Mode == config.ModeAirplane || isLocalEndpoint(req.Endpoint) {
+		return config.ModeAirplane
+	}
+	if req.Mode == config.ModeCloud {
+		return config.ModeCloud
+	}
+	if cfg.ActiveMode() == config.ModeAirplane {
+		return config.ModeAirplane
+	}
+	return config.ModeCloud
+}
+
+func connectTeam(ctx context.Context, app *app, mode string, existing config.TeamConfig, req connectRequest) (api.Team, error) {
+	if mode == config.ModeAirplane {
+		return localAirplaneTeam(req.TeamName, existing, req), nil
+	}
+	accessToken, err := app.requireAccessToken(ctx)
+	if err != nil {
+		return api.Team{}, err
+	}
+	return app.api.Team(ctx, req.TeamName, api.TeamOptions{
+		Endpoint:     strs.FirstNonEmpty(req.Endpoint, existing.Endpoint),
+		Lane:         strs.FirstNonEmpty(req.Lane, existing.Lane),
+		DefaultModel: strs.FirstNonEmpty(req.Model, existing.DefaultModel, api.DefaultModel),
+		AccessToken:  accessToken,
+	})
+}
+
+func renderConnectApplied(app *app, team api.Team, plan harness.Plan, applied harness.AppliedPlan, result map[string]any) error {
+	if ok, err := app.writeStructured(result); ok {
+		return err
+	}
+	lines := []string{
+		fmt.Sprintf("[s46] %s", plan.Summary),
+		fmt.Sprintf("[s46] team:    %s · lane: %s · boxes: %s", team.Name, team.Lane, strings.Join(team.Boxes, ", ")),
+	}
+	for _, file := range applied.Files {
+		lines = append(lines, fmt.Sprintf("[s46] wrote %s", file.Path))
+		if file.BackupPath != "" {
+			lines = append(lines, fmt.Sprintf("[s46] backup: %s", file.BackupPath))
+		}
+	}
+	lines = append(lines, connectNextSteps(plan.Harness, team.Name, team.DefaultModel)...)
+	return app.renderer.Lines(lines...)
+}
+
+func connectNextSteps(harnessName string, teamName string, model string) []string {
+	switch harnessName {
+	case "pi":
+		return []string{fmt.Sprintf("[s46] next: in Pi, choose provider s46 and model %s", model)}
+	case "claude-code":
+		return []string{"[s46] next: start Claude Code; it will use Sovereign46 through `s46 token --refresh`"}
+	case "codex":
+		return []string{"[s46] next: run Codex with profile s46"}
+	default:
+		return []string{fmt.Sprintf("[s46] next: s46 run \"your task\" (team %s)", teamName)}
+	}
+}
+
+func resolveHarnessName(ctx context.Context, app *app, explicit string) (string, error) {
+	if explicit != "" {
+		return explicit, nil
+	}
+	detected := []string{}
+	for _, name := range app.harness.Names() {
+		if name == "standard" {
+			continue
+		}
+		adapter, err := app.harness.Get(name)
+		if err != nil {
+			return "", err
+		}
+		detection, err := adapter.Detect(ctx, app.runtime.Env)
+		if err != nil {
+			return "", err
+		}
+		if detection.Installed {
+			detected = append(detected, name)
+		}
+	}
+	if len(detected) == 1 {
+		return detected[0], nil
+	}
+	if len(detected) == 0 {
+		return "", &harnessSelectionError{}
+	}
+	return "", &harnessSelectionError{detected: detected}
+}
+
+type harnessSelectionError struct {
+	detected []string
+}
+
+func (e *harnessSelectionError) Error() string {
+	if len(e.detected) == 0 {
+		return "no harness detected; pass --harness explicitly\n[s46] options: pi, claude-code, codex, standard"
+	}
+	return fmt.Sprintf("multiple harnesses detected (%s); pass --harness explicitly\n[s46] options: pi, claude-code, codex, standard", strings.Join(e.detected, ", "))
+}
+
+func disconnectCommand(runtime Runtime, opts *options) *cobra.Command {
+	var harnessName string
+	var scope string
+	cmd := &cobra.Command{
+		Use:   "disconnect <team>",
+		Short: "remove S46 configuration for a team and harness",
+		Args:  exactArgs("s46 disconnect <team>", 1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := newApp(runtime, opts)
+			if err != nil {
+				return err
+			}
+			return app.withLock(cmd.Context(), func() error {
+				return runDisconnect(cmd.Context(), app, args[0], harnessName, scope)
+			})
+		},
+	}
+	cmd.Flags().StringVar(&harnessName, "harness", "", "harness to disconnect; defaults to team's configured harness")
+	cmd.Flags().StringVar(&scope, "scope", "user", "settings scope for supported harnesses: user or project")
+	return cmd
+}
+
+func runDisconnect(ctx context.Context, app *app, teamName string, harnessName string, scope string) error {
+	cfg, err := app.config.LoadConfig()
+	if err != nil {
+		return err
+	}
+	teamConfig, ok := cfg.Teams[teamName]
+	if !ok {
+		return fmt.Errorf("team %q is not connected", teamName)
+	}
+	if harnessName == "" {
+		harnessName = teamConfig.DefaultHarness
+	}
+	if harnessName == "" {
+		harnessName = harness.DefaultName
+	}
+	adapter, err := app.harness.Get(harnessName)
+	if err != nil {
+		return err
+	}
+	team := teamConfig.API(teamName)
+	plan, err := adapter.PlanDisconnect(ctx, harness.DisconnectRequest{Env: app.runtime.Env, Team: team, Harness: harnessName, Scope: scope})
+	if err != nil {
+		return err
+	}
+	result := map[string]any{"team": teamName, "harness": harnessName, "operations": plan.Operations, "files": plan.Files}
+	cfgBefore := cfg.Clone()
+	cfgAfter := cfg.Clone()
+	delete(cfgAfter.Teams, teamName)
+	if cfgAfter.ActiveTeam == teamName {
+		cfgAfter.ActiveTeam = ""
+	}
+	applied, err := applyAtomicConfigAndHarness(ctx, app, cfgBefore, cfgAfter, adapter, plan, "disconnect")
+	if err != nil {
+		return err
+	}
+	result["files"] = applied.Files
+	if ok, err := app.writeStructured(result); ok {
+		return err
+	}
+	lines := []string{fmt.Sprintf("[s46] disconnected %s", teamName)}
+	for _, file := range applied.Files {
+		lines = append(lines, fmt.Sprintf("[s46] wrote %s", file.Path))
+		if file.BackupPath != "" {
+			lines = append(lines, fmt.Sprintf("[s46] backup: %s", file.BackupPath))
+		}
+	}
+	return app.renderer.Lines(lines...)
+}
+
+func teamsCommand(runtime Runtime, opts *options) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "teams",
+		Short: "list and switch connected teams",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := newApp(runtime, opts)
+			if err != nil {
+				return err
+			}
+			return runTeamsList(app)
+		},
+	}
+	cmd.AddCommand(teamsListCommand(runtime, opts))
+	cmd.AddCommand(teamsUseCommand(runtime, opts))
+	return cmd
+}
+
+func teamsListCommand(runtime Runtime, opts *options) *cobra.Command {
+	return &cobra.Command{
+		Use:   "list",
+		Short: "list connected team configurations",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := newApp(runtime, opts)
+			if err != nil {
+				return err
+			}
+			return runTeamsList(app)
+		},
+	}
+}
+
+func teamsUseCommand(runtime Runtime, opts *options) *cobra.Command {
+	return &cobra.Command{
+		Use:   "use <team>",
+		Short: "switch the active connected team",
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 1 {
+				return nil
+			}
+			if len(args) == 0 {
+				return fmt.Errorf("missing team\nexpected: s46 teams use <team>")
+			}
+			return fmt.Errorf("too many arguments\nexpected: s46 teams use <team>")
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := newApp(runtime, opts)
+			if err != nil {
+				return err
+			}
+			return app.withLock(cmd.Context(), func() error {
+				return runTeamsUse(app, args[0])
+			})
+		},
+	}
+}
+
+type teamListEntry struct {
+	Name     string `json:"name"`
+	Active   bool   `json:"active"`
+	Lane     string `json:"lane"`
+	Harness  string `json:"harness"`
+	Model    string `json:"model"`
+	Endpoint string `json:"endpoint"`
+}
+
+func runTeamsList(app *app) error {
+	cfg, err := app.config.LoadConfig()
+	if err != nil {
+		return err
+	}
+	entries := teamListEntries(cfg)
+	if ok, err := app.writeStructured(map[string]any{"activeTeam": cfg.ActiveTeam, "teams": entries}); ok {
+		return err
+	}
+	if len(entries) == 0 {
+		return app.renderer.Lines("[s46] no connected teams", "[s46] next: s46 login", "[s46] then: s46 connect <team> --harness=<name>")
+	}
+	return app.renderer.Lines(renderTeamsList(entries)...)
+}
+
+func teamListEntries(cfg config.Config) []teamListEntry {
+	names := make([]string, 0, len(cfg.Teams))
+	for name := range cfg.Teams {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	entries := make([]teamListEntry, 0, len(names))
+	for _, name := range names {
+		team := cfg.Teams[name]
+		entries = append(entries, teamListEntry{
+			Name:     name,
+			Active:   name == cfg.ActiveTeam,
+			Lane:     team.Lane,
+			Harness:  strs.FirstNonEmpty(team.DefaultHarness, harness.DefaultName),
+			Model:    team.DefaultModel,
+			Endpoint: team.Endpoint,
+		})
+	}
+	return entries
+}
+
+func renderTeamsList(entries []teamListEntry) []string {
+	rows := make([][]string, 0, len(entries)+1)
+	rows = append(rows, []string{"ACTIVE", "TEAM", "LANE", "HARNESS", "MODEL", "ENDPOINT"})
+	for _, entry := range entries {
+		active := ""
+		if entry.Active {
+			active = "*"
+		}
+		rows = append(rows, []string{active, entry.Name, entry.Lane, entry.Harness, entry.Model, entry.Endpoint})
+	}
+	lines := []string{"[s46] connected teams:"}
+	lines = append(lines, output.Table(rows[0], rows[1:])...)
+	return lines
+}
+
+func runTeamsUse(app *app, teamName string) error {
+	cfg, err := app.config.LoadConfig()
+	if err != nil {
+		return err
+	}
+	if _, ok := cfg.Teams[teamName]; !ok {
+		return fmt.Errorf("team %q is not connected; run `s46 connect %s` first", teamName, teamName)
+	}
+	cfg.ActiveTeam = teamName
+	if err := app.config.SaveConfig(cfg); err != nil {
+		return err
+	}
+	if ok, err := app.writeStructured(map[string]any{"activeTeam": teamName}); ok {
+		return err
+	}
+	return app.renderer.Lines(fmt.Sprintf("[s46] active team: %s", teamName))
+}
+
+func sessionsCommand(runtime Runtime, opts *options) *cobra.Command {
+	return &cobra.Command{
+		Use:   "sessions",
+		Short: "list local and remote sessions",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := newApp(runtime, opts)
+			if err != nil {
+				return err
+			}
+			service := app.sessionService()
+			sessions, err := service.ListEntries(cmd.Context())
+			if err != nil {
+				return err
+			}
+			if ok, err := app.writeStructured(map[string]any{"sessions": sessions}); ok {
+				return err
+			}
+			if len(sessions) == 0 {
+				return app.renderer.Lines("[s46] no sessions found", "[s46] next: start a coding session, then run `s46 sessions` again")
+			}
+			sessionIDs := displaySessionIDs(sessions)
+			rows := make([][]string, 0, len(sessions))
+			for i, session := range sessions {
+				rows = append(rows, []string{sessionIDs[i], session.State, session.Harness, displayTableCell(session.Model), strs.FirstNonEmpty(session.Age, "0m"), displayTableCell(session.Spent), displaySessionTask(session.Task)})
+			}
+			return app.renderer.Lines(output.Table([]string{"ID", "STATE", "HARNESS", "MODEL", "AGE", "SPENT", "TASK"}, rows)...)
+		},
+	}
+}
+
+func displaySessionIDs(sessions []sessioncmd.ListedSession) []string {
+	ids := make([]string, len(sessions))
+	for i, session := range sessions {
+		ids[i] = uniqueSessionIDPrefix(session.ID, sessions)
+	}
+	return ids
+}
+
+func uniqueSessionIDPrefix(id string, sessions []sessioncmd.ListedSession) string {
+	id = strings.TrimSpace(id)
+	if !looksLikeUUID(id) {
+		return id
+	}
+	for length := 8; length < len(id); length++ {
+		prefix := id[:length]
+		if sessionIDPrefixUnique(id, prefix, sessions) {
+			return prefix
+		}
+	}
+	return id
+}
+
+func sessionIDPrefixUnique(id string, prefix string, sessions []sessioncmd.ListedSession) bool {
+	for _, session := range sessions {
+		other := strings.TrimSpace(session.ID)
+		if other != id && strings.HasPrefix(other, prefix) {
+			return false
+		}
+	}
+	return true
+}
+
+func displaySessionID(id string) string {
+	id = strings.TrimSpace(id)
+	if looksLikeUUID(id) {
+		return id[:8]
+	}
+	return id
+}
+
+func looksLikeUUID(value string) bool {
+	if len(value) != 36 {
+		return false
+	}
+	for _, idx := range []int{8, 13, 18, 23} {
+		if value[idx] != '-' {
+			return false
+		}
+	}
+	for _, r := range value {
+		if r == '-' {
+			continue
+		}
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') && (r < 'A' || r > 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+func displayTableCell(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "—"
+	}
+	return value
+}
+
+func displaySessionTask(task string) string {
+	return displayTableCell(compactSessionTask(task, 72))
+}
+
+func compactSessionTask(task string, limit int) string {
+	task = strings.Join(strings.Fields(task), " ")
+	if task == "" || limit <= 0 {
+		return task
+	}
+	runes := []rune(task)
+	if len(runes) <= limit {
+		return task
+	}
+	if limit == 1 {
+		return "…"
+	}
+	return string(runes[:limit-1]) + "…"
+}
+
+func detachCommand(runtime Runtime, opts *options) *cobra.Command {
+	var harnessName string
+	var box string
+	cmd := &cobra.Command{
+		Use:   "detach <session>",
+		Short: "detach a session to an S46 box",
+		Args:  exactArgs("s46 detach <session>", 1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := newApp(runtime, opts)
+			if err != nil {
+				return err
+			}
+			return runDetach(cmd.Context(), app, args[0], harnessName, box)
+		},
+	}
+	cmd.Flags().StringVar(&harnessName, "harness", "", "override harness")
+	cmd.Flags().StringVar(&box, "box", "", "target box")
+	return cmd
+}
+
+func runDetach(ctx context.Context, app *app, sessionID string, harnessName string, box string) error {
+	if err := app.requireCloudFeature("detach"); err != nil {
+		return err
+	}
+	service := app.sessionService()
+	var result api.Session
+	if err := app.withLock(ctx, func() error {
+		var err error
+		result, err = service.Detach(ctx, sessionID, harnessName, box)
+		return err
+	}); err != nil {
+		return err
+	}
+	if ok, err := app.writeStructured(map[string]any{"session": result}); ok {
+		return err
+	}
+	return app.renderer.Lines(
+		fmt.Sprintf("[s46] detached %s session %s", result.Harness, result.ID),
+		fmt.Sprintf("[s46] running on %s", result.Location),
+		"[s46] you can close your laptop",
+	)
+}
+
+func resumeCommand(runtime Runtime, opts *options) *cobra.Command {
+	return &cobra.Command{
+		Use:   "resume <session>",
+		Short: "resume a session locally",
+		Args:  exactArgs("s46 resume <session>", 1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := newApp(runtime, opts)
+			if err != nil {
+				return err
+			}
+			return runResume(cmd.Context(), app, args[0])
+		},
+	}
+}
+
+func runResume(ctx context.Context, app *app, sessionID string) error {
+	if err := app.requireCloudFeature("resume"); err != nil {
+		return err
+	}
+	service := app.sessionService()
+	var result api.Session
+	var previous string
+	if err := app.withLock(ctx, func() error {
+		var err error
+		result, previous, err = service.Resume(ctx, sessionID)
+		return err
+	}); err != nil {
+		return err
+	}
+	if ok, err := app.writeStructured(map[string]any{"session": result, "previousLocation": previous}); ok {
+		return err
+	}
+	return app.renderer.Lines(
+		fmt.Sprintf("[s46] resumed %s on localhost", sessionID),
+		fmt.Sprintf("# Under the hood: pulled local harness state from %s.", previous),
+	)
+}
+
+func shareCommand(runtime Runtime, opts *options) *cobra.Command {
+	var ttl string
+	cmd := &cobra.Command{
+		Use:   "share [session]",
+		Short: "share a session as an encrypted static page",
+		Args:  maxArgs("s46 share [session]", 1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := newApp(runtime, opts)
+			if err != nil {
+				return err
+			}
+			sessionID := ""
+			if len(args) == 1 {
+				sessionID = args[0]
+			}
+			return runShare(cmd.Context(), app, sessionID, ttl)
+		},
+	}
+	cmd.Flags().StringVar(&ttl, "ttl", "30d", "share expiration: 1d, 7d, 30d, 365d, never")
+	cmd.AddCommand(&cobra.Command{
+		Use:   "revoke <session-or-share-id>",
+		Short: "delete a previously created encrypted share",
+		Args:  exactArgs("s46 share revoke <session-or-share-id>", 1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := newApp(runtime, opts)
+			if err != nil {
+				return err
+			}
+			return runShareRevoke(cmd.Context(), app, args[0])
+		},
+	})
+	return cmd
+}
+
+func runShare(ctx context.Context, app *app, sessionID string, ttl string) error {
+	service := app.sessionService()
+	var inferred *sessioncmd.ListedSession
+	if strings.TrimSpace(sessionID) == "" {
+		latest, ok, err := service.LatestSession(ctx)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("no sessions found; start a coding session, run `s46 sessions`, or pass a session id")
+		}
+		sessionID = latest.ID
+		inferred = &latest
+	}
+	if err := app.requireCloudFeature("share"); err != nil {
+		if inferred != nil {
+			return fmt.Errorf("latest session is %s; %w", inferred.ID, err)
+		}
+		return err
+	}
+	var result sessioncmd.ShareResult
+	if err := app.withLock(ctx, func() error {
+		var err error
+		result, err = service.Share(ctx, sessionID, ttl)
+		return err
+	}); err != nil {
+		return err
+	}
+	if ok, err := app.writeStructured(result); ok {
+		return err
+	}
+	lines := inferredShareLines(inferred)
+	verb := "created"
+	if result.Updated {
+		verb = "updated"
+	}
+	provider := result.Provider
+	if result.Mock {
+		provider += " (mock)"
+	}
+	lines = append(lines,
+		fmt.Sprintf("[s46] Share URL: %s", result.ViewerURL),
+		fmt.Sprintf("[s46] Blob:      %s", result.BlobURL),
+		fmt.Sprintf("[s46] %s encrypted share · TTL: %s · Provider: %s", verb, result.TTL, provider),
+	)
+	return app.renderer.Lines(lines...)
+}
+
+func inferredShareLines(session *sessioncmd.ListedSession) []string {
+	if session == nil {
+		return nil
+	}
+	label := "latest session"
+	if session.Source == "local" {
+		label = "latest local session"
+	}
+	parts := []string{displaySessionID(session.ID)}
+	if session.Harness != "" {
+		parts = append(parts, session.Harness)
+	}
+	if session.Model != "" {
+		parts = append(parts, session.Model)
+	}
+	if task := compactSessionTask(session.Task, 48); task != "" {
+		parts = append(parts, task)
+	} else if session.Source != "local" && session.Location != "" {
+		parts = append(parts, session.Location)
+	}
+	return []string{fmt.Sprintf("[s46] sharing %s: %s", label, strings.Join(parts, " · "))}
+}
+
+func runShareRevoke(ctx context.Context, app *app, target string) error {
+	if err := app.requireCloudFeature("share revoke"); err != nil {
+		return err
+	}
+	service := app.sessionService()
+	var result sessioncmd.RevokeResult
+	if err := app.withLock(ctx, func() error {
+		var err error
+		result, err = service.RevokeShare(ctx, target)
+		return err
+	}); err != nil {
+		return err
+	}
+	if ok, err := app.writeStructured(result); ok {
+		return err
+	}
+	return app.renderer.Lines(fmt.Sprintf("[s46] revoked share %s for %s", result.ID, result.SessionID))
+}
+
+func sessionCommand(runtime Runtime, opts *options) *cobra.Command {
+	cmd := &cobra.Command{Use: "session", Short: "session subcommands"}
+	var title string
+	land := &cobra.Command{
+		Use:   "land [session]",
+		Short: "prepare review-ready landing metadata",
+		Args:  maxArgs("s46 session land [session]", 1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := newApp(runtime, opts)
+			if err != nil {
+				return err
+			}
+			if err := app.requireCloudFeature("session land"); err != nil {
+				return err
+			}
+			service := app.sessionService()
+			sessionID := ""
+			if len(args) == 1 {
+				sessionID = args[0]
+			} else {
+				sessions, err := service.List(cmd.Context())
+				if err != nil {
+					return err
+				}
+				if len(sessions) > 0 {
+					sessionID = sessions[0].ID
+				} else {
+					sessionID = "@dscape/auth-redirect-fix"
+				}
+			}
+			result, err := service.Land(cmd.Context(), sessionID, title)
+			if err != nil {
+				return err
+			}
+			if ok, err := app.writeStructured(result); ok {
+				return err
+			}
+			return app.renderer.Lines(
+				fmt.Sprintf("# %s", result.Title),
+				fmt.Sprintf("# Branch:  %s", result.Branch),
+				fmt.Sprintf("# Ran-on:  %s", strings.Join(result.RanOn, " → ")),
+				fmt.Sprintf("# Harness: %s · Model: %s", result.Harness, result.Model),
+				fmt.Sprintf("# Session: %s · Cost: %s", result.ID, result.Cost),
+				"",
+				"Review package:",
+				fmt.Sprintf("- Summary: %s", result.Review.Summary),
+				fmt.Sprintf("- Checklist: %s", strings.Join(result.Review.Checklist, "; ")),
+				"- Suggested next commands:",
+				"  git diff",
+				"  git status",
+				"  gh pr create --fill",
+			)
+		},
+	}
+	land.Flags().StringVar(&title, "title", "", "review title")
+	cmd.AddCommand(land)
+	return cmd
+}
+
+func modeCommand(runtime Runtime, opts *options) *cobra.Command {
+	var set string
+	cmd := &cobra.Command{
+		Use:   "mode [cloud|airplane]",
+		Short: "view or set operating mode",
+		Args:  maxArgs("s46 mode [cloud|airplane]", 1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := newApp(runtime, opts)
+			if err != nil {
+				return err
+			}
+			requested := set
+			if requested == "" && len(args) == 1 {
+				requested = args[0]
+			}
+			return app.withLock(cmd.Context(), func() error {
+				return runMode(cmd.Context(), app, requested)
+			})
+		},
+	}
+	cmd.Flags().StringVar(&set, "set", "", "mode: cloud or airplane")
+	return cmd
+}
+
+func runMode(ctx context.Context, app *app, requested string) error {
+	switch requested {
+	case "":
+		return renderModeStatus(app)
+	case config.ModeAirplane:
+		return airplaneModeOn(ctx, app)
+	case config.ModeCloud:
+		return airplaneModeOff(ctx, app)
+	default:
+		return fmt.Errorf("unknown mode %q; expected cloud or airplane", requested)
+	}
+}
+
+func renderModeStatus(app *app) error {
+	cfg, err := app.config.LoadConfig()
+	if err != nil {
+		return err
+	}
+	mode := cfg.ActiveMode()
+	teamName := cfg.ActiveTeam
+	teamConfig := cfg.Teams[teamName]
+	result := map[string]any{"mode": mode, "team": teamName, "endpoint": teamConfig.Endpoint, "model": teamConfig.DefaultModel}
+	if mode == config.ModeAirplane {
+		result["gatewayUrl"] = airplane.LocalGatewayURL
+		result["backendModel"] = airplane.BackendModel
+	}
+	if ok, err := app.writeStructured(result); ok {
+		return err
+	}
+	lines := []string{fmt.Sprintf("[s46] mode: %s", mode)}
+	if teamName == "" {
+		lines = append(lines, "[s46] team: none")
+	} else {
+		lines = append(lines,
+			fmt.Sprintf("[s46] team: %s", teamName),
+			fmt.Sprintf("[s46] endpoint: %s", teamConfig.Endpoint),
+			fmt.Sprintf("[s46] model: %s", teamConfig.DefaultModel),
+		)
+	}
+	if mode == config.ModeAirplane {
+		lines = append(lines, fmt.Sprintf("[s46] local backend: %s", airplane.BackendModel))
+	}
+	return app.renderer.Lines(lines...)
+}
+
+func airplaneCommand(runtime Runtime, opts *options) *cobra.Command {
+	cmd := &cobra.Command{Use: "airplane", Short: "manage local airplane mode"}
+	cmd.AddCommand(airplaneLogsCommand(runtime, opts))
+	var setupMode string
+	var setupHarness string
+	var setupYes bool
+	setup := &cobra.Command{
+		Use:   "setup",
+		Short: "check and prepare local airplane-mode dependencies",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := newApp(runtime, opts)
+			if err != nil {
+				return err
+			}
+			app.renderer.Prefix = "[s46]"
+			setupOptions := airplaneSetupCommandOptions{AssumeYes: setupYes, Mode: setupMode, Harness: setupHarness}
+			if err := validateAirplaneSetupCommandOptions(app, setupOptions); err != nil {
+				return err
+			}
+			report, err := runAirplaneSetupWithOptions(cmd.Context(), app, airplaneSetupOptions{AllowPrompts: true, AssumeYes: setupOptions.AssumeYes})
+			if err != nil {
+				return err
+			}
+			if ok, err := app.writeStructured(report); ok {
+				return err
+			}
+			return offerAirplaneModeOnAfterSetupWithOptions(cmd.Context(), app, report, setupOptions)
+		},
+	}
+	setup.Flags().StringVar(&setupMode, "mode", "", "set mode after setup (on)")
+	setup.Flags().StringVar(&setupHarness, "harness", "", "harness to configure when enabling airplane mode")
+	setup.Flags().BoolVar(&setupYes, "yes", false, "accept setup prompts non-interactively")
+	cmd.AddCommand(setup)
+	mode := &cobra.Command{Use: "mode", Short: "turn airplane mode on or off"}
+	var modeHarness string
+	modeOn := &cobra.Command{
+		Use:   "on",
+		Short: "switch active team to local airplane mode",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := newApp(runtime, opts)
+			if err != nil {
+				return err
+			}
+			if modeHarness != "" {
+				if _, err := app.harness.Get(modeHarness); err != nil {
+					return err
+				}
+			}
+			return app.withLock(cmd.Context(), func() error {
+				return airplaneModeOnWithOptions(cmd.Context(), app, airplaneModeOptions{Harness: modeHarness})
+			})
+		},
+	}
+	modeOn.Flags().StringVar(&modeHarness, "harness", "", "harness to configure while enabling airplane mode")
+	mode.AddCommand(modeOn)
+	mode.AddCommand(&cobra.Command{
+		Use:   "off",
+		Short: "switch active team back to cloud mode",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := newApp(runtime, opts)
+			if err != nil {
+				return err
+			}
+			return app.withLock(cmd.Context(), func() error { return airplaneModeOff(cmd.Context(), app) })
+		},
+	})
+	cmd.AddCommand(mode)
+	return cmd
+}
+
+func runCommand(runtime Runtime, opts *options) *cobra.Command {
+	var model string
+	var sessionID string
+	cmd := &cobra.Command{
+		Use:   "run <task>",
+		Short: "start a direct mocked s46 session",
+		Args:  minArgs("s46 run <task>", 1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			app, err := newApp(runtime, opts)
+			if err != nil {
+				return err
+			}
+			return runRun(cmd.Context(), app, strings.Join(args, " "), model, sessionID)
+		},
+	}
+	cmd.Flags().StringVar(&model, "model", "", "model")
+	cmd.Flags().StringVar(&sessionID, "session", "", "session id")
+	return cmd
+}
+
+func runRun(ctx context.Context, app *app, task string, model string, sessionID string) error {
+	service := app.sessionService()
+	var result sessioncmd.RunResult
+	if err := app.withLock(ctx, func() error {
+		var err error
+		result, err = service.Run(ctx, task, model, sessionID)
+		return err
+	}); err != nil {
+		return err
+	}
+	if ok, err := app.writeStructured(result); ok {
+		return err
+	}
+	return app.renderer.Lines(
+		fmt.Sprintf("[s46] session: %s", result.ID),
+		fmt.Sprintf("[s46] state:   %s locally", result.State),
+		fmt.Sprintf("[s46] harness: s46 (direct) · model: %s", result.Model),
+		fmt.Sprintf("[s46] task:    %s", result.Task),
+	)
+}
+
+func authStatus(state config.State) string {
+	if state.Authenticated && state.CurrentUser != "" {
+		return state.CurrentUser
+	}
+	return "not authenticated"
+}
+
+func (a *app) requireAccessToken(ctx context.Context) (string, error) {
+	state, err := a.config.LoadState()
+	if err != nil {
+		return "", err
+	}
+	if !state.Authenticated || state.CurrentUser == "" {
+		return "", fmt.Errorf("not authenticated; run `s46 login` before connecting a cloud team")
+	}
+	token, err := a.authService().AccessToken(ctx)
+	if err != nil {
+		return "", fmt.Errorf("could not obtain s46 access token: %w; run `s46 login` if your session expired", err)
+	}
+	if token == "" {
+		return "", fmt.Errorf("not authenticated; run `s46 login` before connecting a cloud team")
+	}
+	return token, nil
+}
+
+// authService wires the standard {API, Config, Keyring} triple into
+// auth.Service. It is intentionally a method, not cached on app, so each
+// caller gets a fresh value (auth.Service is a small struct).
+func (a *app) authService() auth.Service {
+	return auth.Service{API: a.api, Config: a.config, Keyring: a.keyring}
+}
+
+// sessionService wires session.Service with the same triple plus an
+// auth-token provider so session can fetch bearers without reaching
+// into the keyring directly.
+func (a *app) sessionService() sessioncmd.Service {
+	return sessioncmd.Service{API: a.api, Auth: a.authService(), Config: a.config, Keyring: a.keyring, Harness: a.harness}
+}
+
+func (a *app) writeStructured(value any) (bool, error) {
+	if a.options.json {
+		return true, a.renderer.WriteJSON(value)
+	}
+	if a.options.jsonl {
+		return true, a.renderer.WriteJSONL(value)
+	}
+	return false, nil
+}
+
+func (a *app) requireCloudFeature(feature string) error {
+	cfg, err := a.config.LoadConfig()
+	if err != nil {
+		return err
+	}
+	if cfg.ActiveMode() != config.ModeAirplane {
+		return nil
+	}
+	return fmt.Errorf("%s requires cloud connectivity; go online and switch to cloud mode to use it. Airplane mode supports local coding only", feature)
+}
+
+func (a *app) stdinReader() *inputReader {
+	if a.promptReader == nil {
+		a.promptReader = &inputReader{Reader: bufio.NewReader(a.runtime.Stdin), source: a.runtime.Stdin}
+	}
+	return a.promptReader
+}
+
+func (a *app) withLock(ctx context.Context, fn func() error) error {
+	lock, err := a.config.Lock(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = lock.Unlock() }()
+	return fn()
+}
+
+func (a *app) debug(format string, args ...any) {
+	if a != nil && a.options != nil && a.options.verbose && !a.options.machineReadable() {
+		fmt.Fprintf(a.runtime.Stderr, "[s46:debug] "+format+"\n", args...)
+	}
 }
