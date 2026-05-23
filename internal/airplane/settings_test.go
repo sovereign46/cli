@@ -68,6 +68,30 @@ func TestAirplaneLlamacppArgsIncludesModelAndSettings(t *testing.T) {
 	}
 }
 
+func TestAirplaneLlamacppArgsHonorsBackendModelOverride(t *testing.T) {
+	t.Parallel()
+	args := AirplaneLlamacppArgs(map[string]string{"S46_LOCAL_MODEL": "custom-backend"}, "/models/devstral.gguf")
+	if joined := strings.Join(args, " "); !strings.Contains(joined, "--alias custom-backend") {
+		t.Fatalf("args did not use custom backend alias: %s", joined)
+	}
+}
+
+func TestLlamacppRuntimeSettingsDetectMismatches(t *testing.T) {
+	t.Parallel()
+	command := "llama-server --alias wrong --ctx-size 4096 --n-predict 4096 --parallel 1 --flash-attn on --cache-type-k q8_0 --cache-type-v q8_0 --timeout 600 --n-gpu-layers 99"
+	settings := LlamacppRuntimeSettings(nil, command)
+	got := map[string]LlamacppRuntimeSetting{}
+	for _, setting := range settings {
+		got[setting.Flag] = setting
+	}
+	if got["--alias"].OK || got["--alias"].Actual != "wrong" || got["--alias"].Expected != BackendModel {
+		t.Fatalf("alias setting not detected: %#v", got["--alias"])
+	}
+	if !got["--n-predict"].OK {
+		t.Fatalf("matching setting reported mismatch: %#v", got["--n-predict"])
+	}
+}
+
 func TestAirplaneGatewayEnvProjectsSettings(t *testing.T) {
 	t.Parallel()
 	env := map[string]string{"S46_AIRPLANE_MAX_TOKENS": "256", "S46_WRITE_TIMEOUT": "5m"}

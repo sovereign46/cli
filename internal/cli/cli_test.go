@@ -964,6 +964,42 @@ func TestAirplaneSetupOffersToRestartExistingS46Gateway(t *testing.T) {
 	}
 }
 
+func TestAirplaneSetupOffersToRestartLlamacppWithWrongSettings(t *testing.T) {
+	env := testEnv(t)
+	delete(env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")
+	modelPath := filepath.Join(env["XDG_DATA_HOME"], "s46", "models", "devstral", airplane.GGUFModelFile)
+	command := strings.Join(airplane.AirplaneLlamacppArgs(env, modelPath), " ")
+	command = strings.Replace(command, "--ctx-size 65536", "--ctx-size 4096", 1)
+	env["S46_TEST_MEMORY_BYTES"] = "68000000000"
+	env["S46_TEST_FREE_DISK_BYTES"] = "61000000000"
+	env["S46_TEST_LLAMACPP_PATH"] = "/opt/homebrew/bin/llama-server"
+	env["S46_TEST_LLAMACPP_RUNNING"] = "1"
+	env["S46_TEST_LLAMACPP_VERIFIED_MODEL"] = "1"
+	env["S46_TEST_LLAMACPP_PROCESS_KIND"] = "manual"
+	env["S46_TEST_LLAMACPP_PROCESS_PID"] = "111"
+	env["S46_TEST_LLAMACPP_PROCESS_COMMAND"] = command
+	env["S46_TEST_MODEL_DOWNLOADED"] = "1"
+	env["S46_TEST_MODEL_PROBE"] = "1"
+	env["S46_TEST_GATEWAY_READY"] = "1"
+	env["S46_TEST_LISTENER_8081"] = "111 llama-server"
+	env["S46_TEST_STOP_GATEWAY_OK"] = "1"
+	env["S46_TEST_START_LLAMACPP_OK"] = "1"
+
+	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\nn\n"), "airplane", "setup"))
+	for _, want := range []string{
+		"[s46] [fail] llamacpp-settings: restart required: --ctx-size got 4096 want 65536",
+		"[s46] llama-server needs to be restarted with airplane runtime settings.",
+		"[s46] Restart llama-server with airplane settings now? [Y/n]",
+		"[s46] stopping llama-server...",
+		"[s46] starting llama-server...",
+		"[s46] airplane setup: ready",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("setup output missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestAirplaneSetupContinuesAfterInstallingLlamacpp(t *testing.T) {
 	env := testEnv(t)
 	delete(env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")

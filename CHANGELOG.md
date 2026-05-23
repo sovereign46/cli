@@ -6,6 +6,19 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Added a documented CLI HTTP API contract for the future S46 server.
+
+### Changed
+
+- Changed airplane setup to detect llama-server runtime flags that differ from S46 defaults and offer to restart llama-server before probing the model or gateway.
+- Changed session landing requests to include the active team query parameter consistently with other session actions.
+
+### Fixed
+
+- Fixed airplane llama-server startup to honor `S46_LOCAL_MODEL` when setting the backend model alias.
+
 ## [0.2.1] - 2026-05-23
 
 ### Fixed

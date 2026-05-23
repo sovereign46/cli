@@ -1603,7 +1603,7 @@ func renderModeStatus(app *app) error {
 	result := map[string]any{"mode": mode, "team": teamName, "endpoint": teamConfig.Endpoint, "model": teamConfig.DefaultModel}
 	if mode == config.ModeAirplane {
 		result["gatewayUrl"] = airplane.LocalGatewayURL
-		result["backendModel"] = airplane.BackendModel
+		result["backendModel"] = airplane.BackendModelForEnv(app.runtime.Env)
 	}
 	if ok, err := app.writeStructured(result); ok {
 		return err
@@ -1619,7 +1619,7 @@ func renderModeStatus(app *app) error {
 		)
 	}
 	if mode == config.ModeAirplane {
-		lines = append(lines, fmt.Sprintf("[s46] local backend: %s", airplane.BackendModel))
+		lines = append(lines, fmt.Sprintf("[s46] local backend: %s", airplane.BackendModelForEnv(app.runtime.Env)))
 	}
 	return app.renderer.Lines(lines...)
 }

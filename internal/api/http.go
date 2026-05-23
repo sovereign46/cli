@@ -169,7 +169,8 @@ func (c *HTTPClient) Attach(ctx context.Context, req AttachRequest) (AttachResul
 
 func (c *HTTPClient) Land(ctx context.Context, req LandRequest) (LandResult, error) {
 	var result LandResult
-	err := c.do(ctx, http.MethodPost, "/v1/sessions/"+url.PathEscape(req.SessionID)+"/land", req.AccessToken, req, &result)
+	endpoint := addTeamQuery("/v1/sessions/"+url.PathEscape(req.SessionID)+"/land", req.Team.Name)
+	err := c.do(ctx, http.MethodPost, endpoint, req.AccessToken, req, &result)
 	for i := range result.RanOn {
 		result.RanOn[i] = c.rewriteS46Location(result.RanOn[i])
 	}

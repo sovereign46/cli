@@ -229,6 +229,32 @@ func TestCheckRefusesLlamacppServingDifferentModel(t *testing.T) {
 	}
 }
 
+func TestCheckRequiresAirplaneRuntimeSettings(t *testing.T) {
+	env := map[string]string{
+		"S46_TEST_MEMORY_BYTES":             "68000000000",
+		"S46_TEST_FREE_DISK_BYTES":          "61000000000",
+		"S46_TEST_LLAMACPP_PATH":            "/opt/homebrew/bin/llama-server",
+		"S46_TEST_LLAMACPP_RUNNING":         "1",
+		"S46_TEST_LLAMACPP_VERIFIED_MODEL":  "1",
+		"S46_TEST_LLAMACPP_PROCESS_KIND":    "manual",
+		"S46_TEST_LLAMACPP_PROCESS_COMMAND": "llama-server --alias " + BackendModel + " --ctx-size 4096 --n-predict 4096 --parallel 1 --flash-attn on --cache-type-k q8_0 --cache-type-v q8_0 --timeout 600 --n-gpu-layers 99",
+		"S46_TEST_MODEL_DOWNLOADED":         "1",
+		"S46_TEST_MODEL_PROBE":              "1",
+		"S46_TEST_GATEWAY_READY":            "1",
+	}
+	report := Service{Env: env}.Check(context.Background())
+
+	if check := findCheck(report, "llamacpp-settings"); check.OK || !strings.Contains(check.Message, "--ctx-size got 4096 want 65536") {
+		t.Fatalf("unexpected llamacpp-settings check: %#v", check)
+	}
+	if check := findCheck(report, "model-probe"); check.OK || !strings.Contains(check.Message, "restarted with airplane settings") {
+		t.Fatalf("model probe must wait for runtime settings: %#v", check)
+	}
+	if report.Ready {
+		t.Fatalf("report should not be ready with mismatched runtime settings: %#v", report)
+	}
+}
+
 func TestStartGatewayRequiresVerifiedRuntime(t *testing.T) {
 	err := Service{Env: map[string]string{
 		"S46_TEST_MODEL_DOWNLOADED":        "1",

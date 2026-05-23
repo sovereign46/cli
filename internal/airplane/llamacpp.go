@@ -20,6 +20,8 @@ import (
 type LlamacppRuntimeSetting struct {
 	Flag     string `json:"flag"`
 	Expected string `json:"expected"`
+	Actual   string `json:"actual,omitempty"`
+	OK       bool   `json:"ok"`
 }
 
 type LlamacppRuntime struct {
@@ -131,7 +133,6 @@ func (s Service) LlamacppRunning(ctx context.Context) bool {
 }
 
 func (s Service) LlamacppRuntime(ctx context.Context) LlamacppRuntime {
-	settings := AirplaneLlamacppSettings(s.Env)
 	runtimeReport := LlamacppRuntime{Running: s.llamacppRunning(ctx), Server: "not-running", ModelPath: s.modelPath()}
 	if process, ok := s.llamacppServeProcess(ctx); ok {
 		runtimeReport.PID = process.PID
@@ -140,17 +141,36 @@ func (s Service) LlamacppRuntime(ctx context.Context) LlamacppRuntime {
 	} else if runtimeReport.Running {
 		runtimeReport.Server = "unknown"
 	}
-	for _, setting := range settings {
-		runtimeReport.Settings = append(runtimeReport.Settings, LlamacppRuntimeSetting{Flag: setting.Flag, Expected: setting.Value})
-	}
+	runtimeReport.Settings = LlamacppRuntimeSettings(s.Env, runtimeReport.Command)
 	if runtimeReport.Running {
 		runtimeReport.AdvertisedModels = s.advertisedLlamacppModels(ctx)
 	}
 	return runtimeReport
 }
 
+func LlamacppRuntimeSettings(env map[string]string, command string) []LlamacppRuntimeSetting {
+	expected := append([]LlamacppSetting{{Flag: "--alias", Value: BackendModelForEnv(env)}}, AirplaneLlamacppSettings(env)...)
+	settings := make([]LlamacppRuntimeSetting, 0, len(expected))
+	for _, want := range expected {
+		actual, found := commandFlagValue(command, want.Flag)
+		settings = append(settings, LlamacppRuntimeSetting{Flag: want.Flag, Expected: want.Value, Actual: actual, OK: found && settingValueMatches(actual, want.Value)})
+	}
+	return settings
+}
+
 func (r LlamacppRuntime) NeedsLaunchctlUpdate() bool { return false }
-func (r LlamacppRuntime) NeedsProcessRestart() bool  { return false }
+
+func (r LlamacppRuntime) NeedsProcessRestart() bool {
+	if !r.Running || strings.TrimSpace(r.Command) == "" {
+		return false
+	}
+	for _, setting := range r.Settings {
+		if !setting.OK {
+			return true
+		}
+	}
+	return false
+}
 
 func (s Service) runHomebrewInstall(ctx context.Context, formula string) error {
 	cmd := exec.CommandContext(ctx, "brew", "install", formula)
@@ -202,11 +222,12 @@ func (s Service) llamacppServeProcess(ctx context.Context) (llamacppProcess, boo
 }
 
 func testLlamacppCommand(kind string) string {
+	args := strings.Join(AirplaneLlamacppArgs(nil, "/tmp/s46-test-model.gguf"), " ")
 	switch kind {
 	case "homebrew", "manual":
-		return "/opt/homebrew/bin/llama-server " + joinLlamacppSettings(AirplaneLlamacppSettings(nil))
+		return "/opt/homebrew/bin/llama-server " + args
 	default:
-		return "llama-server " + joinLlamacppSettings(AirplaneLlamacppSettings(nil))
+		return "llama-server " + args
 	}
 }
 
@@ -249,6 +270,10 @@ func commandFlagValue(command string, names ...string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+func settingValueMatches(actual string, expected string) bool {
+	return strings.EqualFold(strings.TrimSpace(actual), strings.TrimSpace(expected))
 }
 
 func sameModelPath(got string, want string) bool {
@@ -382,5 +407,5 @@ func llamacppPort(env map[string]string) int {
 }
 
 func (s Service) backendModel() string {
-	return strs.FirstNonEmpty(strs.EnvValue(s.Env, "S46_LOCAL_MODEL"), BackendModel)
+	return BackendModelForEnv(s.Env)
 }

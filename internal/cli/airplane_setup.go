@@ -109,23 +109,37 @@ func runAirplaneSetupWithOptions(ctx context.Context, app *app, options airplane
 		}
 		return report, nil
 	}
-	if checkOK(report, "llamacpp-model") && missingCheck(report, "local-gateway") && service.GatewayResponding(ctx) && !service.GatewayReady(ctx) {
+	if checkOK(report, "llamacpp-model") && missingCheck(report, "llamacpp-settings") {
+		var runtimeChanged bool
 		var err error
-		report, changed, err = offerAirplaneGatewayRestart(ctx, app, service, report, options)
+		report, runtimeChanged, err = offerLlamacppRuntimeRestart(ctx, app, service, report, options)
 		if err != nil {
 			return report, err
 		}
-		if !changed {
+		changed = changed || runtimeChanged
+		if missingCheck(report, "llamacpp-settings") {
 			return report, nil
 		}
-		if checkOK(report, "llamacpp-model") && missingCheck(report, "local-gateway") && service.GatewayResponding(ctx) && !service.GatewayReady(ctx) {
+	}
+	if checkOK(report, "llamacpp-model") && checkOK(report, "llamacpp-settings") && missingCheck(report, "local-gateway") && service.GatewayResponding(ctx) && !service.GatewayReady(ctx) {
+		var gatewayChanged bool
+		var err error
+		report, gatewayChanged, err = offerAirplaneGatewayRestart(ctx, app, service, report, options)
+		if err != nil {
+			return report, err
+		}
+		changed = changed || gatewayChanged
+		if !gatewayChanged {
+			return report, nil
+		}
+		if checkOK(report, "llamacpp-model") && checkOK(report, "llamacpp-settings") && missingCheck(report, "local-gateway") && service.GatewayResponding(ctx) && !service.GatewayReady(ctx) {
 			if err := app.renderer.Lines(renderAirplaneReport(report)...); err != nil {
 				return report, err
 			}
 			return report, nil
 		}
 	}
-	if checkOK(report, "llamacpp-model") && missingCheck(report, "local-gateway") {
+	if checkOK(report, "llamacpp-model") && checkOK(report, "llamacpp-settings") && missingCheck(report, "local-gateway") {
 		if _, ok := service.GatewayStartDescription(); !ok && service.GatewayDownloadAvailable() {
 			if yes, err := confirmAirplaneSetup(app, options, fmt.Sprintf("[s46] Local S46 gateway is not installed.\n[s46] Install %s? [Y/n] ", service.GatewayInstallDescription()), true); err != nil {
 				return report, err
@@ -141,7 +155,7 @@ func runAirplaneSetupWithOptions(ctx context.Context, app *app, options airplane
 			}
 		}
 	}
-	if checkOK(report, "llamacpp-model") && missingCheck(report, "local-gateway") {
+	if checkOK(report, "llamacpp-model") && checkOK(report, "llamacpp-settings") && missingCheck(report, "local-gateway") {
 		if description, ok := service.GatewayStartDescription(); ok {
 			if yes, err := confirmAirplaneSetup(app, options, fmt.Sprintf("[s46] Local S46 gateway is available as %s.\n[s46] Start local gateway now? [Y/n] ", description), true); err != nil {
 				return report, err
@@ -195,6 +209,49 @@ func offerAirplaneModelDownload(ctx context.Context, app *app, service airplane.
 	return service.Check(ctx), true, nil
 }
 
+func offerLlamacppRuntimeRestart(ctx context.Context, app *app, service airplane.Service, report airplane.Report, options airplaneSetupOptions) (airplane.Report, bool, error) {
+	runtimeReport := service.LlamacppRuntime(ctx)
+	lines := []string{"[s46] llama-server needs to be restarted with airplane runtime settings."}
+	lines = append(lines, renderLlamacppSettings(runtimeReport)...)
+	if err := app.renderer.Lines(lines...); err != nil {
+		return report, false, err
+	}
+	if !canRestartLlamacpp(runtimeReport) {
+		if err := app.renderer.Lines("[s46] Setup will not stop an unknown or non-llama-server process automatically."); err != nil {
+			return report, false, err
+		}
+		return report, false, nil
+	}
+	if !options.AssumeYes && !app.canPrompt() {
+		if err := app.renderer.Lines("[s46] Run `s46 airplane setup` in a terminal to restart llama-server automatically."); err != nil {
+			return report, false, err
+		}
+		return report, false, nil
+	}
+	if yes, err := confirmAirplaneSetup(app, options, "[s46] Restart llama-server with airplane settings now? [Y/n] ", true); err != nil {
+		return report, false, err
+	} else if !yes {
+		return report, false, nil
+	}
+	if err := app.renderer.Lines("[s46] stopping llama-server..."); err != nil {
+		return report, false, err
+	}
+	if err := stopListeningProcess(app.runtime.Env, airplane.LlamacppURL(app.runtime.Env), strconv.Itoa(runtimeReport.PID), 5*time.Second); err != nil {
+		return report, false, fmt.Errorf("failed to stop llama-server: %w", err)
+	}
+	if err := app.renderer.Lines("[s46] starting llama-server..."); err != nil {
+		return report, false, err
+	}
+	if err := service.StartLlamacpp(); err != nil {
+		return report, false, fmt.Errorf("failed to start llama-server: %w", err)
+	}
+	return waitForAirplaneCheckAssumingVerifiedModel(ctx, service, "llamacpp-settings", 30*time.Second), true, nil
+}
+
+func canRestartLlamacpp(runtimeReport airplane.LlamacppRuntime) bool {
+	return runtimeReport.Running && runtimeReport.PID > 0
+}
+
 func renderManualModelDownloadInstructions(report airplane.Report, reason string) []string {
 	modelURL := "https://models.s46.dev/models/v1/s46/devstral-small-2-24b/manifest.json"
 	return []string{
@@ -206,6 +263,18 @@ func renderManualModelDownloadInstructions(report airplane.Report, reason string
 }
 
 func ensureLlamacppRuntimeSettings(ctx context.Context, app *app, service airplane.Service) error {
+	runtimeReport := service.LlamacppRuntime(ctx)
+	if !runtimeReport.NeedsProcessRestart() {
+		return nil
+	}
+	report := service.CheckAssumingVerifiedModel(ctx)
+	report, _, err := offerLlamacppRuntimeRestart(ctx, app, service, report, airplaneSetupOptions{AllowPrompts: app.canPrompt()})
+	if err != nil {
+		return err
+	}
+	if !checkOK(report, "llamacpp-settings") {
+		return fmt.Errorf("llama-server must be restarted with airplane settings; run `s46 airplane setup`")
+	}
 	return nil
 }
 
@@ -510,7 +579,11 @@ func renderLlamacppServer(runtimeReport airplane.LlamacppRuntime) string {
 func renderLlamacppSettings(runtimeReport airplane.LlamacppRuntime) []string {
 	lines := []string{}
 	for _, setting := range runtimeReport.Settings {
-		lines = append(lines, fmt.Sprintf("[s46] llama.cpp %s: want %s", setting.Flag, setting.Expected))
+		line := fmt.Sprintf("[s46] llama.cpp %s: want %s", setting.Flag, setting.Expected)
+		if runtimeReport.Running && runtimeReport.Command != "" {
+			line += "; got " + renderSettingValue(setting.Actual, setting.OK)
+		}
+		lines = append(lines, line)
 	}
 	return lines
 }
@@ -601,7 +674,7 @@ func enableAirplaneMode(ctx context.Context, app *app, service airplane.Service,
 		"[s46] mode: airplane",
 		fmt.Sprintf("[s46] team: %s", teamName),
 		fmt.Sprintf("[s46] endpoint: %s", teamConfig.Endpoint),
-		fmt.Sprintf("[s46] model: %s -> %s", airplane.LocalModelID, airplane.BackendModel),
+		fmt.Sprintf("[s46] model: %s -> %s", airplane.LocalModelID, airplane.BackendModelForEnv(app.runtime.Env)),
 	)
 }
 

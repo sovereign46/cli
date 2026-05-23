@@ -30,7 +30,7 @@ func AirplaneLlamacppArgs(env map[string]string, modelPath string) []string {
 	args := []string{
 		"--host", "127.0.0.1",
 		"--port", strconv.Itoa(llamacppPort(env)),
-		"--alias", BackendModel,
+		"--alias", BackendModelForEnv(env),
 		"-m", modelPath,
 		"--jinja",
 	}
@@ -40,12 +40,8 @@ func AirplaneLlamacppArgs(env map[string]string, modelPath string) []string {
 	return args
 }
 
-func joinLlamacppSettings(settings []LlamacppSetting) string {
-	parts := make([]string, 0, len(settings))
-	for _, setting := range settings {
-		parts = append(parts, setting.Flag+" "+setting.Value)
-	}
-	return strings.Join(parts, " ")
+func BackendModelForEnv(env map[string]string) string {
+	return strs.FirstNonEmpty(strs.EnvValue(env, "S46_LOCAL_MODEL"), BackendModel)
 }
 
 func AirplaneGatewayEnv(env map[string]string) []string {

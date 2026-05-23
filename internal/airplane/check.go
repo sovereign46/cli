@@ -90,9 +90,13 @@ func (s Service) check(ctx context.Context, assumeVerifiedModel bool) Report {
 	llamacppModelOK, llamacppModelMessage := s.llamacppModelCheck(ctx, modelDownloaded, llamacppRunning)
 	report.add(Check{Name: "llamacpp-model", OK: llamacppModelOK, Required: true, Message: llamacppModelMessage})
 
+	llamacppSettingsOK, llamacppSettingsMessage := s.llamacppSettingsCheck(ctx, llamacppModelOK)
+	report.add(Check{Name: "llamacpp-settings", OK: llamacppSettingsOK, Required: true, Message: llamacppSettingsMessage})
+
+	verifiedRuntimeReady := llamacppModelOK && llamacppSettingsOK
 	modelProbe := false
-	modelProbeMessage := "skipped: verified llama-server is not ready"
-	if llamacppModelOK {
+	modelProbeMessage := skippedVerifiedRuntimeMessage(llamacppModelOK, llamacppSettingsOK)
+	if verifiedRuntimeReady {
 		modelProbeCtx, cancel := context.WithTimeout(ctx, s.modelProbeTimeout())
 		modelProbe, modelProbeMessage = s.modelProbeWithNotice(modelProbeCtx)
 		cancel()
@@ -102,8 +106,8 @@ func (s Service) check(ctx context.Context, assumeVerifiedModel bool) Report {
 	gatewayReady := false
 	gatewayPath, _ := s.gatewayBinary()
 	report.GatewayBinary = gatewayPath
-	gatewayMessage := "skipped: verified llama-server is not ready"
-	if llamacppModelOK {
+	gatewayMessage := skippedVerifiedRuntimeMessage(llamacppModelOK, llamacppSettingsOK)
+	if verifiedRuntimeReady {
 		gatewayReady = s.runBoolCheck(ctx, s.checkTimeout(), s.gatewayReady)
 		gatewayMessage = s.gatewayMessage(ctx, gatewayReady, gatewayPath)
 	}
@@ -132,6 +136,7 @@ func (s Service) skippedReport() Report {
 		{Name: "model-downloaded", OK: true, Required: true, Message: s.modelPath()},
 		{Name: "llamacpp-running", OK: true, Required: true, Message: "skipped"},
 		{Name: "llamacpp-model", OK: true, Required: true, Message: "skipped"},
+		{Name: "llamacpp-settings", OK: true, Required: true, Message: "skipped"},
 		{Name: "model-probe", OK: true, Required: true, Message: LocalModelID + " responds"},
 		{Name: "local-gateway", OK: true, Required: true, Message: s.gatewayURL()},
 	}
@@ -174,6 +179,38 @@ func (s Service) llamacppModelCheck(ctx context.Context, modelDownloaded bool, l
 		return false, "skipped: llama-server is not running"
 	}
 	return s.llamacppServingVerifiedModel(ctx)
+}
+
+func (s Service) llamacppSettingsCheck(ctx context.Context, llamacppModelOK bool) (bool, string) {
+	if !llamacppModelOK {
+		return false, "skipped: verified llama-server is not ready"
+	}
+	runtimeReport := s.LlamacppRuntime(ctx)
+	if strings.TrimSpace(runtimeReport.Command) == "" {
+		return true, "could not inspect process flags; verified model is running"
+	}
+	mismatches := []string{}
+	for _, setting := range runtimeReport.Settings {
+		if setting.OK {
+			continue
+		}
+		actual := strs.FirstNonEmpty(setting.Actual, "unset")
+		mismatches = append(mismatches, fmt.Sprintf("%s got %s want %s", setting.Flag, actual, setting.Expected))
+	}
+	if len(mismatches) == 0 {
+		return true, "airplane runtime settings active"
+	}
+	return false, "restart required: " + strings.Join(mismatches, "; ")
+}
+
+func skippedVerifiedRuntimeMessage(llamacppModelOK bool, llamacppSettingsOK bool) string {
+	if !llamacppModelOK {
+		return "skipped: verified llama-server is not ready"
+	}
+	if !llamacppSettingsOK {
+		return "skipped: llama-server must be restarted with airplane settings"
+	}
+	return "skipped: verified llama-server is not ready"
 }
 
 func (s Service) modelProbeWithNotice(ctx context.Context) (bool, string) {

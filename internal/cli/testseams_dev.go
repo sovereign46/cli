@@ -43,7 +43,12 @@ func seamStopGateway(env map[string]string, port string) (handled bool) {
 	if !strs.Truthy(env["S46_TEST_STOP_GATEWAY_OK"]) {
 		return false
 	}
-	env["S46_TEST_GATEWAY_RESPONDING"] = "0"
+	if port == "8081" {
+		env["S46_TEST_LLAMACPP_RUNNING"] = "0"
+		env["S46_TEST_LLAMACPP_PROCESS_KIND"] = "none"
+	} else {
+		env["S46_TEST_GATEWAY_RESPONDING"] = "0"
+	}
 	if port != "" {
 		env["S46_TEST_LISTENER_"+port] = "missing"
 	}

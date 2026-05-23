@@ -20,7 +20,7 @@ For local mock/test runs, swap the OS keychain for a file backend:
 S46_KEYRING_BACKEND=file go run ./cmd/s46 login --user dscape@acme.s46.dev --device-id dev-laptop
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the sandboxed `make shell` flow.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the sandboxed `make shell` flow. The server-facing HTTP contract is documented in [docs/api-contract.md](docs/api-contract.md).
 
 ## Commands
 
