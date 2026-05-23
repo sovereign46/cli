@@ -14,13 +14,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sovereign46/s46-cli/internal/api"
-	"github.com/sovereign46/s46-cli/internal/config"
-	"github.com/sovereign46/s46-cli/internal/harness"
-	"github.com/sovereign46/s46-cli/internal/keyring"
-	sharepkg "github.com/sovereign46/s46-cli/internal/share"
-	"github.com/sovereign46/s46-cli/internal/strs"
-	"github.com/sovereign46/s46-cli/internal/workspace"
+	"github.com/sovereign46/cli/internal/api"
+	"github.com/sovereign46/cli/internal/config"
+	"github.com/sovereign46/cli/internal/harness"
+	"github.com/sovereign46/cli/internal/keyring"
+	sharepkg "github.com/sovereign46/cli/internal/share"
+	"github.com/sovereign46/cli/internal/strs"
+	"github.com/sovereign46/cli/internal/workspace"
 )
 
 // SessionsAPI is the narrow API surface the session service actually

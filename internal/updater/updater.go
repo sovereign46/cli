@@ -13,11 +13,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sovereign46/s46-cli/internal/strs"
+	"github.com/sovereign46/cli/internal/strs"
 )
 
 const (
-	DefaultRepo        = "sovereign46/s46-cli"
+	DefaultRepo        = "sovereign46/cli"
 	DefaultBrewFormula = "s46"
 	latestURLFormat    = "https://api.github.com/repos/%s/releases/latest"
 	defaultTimeout     = 10 * time.Second

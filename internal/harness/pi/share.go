@@ -11,10 +11,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sovereign46/s46-cli/internal/config"
-	"github.com/sovereign46/s46-cli/internal/harness"
-	"github.com/sovereign46/s46-cli/internal/harness/transcript"
-	"github.com/sovereign46/s46-cli/internal/share"
+	"github.com/sovereign46/cli/internal/config"
+	"github.com/sovereign46/cli/internal/harness"
+	"github.com/sovereign46/cli/internal/harness/transcript"
+	"github.com/sovereign46/cli/internal/share"
 )
 
 var sessionsRelPath = filepath.Join(".pi", "agent", "sessions")

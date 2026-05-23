@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"github.com/sovereign46/s46-cli/internal/cli"
+	"github.com/sovereign46/cli/internal/cli"
 )
 
 func main() {

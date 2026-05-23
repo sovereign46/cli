@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sovereign46/s46-cli/internal/api"
+	"github.com/sovereign46/cli/internal/api"
 )
 
 const SchemaVersion = "s46.share.v1"

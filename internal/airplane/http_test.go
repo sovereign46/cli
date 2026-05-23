@@ -10,7 +10,7 @@ import (
 
 func TestHTTPGetJSONDecodesSuccess(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"name":"local-ollama","mode":"airplane"}`))
+		_, _ = w.Write([]byte(`{"name":"local-llamacpp","mode":"airplane"}`))
 	}))
 	defer server.Close()
 	type body struct {
@@ -21,7 +21,7 @@ func TestHTTPGetJSONDecodesSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
-	if got.Name != "local-ollama" || got.Mode != "airplane" {
+	if got.Name != "local-llamacpp" || got.Mode != "airplane" {
 		t.Fatalf("got = %#v", got)
 	}
 }

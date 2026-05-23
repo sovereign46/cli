@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/sovereign46/s46-cli/internal/strs"
+	"github.com/sovereign46/cli/internal/strs"
 )
 
 type gatewayCommand struct {
@@ -19,16 +19,36 @@ type gatewayCommand struct {
 }
 
 func (s Service) StartGateway() error {
-	if strs.Truthy(strs.EnvValue(s.Env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")) {
+	return s.startGateway(false)
+}
+
+// StartGatewayAssumingVerifiedModel starts the gateway without re-hashing the model artifact.
+// Use only after setup has already verified the signed model.
+func (s Service) StartGatewayAssumingVerifiedModel() error {
+	return s.startGateway(true)
+}
+
+func (s Service) startGateway(assumeVerifiedModel bool) error {
+	if s.setupChecksSkipped() {
 		return nil
 	}
-	if s.gatewayReady(context.Background()) {
+	ctx := context.Background()
+	var err error
+	if assumeVerifiedModel {
+		err = s.requireLlamacppRuntime(ctx)
+	} else {
+		err = s.requireVerifiedLlamacppRuntime(ctx)
+	}
+	if err != nil {
+		return err
+	}
+	if s.gatewayReady(ctx) {
 		return nil
 	}
 	if handled, err := s.seamStartGateway(); handled {
 		return err
 	}
-	if s.gatewayResponding(context.Background()) {
+	if s.gatewayResponding(ctx) {
 		return fmt.Errorf("local S46 API at %s is running but is not airplane-ready; run `s46 airplane setup` to restart it in airplane mode", s.gatewayURL())
 	}
 	command, ok := s.gatewayCommand()
@@ -37,7 +57,7 @@ func (s Service) StartGateway() error {
 	}
 	cmd := exec.Command(command.Path, command.Args...)
 	cmd.Dir = command.Dir
-	env := append([]string{"S46_ENV=airplane", "S46_ADDR=127.0.0.1:8080", "S46_LOCAL_OLLAMA_URL=" + s.ollamaURL(), "S46_LOCAL_MODEL=" + s.backendModel()}, AirplaneGatewayEnv(s.Env)...)
+	env := append([]string{"S46_ENV=airplane", "S46_ADDR=127.0.0.1:8080", "S46_LOCAL_MODEL=" + s.backendModel()}, AirplaneGatewayEnv(s.Env)...)
 	cmd.Env = s.processEnv(env...)
 	return s.startDetached(cmd, "s46-api-airplane.log")
 }

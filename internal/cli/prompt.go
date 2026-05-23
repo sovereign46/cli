@@ -7,9 +7,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/sovereign46/s46-cli/internal/auth"
-	"github.com/sovereign46/s46-cli/internal/harness"
-	"github.com/sovereign46/s46-cli/internal/strs"
+	"github.com/sovereign46/cli/internal/auth"
+	"github.com/sovereign46/cli/internal/harness"
+	"github.com/sovereign46/cli/internal/strs"
 )
 
 // promptLoginRequest fills a LoginRequest from interactive stdin input,

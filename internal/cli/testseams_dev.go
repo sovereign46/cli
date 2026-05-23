@@ -20,7 +20,7 @@ package cli
 import (
 	"strings"
 
-	"github.com/sovereign46/s46-cli/internal/strs"
+	"github.com/sovereign46/cli/internal/strs"
 )
 
 // seamAirplaneLogPath returns the test override for the resolved

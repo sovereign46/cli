@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sovereign46/s46-cli/internal/airplane"
-	"github.com/sovereign46/s46-cli/internal/api"
-	"github.com/sovereign46/s46-cli/internal/strs"
+	"github.com/sovereign46/cli/internal/airplane"
+	"github.com/sovereign46/cli/internal/api"
+	"github.com/sovereign46/cli/internal/strs"
 )
 
 type offlineSuggestionClient struct {
@@ -101,9 +101,9 @@ func (c offlineSuggestionClient) wrap(ctx context.Context, err error) error {
 		return err
 	}
 	// S46_OFFLINE is the user telling us "I know I'm offline; don't
-	// probe Ollama, don't suggest airplane mode, just surface the
+	// probe llama.cpp, don't suggest airplane mode, just surface the
 	// underlying error." Skip the suggestion-building airplane.Check
-	// call which would otherwise hit the local Ollama HTTP API.
+	// call which would otherwise hit the local llama.cpp HTTP API.
 	if strs.Truthy(c.env["S46_OFFLINE"]) {
 		return err
 	}

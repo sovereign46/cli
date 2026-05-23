@@ -14,8 +14,8 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
-	"github.com/sovereign46/s46-cli/internal/airplane"
-	askpkg "github.com/sovereign46/s46-cli/internal/ask"
+	"github.com/sovereign46/cli/internal/airplane"
+	askpkg "github.com/sovereign46/cli/internal/ask"
 )
 
 type askCommandResult struct {
@@ -46,9 +46,9 @@ func askCommand(runtime Runtime, opts *options) *cobra.Command {
 }
 
 func runAsk(ctx context.Context, app *app, prompt string) error {
-	report := airplane.Service{Env: app.runtime.Env}.Check(ctx)
-	if !report.Ready {
-		return fmt.Errorf("ask uses the local S46 model\nlocal model setup is incomplete\nrun: s46 airplane setup")
+	report, err := ensureAskLocalRuntime(ctx, app)
+	if err != nil {
+		return err
 	}
 
 	client := askpkg.Client{BaseURL: report.GatewayURL, Model: report.Model, CommandGuide: askCommandGuide(app)}
@@ -69,6 +69,41 @@ func runAsk(ctx context.Context, app *app, prompt string) error {
 		return nil
 	}
 	return confirmOrReviseAskPlan(ctx, app, client, prompt, plan)
+}
+
+func ensureAskLocalRuntime(ctx context.Context, app *app) (airplane.Report, error) {
+	report := airplane.Service{Env: app.runtime.Env}.Check(ctx)
+	if report.Ready {
+		return report, nil
+	}
+	if !app.canPrompt() {
+		return report, askLocalRuntimeError()
+	}
+	if err := app.renderer.Lines(
+		"[s46] ask uses the local S46 model.",
+		"[s46] local model setup is incomplete.",
+	); err != nil {
+		return report, err
+	}
+	yes, err := promptYesNo(app, "[s46] Install airplane mode now? [Y/n] ", true)
+	if err != nil {
+		return report, err
+	}
+	if !yes {
+		return report, askLocalRuntimeError()
+	}
+	report, err = runAirplaneSetup(ctx, app, true)
+	if err != nil {
+		return report, err
+	}
+	if !report.Ready {
+		return report, askLocalRuntimeError()
+	}
+	return report, nil
+}
+
+func askLocalRuntimeError() error {
+	return fmt.Errorf("ask uses the local S46 model\nlocal model setup is incomplete\nrun: s46 airplane setup")
 }
 
 func renderAskPlan(plan askpkg.Plan) []string {

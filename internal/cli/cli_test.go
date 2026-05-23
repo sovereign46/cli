@@ -16,9 +16,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sovereign46/s46-cli/internal/airplane"
-	"github.com/sovereign46/s46-cli/internal/api"
-	"github.com/sovereign46/s46-cli/internal/config"
+	"github.com/sovereign46/cli/internal/airplane"
+	"github.com/sovereign46/cli/internal/api"
+	"github.com/sovereign46/cli/internal/config"
 )
 
 func TestResolveConnectModePrecedence(t *testing.T) {
@@ -303,6 +303,71 @@ func TestAskRunsShellCommandsAfterConfirmation(t *testing.T) {
 	}
 }
 
+func TestAskOffersAirplaneSetupWhenInteractive(t *testing.T) {
+	env := testEnv(t)
+	delete(env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")
+	env["S46_TEST_MEMORY_BYTES"] = "64000000000"
+	env["S46_TEST_FREE_DISK_BYTES"] = "30000000000"
+	env["S46_TEST_OLLAMA_PATH"] = "missing"
+	env["S46_TEST_OLLAMA_RUNNING"] = "0"
+	env["S46_TEST_GATEWAY_BINARY"] = "missing"
+	env["S46_TEST_GATEWAY_READY"] = "0"
+	env["S46_TEST_MODEL_DOWNLOADED"] = "0"
+	env["S46_TEST_MODEL_PROBE"] = "0"
+
+	result := runWithStdin(t, env, strings.NewReader("n\n"), "ask", "can I code offline?")
+	if result.err == nil || !strings.Contains(result.err.Error(), "local model setup is incomplete") || !strings.Contains(result.err.Error(), "s46 airplane setup") {
+		t.Fatalf("expected local runtime error, got %#v", result)
+	}
+	for _, want := range []string{
+		"[s46] ask uses the local S46 model.",
+		"[s46] local model setup is incomplete.",
+		"[s46] Install airplane mode now? [Y/n] ",
+	} {
+		if !strings.Contains(result.stdout, want) {
+			t.Fatalf("ask setup prompt missing %q:\n%s", want, result.stdout)
+		}
+	}
+	if strings.Contains(result.stdout, "airplane setup: checking") {
+		t.Fatalf("ask should not run setup after a decline:\n%s", result.stdout)
+	}
+}
+
+func TestAskRunsAirplaneSetupWhenAccepted(t *testing.T) {
+	env := testEnv(t)
+	delete(env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")
+	env["S46_TEST_MEMORY_BYTES"] = "64000000000"
+	env["S46_TEST_FREE_DISK_BYTES"] = "30000000000"
+	env["S46_TEST_LLAMACPP_PATH"] = "missing"
+	env["S46_TEST_BREW_PATH"] = "/opt/homebrew/bin/brew"
+	env["S46_TEST_INSTALL_LLAMACPP_OK"] = "1"
+	env["S46_TEST_MODEL_DOWNLOADED"] = "0"
+	env["S46_TEST_PULL_MODEL_OK"] = "1"
+	env["S46_TEST_LLAMACPP_RUNNING"] = "0"
+	env["S46_TEST_START_LLAMACPP_OK"] = "1"
+	env["S46_TEST_GATEWAY_READY"] = "0"
+	env["S46_TEST_GATEWAY_DOWNLOAD_AVAILABLE"] = "1"
+	env["S46_TEST_INSTALL_GATEWAY_OK"] = "1"
+	env["S46_TEST_START_GATEWAY_OK"] = "1"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		content := `{"answer":"Airplane ask is ready.","commands":[]}`
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": content}}}})
+	}))
+	defer server.Close()
+	env["S46_AIRPLANE_GATEWAY_URL"] = server.URL
+
+	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\nY\nY\nY\nY\nY\n"), "ask", "can I code offline?"))
+	for _, want := range []string{
+		"[s46] Install airplane mode now? [Y/n] ",
+		"[s46] airplane setup: ready",
+		"Airplane ask is ready.",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("ask setup output missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestAskRequiresLocalRuntime(t *testing.T) {
 	env := testEnv(t)
 	delete(env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")
@@ -318,6 +383,9 @@ func TestAskRequiresLocalRuntime(t *testing.T) {
 	result := run(t, env, "ask", "can I code offline?")
 	if result.err == nil || !strings.Contains(result.err.Error(), "local model setup is incomplete") || !strings.Contains(result.err.Error(), "s46 airplane setup") {
 		t.Fatalf("expected local runtime error, got %#v", result)
+	}
+	if result.stdout != "" {
+		t.Fatalf("non-interactive ask should not prompt, got stdout:\n%s", result.stdout)
 	}
 }
 
@@ -366,7 +434,7 @@ func TestNoInputDoesNotPrompt(t *testing.T) {
 
 func TestTokenJSONAndAirplaneLogsJSONL(t *testing.T) {
 	env := testEnv(t)
-	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
 	token := requireOK(t, run(t, env, "token", "--refresh", "--json"))
 	var tokenPayload struct {
 		Token string `json:"token"`
@@ -379,10 +447,10 @@ func TestTokenJSONAndAirplaneLogsJSONL(t *testing.T) {
 	if err := os.MkdirAll(logDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(logDir, "ollama.log"), []byte("one\ntwo\nthree\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(logDir, "llamacpp.log"), []byte("one\ntwo\nthree\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	logs := requireOK(t, run(t, env, "airplane", "logs", "ollama", "--jsonl", "--lines=2"))
+	logs := requireOK(t, run(t, env, "airplane", "logs", "llamacpp", "--jsonl", "--lines=2"))
 	lines := strings.Split(strings.TrimSpace(logs), "\n")
 	if len(lines) != 2 {
 		t.Fatalf("expected 2 jsonl lines, got %d: %s", len(lines), logs)
@@ -392,7 +460,7 @@ func TestTokenJSONAndAirplaneLogsJSONL(t *testing.T) {
 		if err := json.Unmarshal([]byte(line), &event); err != nil {
 			t.Fatalf("invalid jsonl line %q: %v", line, err)
 		}
-		if event["type"] != "log" || event["log"] != "ollama" || strings.HasPrefix(line, "[s46]") {
+		if event["type"] != "log" || event["log"] != "llamacpp" || strings.HasPrefix(line, "[s46]") {
 			t.Fatalf("unexpected jsonl event: %s", line)
 		}
 	}
@@ -537,7 +605,7 @@ func TestLoginTellsUserToCheckEmail(t *testing.T) {
 	defer server.Close()
 	env["S46_API_BASE_URL"] = server.URL
 
-	out := requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev", "--device-id", "dev-laptop", "--device-name", "Dev laptop"))
+	out := requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev", "--device-id", "dev-laptop", "--device-name", "Dev laptop"))
 	if !strings.Contains(out, "check your email at dscape@acme.s46.dev") || strings.Contains(out, "magic-link endpoint") || strings.Contains(out, "API server") {
 		t.Fatalf("unexpected login output: %s", out)
 	}
@@ -550,7 +618,7 @@ func TestLoginTellsUserToCheckEmail(t *testing.T) {
 func TestUpdateCommandUsesHomebrewInstruction(t *testing.T) {
 	env := testEnv(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"tag_name":"v999.0.0","html_url":"https://github.com/sovereign46/s46-cli/releases/tag/v999.0.0"}`))
+		_, _ = w.Write([]byte(`{"tag_name":"v999.0.0","html_url":"https://github.com/sovereign46/cli/releases/tag/v999.0.0"}`))
 	}))
 	defer server.Close()
 	env["S46_UPDATE_LATEST_URL"] = server.URL
@@ -566,7 +634,7 @@ func TestStartupUpdateCheckPrintsHomebrewInstruction(t *testing.T) {
 	env := testEnv(t)
 	delete(env, "S46_SKIP_STARTUP_UPDATE_CHECK")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"tag_name":"v999.0.0","html_url":"https://github.com/sovereign46/s46-cli/releases/tag/v999.0.0"}`))
+		_, _ = w.Write([]byte(`{"tag_name":"v999.0.0","html_url":"https://github.com/sovereign46/cli/releases/tag/v999.0.0"}`))
 	}))
 	defer server.Close()
 	env["S46_UPDATE_LATEST_URL"] = server.URL
@@ -662,7 +730,7 @@ func TestLoginLocalAPIConnectionRefusedExplainsServerNotRunning(t *testing.T) {
 	env["S46_API_BASE_URL"] = baseURL
 	env["S46_API_REPO"] = "/tmp/s46-api"
 
-	result := run(t, env, "login", "--user", "dscape@acme.s46.dev", "--device-id", "dev-laptop")
+	result := run(t, env, "login", "--email", "dscape@acme.s46.dev", "--device-id", "dev-laptop")
 	if result.err == nil {
 		t.Fatal("expected login to fail")
 	}
@@ -680,7 +748,7 @@ func TestLoginLocalAPIConnectionRefusedExplainsServerNotRunning(t *testing.T) {
 
 func TestLoginTokenWhoamiLogout(t *testing.T) {
 	env := testEnv(t)
-	out := requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	out := requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
 	if !strings.Contains(out, "authenticated as dscape@acme.s46.dev") {
 		t.Fatalf("unexpected login output: %s", out)
 	}
@@ -714,7 +782,7 @@ func TestInteractiveConnectRequiresLoginBeforePrompt(t *testing.T) {
 
 func TestInteractiveConnectPromptsForRequiredInputs(t *testing.T) {
 	env := testEnv(t)
-	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
 	out := requireOK(t, runWithStdin(t, env, strings.NewReader("\n\n\n"), "connect"))
 	for _, want := range []string{
 		"[s46] interactive connect: waiting for input (use <team>/--harness for non-interactive runs)",
@@ -731,7 +799,7 @@ func TestInteractiveConnectPromptsForRequiredInputs(t *testing.T) {
 
 func TestInteractiveConnectCanBeCanceledWithEscapeInput(t *testing.T) {
 	env := testEnv(t)
-	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
 	result := runWithStdin(t, env, strings.NewReader("\x1b\n"), "connect")
 	if !errors.Is(result.err, errInteractiveCanceled) {
 		t.Fatalf("expected interactive cancel, got err=%v stdout=%q stderr=%q", result.err, result.stdout, result.stderr)
@@ -740,7 +808,7 @@ func TestInteractiveConnectCanBeCanceledWithEscapeInput(t *testing.T) {
 
 func TestConnectWithTeamPromptsForMissingAmbiguousHarness(t *testing.T) {
 	env := testEnv(t)
-	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
 	piConfig := filepath.Join(env["HOME"], ".pi", "agent", "models.json")
 	if err := os.MkdirAll(filepath.Dir(piConfig), 0o755); err != nil {
 		t.Fatal(err)
@@ -773,7 +841,7 @@ func TestConnectWithTeamPromptsForMissingAmbiguousHarness(t *testing.T) {
 
 func TestAirplaneModeOnAndCloudModeRestoreEndpoint(t *testing.T) {
 	env := testEnv(t)
-	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
 	requireOK(t, run(t, env, "connect", "acme", "--harness=standard"))
 
 	on := requireOK(t, run(t, env, "mode", "airplane"))
@@ -887,17 +955,17 @@ func TestAirplaneSetupOffersToRestartExistingS46Gateway(t *testing.T) {
 	}
 }
 
-func TestAirplaneSetupContinuesAfterInstallingOllama(t *testing.T) {
+func TestAirplaneSetupContinuesAfterInstallingLlamacpp(t *testing.T) {
 	env := testEnv(t)
 	delete(env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")
 	env["S46_TEST_MEMORY_BYTES"] = "68000000000"
 	env["S46_TEST_FREE_DISK_BYTES"] = "61000000000"
-	env["S46_TEST_OLLAMA_PATH"] = "missing"
+	env["S46_TEST_LLAMACPP_PATH"] = "missing"
 	env["S46_TEST_BREW_PATH"] = "brew"
-	env["S46_TEST_INSTALL_OLLAMA_OK"] = "1"
-	env["S46_TEST_START_OLLAMA_OK"] = "1"
+	env["S46_TEST_INSTALL_LLAMACPP_OK"] = "1"
+	env["S46_TEST_START_LLAMACPP_OK"] = "1"
 	env["S46_TEST_PULL_MODEL_OK"] = "1"
-	env["S46_TEST_OLLAMA_RUNNING"] = "0"
+	env["S46_TEST_LLAMACPP_RUNNING"] = "0"
 	env["S46_TEST_MODEL_DOWNLOADED"] = "0"
 	env["S46_TEST_MODEL_PROBE"] = "0"
 	env["S46_TEST_GATEWAY_BINARY"] = "/tmp/s46-api"
@@ -907,9 +975,9 @@ func TestAirplaneSetupContinuesAfterInstallingOllama(t *testing.T) {
 	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\nY\nY\nY\nn\n"), "airplane", "setup"))
 	for _, want := range []string{
 		"[s46] Install with Homebrew? [Y/n]",
-		"[s46] Ollama is installed but not running.",
-		"[s46] Start Ollama now? [Y/n]",
-		"Download devstral-small-2:24b-instruct-2512-q4_K_M",
+		"[s46] llama-server is installed but not running.",
+		"[s46] Start llama-server now? [Y/n]",
+		"Download or verify devstral-small-2:24b-instruct-2512-q4_K_M",
 		"[s46] Start local gateway now? [Y/n]",
 		"[s46] airplane setup: ready",
 	} {
@@ -919,61 +987,80 @@ func TestAirplaneSetupContinuesAfterInstallingOllama(t *testing.T) {
 	}
 }
 
-func TestStatusShowsOllamaRuntime(t *testing.T) {
-	env := testEnv(t)
-	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
-	requireOK(t, run(t, env, "connect", "acme", "--harness=standard"))
-	env["S46_TEST_OLLAMA_RUNNING"] = "1"
-	env["S46_TEST_OLLAMA_PROCESS_KIND"] = "manual"
-	env["S46_TEST_OLLAMA_PROCESS_ENV"] = "OLLAMA_CONTEXT_LENGTH=65536 OLLAMA_KEEP_ALIVE=10m OLLAMA_NUM_PARALLEL=1 OLLAMA_MAX_LOADED_MODELS=1 OLLAMA_FLASH_ATTENTION=1 OLLAMA_KV_CACHE_TYPE=q8_0"
-	env["S46_TEST_OLLAMA_LIST"] = airplane.BackendModel
-	env["S46_TEST_OLLAMA_PS"] = airplane.BackendModel + ":65536"
-
-	out := requireOK(t, run(t, env, "--verbose", "status"))
-	for _, want := range []string{
-		"[s46] Ollama server: manual",
-		"[s46] ollama list: devstral-small-2:24b-instruct-2512-q4_K_M",
-		"[s46] ollama ps: devstral-small-2:24b-instruct-2512-q4_K_M · context 65536",
-		"[s46] Ollama OLLAMA_CONTEXT_LENGTH: want 65536 · process 65536 (ok)",
-		"[s46] Ollama OLLAMA_KV_CACHE_TYPE: want q8_0 · process q8_0 (ok)",
-	} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("status output missing %q:\n%s", want, out)
-		}
-	}
-}
-
-func TestAirplaneSetupConfiguresMacOSGUIOllamaLaunchctl(t *testing.T) {
+func TestAirplaneSetupDownloadsModelWithoutExternalDownloader(t *testing.T) {
 	env := testEnv(t)
 	delete(env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")
 	env["S46_TEST_MEMORY_BYTES"] = "68000000000"
 	env["S46_TEST_FREE_DISK_BYTES"] = "61000000000"
-	env["S46_TEST_OLLAMA_PATH"] = "/opt/homebrew/bin/ollama"
-	env["S46_TEST_OLLAMA_RUNNING"] = "1"
-	env["S46_TEST_MODEL_DOWNLOADED"] = "1"
-	env["S46_TEST_MODEL_PROBE"] = "1"
-	env["S46_TEST_GATEWAY_BINARY"] = "/tmp/s46-api"
-	env["S46_TEST_GATEWAY_READY"] = "1"
-	env["S46_TEST_OLLAMA_PROCESS_KIND"] = "macos-gui"
-	env["S46_TEST_LAUNCHCTL_ENV"] = "OLLAMA_CONTEXT_LENGTH=262144 OLLAMA_KEEP_ALIVE=60s OLLAMA_NUM_PARALLEL=4 OLLAMA_MAX_LOADED_MODELS=3 OLLAMA_FLASH_ATTENTION=0 OLLAMA_KV_CACHE_TYPE=f16"
-	env["S46_TEST_OLLAMA_PROCESS_ENV"] = env["S46_TEST_LAUNCHCTL_ENV"]
-	env["S46_TEST_CONFIGURE_LAUNCHCTL_OK"] = "1"
+	env["S46_TEST_LLAMACPP_PATH"] = "/opt/homebrew/bin/llama-server"
+	env["S46_TEST_BREW_PATH"] = "brew"
+	env["S46_TEST_PULL_MODEL_OK"] = "1"
+	env["S46_TEST_LLAMACPP_RUNNING"] = "0"
+	env["S46_TEST_MODEL_DOWNLOADED"] = "0"
+	env["S46_TEST_MODEL_PROBE"] = "0"
+	env["S46_TEST_GATEWAY_READY"] = "0"
+	env["S46_TEST_GATEWAY_DOWNLOAD_AVAILABLE"] = "0"
 
 	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\nn\n"), "airplane", "setup"))
 	for _, want := range []string{
-		"[s46] macOS GUI Ollama is running without the recommended airplane settings.",
-		"[s46] Configure macOS Ollama launchd settings now? [Y/n]",
-		"[s46] updated macOS Ollama launchd settings.",
-		"[s46] Fully quit and restart Ollama so the GUI app picks up the new settings.",
-		"[s46] airplane setup: ready",
-		"[s46] Airplane mode was not offered because Ollama needs to be restarted with airplane settings.",
+		"Download or verify devstral-small-2:24b-instruct-2512-q4_K_M",
+		"[s46] llama-server is installed but not running.",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("setup output missing %q:\n%s", want, out)
 		}
 	}
-	if !strings.Contains(env["S46_TEST_LAUNCHCTL_ENV"], "OLLAMA_CONTEXT_LENGTH=65536") {
-		t.Fatalf("expected launchctl env to be updated: %s", env["S46_TEST_LAUNCHCTL_ENV"])
+	for _, unexpected := range []string{"Hugging Face", "installing llama.cpp with Homebrew"} {
+		if strings.Contains(out, unexpected) {
+			t.Fatalf("setup output should not contain %q:\n%s", unexpected, out)
+		}
+	}
+}
+
+func TestAirplaneSetupShowsManualModelInstructionsWhenDownloadIsSkipped(t *testing.T) {
+	env := testEnv(t)
+	delete(env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")
+	env["S46_TEST_MEMORY_BYTES"] = "68000000000"
+	env["S46_TEST_FREE_DISK_BYTES"] = "61000000000"
+	env["S46_TEST_LLAMACPP_PATH"] = "/opt/homebrew/bin/llama-server"
+	env["S46_TEST_BREW_PATH"] = "brew"
+	env["S46_TEST_LLAMACPP_RUNNING"] = "0"
+	env["S46_TEST_MODEL_DOWNLOADED"] = "0"
+	env["S46_TEST_MODEL_PROBE"] = "0"
+	env["S46_TEST_GATEWAY_READY"] = "0"
+	env["S46_TEST_GATEWAY_DOWNLOAD_AVAILABLE"] = "0"
+
+	out := requireOK(t, runWithStdin(t, env, strings.NewReader("n\n"), "airplane", "setup"))
+	for _, want := range []string{
+		"[s46] Model download skipped.",
+		"[s46] Download metadata: https://models.s46.dev/models/v1/s46/devstral-small-2-24b/manifest.json",
+		"[s46] Automatic setup verifies the signed manifest and model checksum before writing or trusting:",
+		"[s46] Or set S46_LOCAL_MODEL_PATH=/path/to/Devstral-Small-2-24B-Instruct-2512-Q4_K_M.gguf",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("setup output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestStatusShowsLlamacppRuntime(t *testing.T) {
+	env := testEnv(t)
+	requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "connect", "acme", "--harness=standard"))
+	env["S46_TEST_LLAMACPP_RUNNING"] = "1"
+	env["S46_TEST_LLAMACPP_PROCESS_KIND"] = "manual"
+	env["S46_TEST_LLAMACPP_MODELS"] = airplane.BackendModel
+
+	out := requireOK(t, run(t, env, "--verbose", "status"))
+	for _, want := range []string{
+		"[s46] llama.cpp server: manual",
+		"[s46] llama.cpp models: devstral-small-2:24b-instruct-2512-q4_K_M",
+		"[s46] llama.cpp --ctx-size: want 65536",
+		"[s46] llama.cpp --cache-type-k: want q8_0",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("status output missing %q:\n%s", want, out)
+		}
 	}
 }
 
@@ -992,14 +1079,14 @@ func TestAirplaneSetupCanTurnOnAirplaneModeWithoutLogin(t *testing.T) {
 			t.Fatalf("setup output missing %q:\n%s", want, out)
 		}
 	}
-	env["S46_TEST_LISTENER_11434"] = "111 ollama"
+	env["S46_TEST_LISTENER_8081"] = "111 llama-server"
 	env["S46_TEST_LISTENER_8080"] = "222 s46-api"
 	status := requireOK(t, run(t, env, "--verbose", "status"))
 	for _, want := range []string{
 		"[s46✈] team:    local",
 		"[s46✈] harness: claude-code",
 		"[s46✈] model:   s46/devstral-small-2-24b",
-		"[s46✈] local ollama: http://127.0.0.1:11434 · port 11434 · pid 111 (ollama)",
+		"[s46✈] local llamacpp: http://127.0.0.1:8081 · port 8081 · pid 111 (llama-server)",
 		"[s46✈] local api:    http://127.0.0.1:8080 · port 8080 · pid 222 (s46-api)",
 	} {
 		if !strings.Contains(status, want) {
@@ -1201,7 +1288,7 @@ func TestAirplaneModeOffRestoresManagedHarnessesExactly(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			env := testEnv(t)
-			requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+			requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
 			requireOK(t, run(t, env, "connect", "acme", "--harness="+tc.harness))
 			path := tc.path(env)
 			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -1246,7 +1333,7 @@ func TestAirplaneModeOffRestoresManagedHarnessesExactly(t *testing.T) {
 
 func prepareCustomPiConfig(t *testing.T, env map[string]string) (string, []byte) {
 	t.Helper()
-	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
 	requireOK(t, run(t, env, "connect", "acme", "--harness=pi"))
 
 	modelsPath := filepath.Join(env["HOME"], ".pi", "agent", "models.json")
@@ -1313,7 +1400,7 @@ func assertNoHarnessSnapshot(t *testing.T, env map[string]string) {
 
 func TestAirplaneSetupOffersToTurnOnAirplaneMode(t *testing.T) {
 	env := testEnv(t)
-	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
 	requireOK(t, run(t, env, "connect", "acme", "--harness=standard"))
 
 	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\n\n"), "airplane", "setup"))
@@ -1337,7 +1424,7 @@ func TestAirplaneSetupOffersToTurnOnAirplaneMode(t *testing.T) {
 func TestAirplaneTokenHelperUsesLocalToken(t *testing.T) {
 	env := testEnv(t)
 	env["S46_AIRPLANE_TOKEN"] = "local-airplane-token"
-	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
 	requireOK(t, run(t, env, "connect", "acme", "--harness=standard"))
 	requireOK(t, run(t, env, "mode", "airplane"))
 
@@ -1371,12 +1458,12 @@ func TestAirplaneHelpShowsUnavailableCloudCommandsAndModeOff(t *testing.T) {
 
 func TestAirplaneCloudCommandsFailFast(t *testing.T) {
 	env := testEnv(t)
-	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
 	requireOK(t, run(t, env, "connect", "acme", "--harness=standard"))
 	requireOK(t, run(t, env, "mode", "airplane"))
 
 	commands := map[string][]string{
-		"login":             {"login", "--user", "dscape@acme.s46.dev"},
+		"login":             {"login", "--email", "dscape@acme.s46.dev"},
 		"devices":           {"devices"},
 		"device revocation": {"devices", "delete", "dev-laptop"},
 		"update":            {"update"},
@@ -1407,12 +1494,12 @@ func TestAirplaneLogsShowsKnownLogFiles(t *testing.T) {
 	if err := os.MkdirAll(logDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(logDir, "ollama.log"), []byte("one\ntwo\nthree\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(logDir, "llamacpp.log"), []byte("one\ntwo\nthree\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	out := requireOK(t, run(t, env, "airplane", "logs", "ollama", "--lines=2"))
-	for _, want := range []string{"[s46] ollama log:", "two", "three"} {
+	out := requireOK(t, run(t, env, "airplane", "logs", "llamacpp", "--lines=2"))
+	for _, want := range []string{"[s46] llamacpp log:", "two", "three"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("logs output missing %q:\n%s", want, out)
 		}
@@ -1436,8 +1523,8 @@ func TestAirplaneLogsCanUseDiscoveredExternalLog(t *testing.T) {
 }
 
 func TestParseLsofOpenLogPaths(t *testing.T) {
-	paths := parseLsofOpenLogPaths([]byte("p123\nf1\nn/tmp/s46/ollama.log\nf2\nn/tmp/s46/ollama.log\nf3\nn/tmp/s46/other.log\n"), "ollama.log")
-	if len(paths) != 1 || paths[0] != "/tmp/s46/ollama.log" {
+	paths := parseLsofOpenLogPaths([]byte("p123\nf1\nn/tmp/s46/llamacpp.log\nf2\nn/tmp/s46/llamacpp.log\nf3\nn/tmp/s46/other.log\n"), "llamacpp.log")
+	if len(paths) != 1 || paths[0] != "/tmp/s46/llamacpp.log" {
 		t.Fatalf("paths = %#v", paths)
 	}
 	ids := parseLsofProcessIDs([]byte("p123\nf5\np123\np456\n"))
@@ -1504,7 +1591,7 @@ func TestAirplaneSetupReportsInsufficientHardware(t *testing.T) {
 
 func TestConnectClaudeWritesHarnessConfig(t *testing.T) {
 	env := testEnv(t)
-	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
 	settingsPath := filepath.Join(env["HOME"], ".claude", "settings.json")
 	requireOK(t, run(t, env, "connect", "acme", "--harness=claude-code"))
 	settings := map[string]any{}
@@ -1520,7 +1607,7 @@ func TestConnectClaudeWritesHarnessConfig(t *testing.T) {
 
 func TestConnectCodexAndPi(t *testing.T) {
 	env := testEnv(t)
-	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
 	requireOK(t, run(t, env, "connect", "acme", "--harness=codex"))
 	codexConfig, err := os.ReadFile(filepath.Join(env["HOME"], ".codex", "config.toml"))
 	if err != nil {
@@ -1548,7 +1635,7 @@ func TestConnectCodexAndPi(t *testing.T) {
 
 func TestStatusModeSessionsAndShare(t *testing.T) {
 	env := testEnv(t)
-	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
 	requireOK(t, run(t, env, "connect", "acme", "--harness=standard"))
 	requireOK(t, run(t, env, "mode", "cloud"))
 	assertGolden(t, "status.golden", requireOK(t, run(t, env, "status")))
@@ -1586,7 +1673,7 @@ func TestStatusModeSessionsAndShare(t *testing.T) {
 
 func TestTeamsListShowsConnectedTeamsAndActiveTeam(t *testing.T) {
 	env := testEnv(t)
-	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
 	requireOK(t, run(t, env, "connect", "acme", "--harness=standard"))
 	requireOK(t, run(t, env, "connect", "beta", "--harness=standard", "--model=s46/qwen3-coder"))
 
@@ -1621,7 +1708,7 @@ func TestTeamsListShowsConnectedTeamsAndActiveTeam(t *testing.T) {
 
 func TestSessionLifecycleAndRunSlug(t *testing.T) {
 	env := testEnv(t)
-	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
 	if out := requireOK(t, run(t, env, "detach", "@dscape/auth-redirect-fix")); !strings.Contains(out, "detached standard session") {
 		t.Fatalf("unexpected detach: %s", out)
 	}
@@ -1645,7 +1732,7 @@ func TestSessionLifecycleAndRunSlug(t *testing.T) {
 
 func TestBackupsBeforeOverwriteAndIdempotency(t *testing.T) {
 	env := testEnv(t)
-	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
 	requireOK(t, run(t, env, "connect", "acme", "--harness=claude-code"))
 	settingsPath := filepath.Join(env["HOME"], ".claude", "settings.json")
 	first, err := os.ReadFile(settingsPath)
@@ -1678,7 +1765,7 @@ func TestBackupsBeforeOverwriteAndIdempotency(t *testing.T) {
 
 func TestStatusAfterLoginDoesNotRequireHarnessConnect(t *testing.T) {
 	env := testEnv(t)
-	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
 	out := requireOK(t, run(t, env, "--verbose", "status"))
 	if !strings.Contains(out, "[ok] standard") || strings.Contains(out, "claude-config") {
 		t.Fatalf("unexpected status output: %s", out)
@@ -1715,7 +1802,7 @@ func TestDisconnectTeamsUseStatusAndModeRequireActiveTeam(t *testing.T) {
 		t.Fatalf("expected airplane mode without active team to create local team:\n%s", airplaneOut)
 	}
 	requireOK(t, run(t, env, "airplane", "mode", "off"))
-	requireOK(t, run(t, env, "login", "--user", "dscape@acme.s46.dev"))
+	requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
 	requireOK(t, run(t, env, "connect", "acme", "--harness=claude-code"))
 	if out := requireOK(t, run(t, env, "--verbose", "status")); !strings.Contains(out, "[ok] tenant") || !strings.Contains(out, "[ok] harness") {
 		t.Fatalf("unexpected status output: %s", out)

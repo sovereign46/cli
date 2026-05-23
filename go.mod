@@ -1,4 +1,4 @@
-module github.com/sovereign46/s46-cli
+module github.com/sovereign46/cli
 
 go 1.23.4
 

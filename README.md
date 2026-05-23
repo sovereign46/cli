@@ -46,7 +46,7 @@ s46 session land [session]
 s46 mode [cloud|airplane]
 s46 airplane setup [--yes] [--mode=on] [--harness=pi|claude-code|codex|standard]
 s46 airplane mode on|off [--harness=pi|claude-code|codex|standard]
-s46 airplane logs [ollama|gateway|all] [--follow]
+s46 airplane logs [llamacpp|gateway|all] [--follow]
 s46 ask "request"
 s46 run "task"
 ```
@@ -69,14 +69,14 @@ Encrypted shares are uploaded to `S46_SHARE_API_URL` (default `https://gist.s46.
 
 ## Airplane mode
 
-Airplane mode runs everything through a local Ollama + S46 gateway, with no cloud auth required.
+Airplane mode runs everything through a local `llama-server` (llama.cpp) + S46 gateway, with no cloud auth required.
 
-- `s46 airplane setup` installs Ollama, pulls the local model, installs the verified gateway release from `sovereign46/api`, and optionally configures macOS GUI Ollama via `launchctl setenv`.
+- `s46 airplane setup` installs llama.cpp, downloads or verifies the local GGUF model from the signed S46 registry at `models.s46.dev`, verifies the manifest signature and model checksum before any model probe or local gateway start, installs the verified gateway release from `sovereign46/api`, and starts `llama-server` with the recommended local coding settings.
 - `s46 airplane mode on` snapshots harness files, rewrites them for the local gateway at `http://127.0.0.1:8080`, and creates a `local` team if none exists. `off` restores the snapshot.
 - In airplane mode, `s46 token --refresh` returns a local token; cloud-only commands fail fast.
 - Output is prefixed `[s46✈]` (human) or undecorated (`--json`).
 
-Local defaults (override with env vars): 64k context (`S46_AIRPLANE_CONTEXT`), 4096 max output tokens (`S46_AIRPLANE_MAX_TOKENS`), 1 parallel request (`S46_AIRPLANE_NUM_PARALLEL`), 1 loaded model (`S46_AIRPLANE_MAX_LOADED_MODELS`), Flash Attention (`OLLAMA_FLASH_ATTENTION`), q8_0 KV cache (`OLLAMA_KV_CACHE_TYPE`), 10m keep-alive (`S46_AIRPLANE_KEEP_ALIVE`), 10m gateway write timeout (`S46_WRITE_TIMEOUT`). Override the local helper token with `S46_AIRPLANE_TOKEN`.
+Local defaults (override with env vars): 64k context (`S46_AIRPLANE_CONTEXT` → `llama-server --ctx-size`), 4096 max output tokens (`S46_AIRPLANE_MAX_TOKENS` → `--n-predict` and gateway request cap), 1 parallel slot (`S46_AIRPLANE_NUM_PARALLEL` → `--parallel`), Flash Attention on (`S46_AIRPLANE_FLASH_ATTENTION` → `--flash-attn`), q8_0 KV cache (`S46_AIRPLANE_KV_CACHE_TYPE` → `--cache-type-k`/`--cache-type-v`), 99 GPU layers (`S46_AIRPLANE_GPU_LAYERS` → `--n-gpu-layers`), 10m server timeout (`S46_AIRPLANE_KEEP_ALIVE` → `--timeout`), and 10m gateway write timeout (`S46_WRITE_TIMEOUT`). Model downloads use up to 6 resumable HTTP/1.1 range workers with 32 MiB chunks when supported; tune with `S46_MODELS_DOWNLOAD_PARALLELISM` (`0` disables range downloads) and `S46_MODELS_DOWNLOAD_CHUNK_BYTES`. Override the local helper token with `S46_AIRPLANE_TOKEN`.
 
 For local gateway development, set `S46_API_REPO=/path/to/api`; `make shell` exposes a sandbox symlink when `../s46-api` exists.
 

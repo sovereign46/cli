@@ -4,11 +4,11 @@ import (
 	"context"
 	"testing"
 
-	"github.com/sovereign46/s46-cli/internal/harness"
-	"github.com/sovereign46/s46-cli/internal/harness/claude"
-	"github.com/sovereign46/s46-cli/internal/harness/codex"
-	"github.com/sovereign46/s46-cli/internal/harness/pi"
-	"github.com/sovereign46/s46-cli/internal/harness/standard"
+	"github.com/sovereign46/cli/internal/harness"
+	"github.com/sovereign46/cli/internal/harness/claude"
+	"github.com/sovereign46/cli/internal/harness/codex"
+	"github.com/sovereign46/cli/internal/harness/pi"
+	"github.com/sovereign46/cli/internal/harness/standard"
 )
 
 // TestEveryAdapterReturnsNonEmptyStatusForMissingConfig pins the

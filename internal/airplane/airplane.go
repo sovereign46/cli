@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sovereign46/s46-cli/internal/strs"
+	"github.com/sovereign46/cli/internal/strs"
 )
 
 const (
@@ -16,9 +16,10 @@ const (
 	ModeAirplane               = "airplane"
 	Prefix                     = "[s46✈]"
 	LocalGatewayURL            = "http://127.0.0.1:8080"
-	LocalOllamaURL             = "http://127.0.0.1:11434"
+	LocalLlamacppURL           = "http://127.0.0.1:8081"
 	LocalModelID               = "s46/devstral-small-2-24b"
 	BackendModel               = "devstral-small-2:24b-instruct-2512-q4_K_M"
+	GGUFModelFile              = "Devstral-Small-2-24B-Instruct-2512-Q4_K_M.gguf"
 	GatewayBinaryName          = "s46-api"
 	DefaultGatewayRepo         = "sovereign46/api"
 	DefaultContextWindow       = 65536
@@ -26,9 +27,9 @@ const (
 	DefaultKeepAlive           = "10m"
 	DefaultGatewayWriteTimeout = "10m"
 	DefaultNumParallel         = 1
-	DefaultMaxLoadedModels     = 1
-	DefaultFlashAttention      = "1"
+	DefaultFlashAttention      = "on"
 	DefaultKVCacheType         = "q8_0"
+	DefaultGPULayers           = "99"
 	MinMemoryBytes             = int64(32 * 1000 * 1000 * 1000)
 	RecMemoryBytes             = int64(64 * 1000 * 1000 * 1000)
 	MinDiskBytes               = int64(30 * 1000 * 1000 * 1000)
@@ -65,7 +66,7 @@ type Service struct {
 func (s Service) LogFiles() []LogFile {
 	cache := cacheDir(s.Env)
 	return []LogFile{
-		{Name: "ollama", Path: filepath.Join(cache, "ollama.log")},
+		{Name: "llamacpp", Path: filepath.Join(cache, "llamacpp.log")},
 		{Name: "gateway", Path: filepath.Join(cache, "s46-api-airplane.log")},
 	}
 }
@@ -141,4 +142,3 @@ func (s Service) httpClient(timeout ...time.Duration) *http.Client {
 func (s Service) logPrefix() string {
 	return strs.FirstNonEmpty(s.LogPrefix, Prefix)
 }
-

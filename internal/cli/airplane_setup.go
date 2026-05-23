@@ -12,13 +12,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/sovereign46/s46-cli/internal/airplane"
-	"github.com/sovereign46/s46-cli/internal/api"
-	"github.com/sovereign46/s46-cli/internal/config"
-	"github.com/sovereign46/s46-cli/internal/harness"
-	"github.com/sovereign46/s46-cli/internal/harness/pi"
-	"github.com/sovereign46/s46-cli/internal/strs"
-	"github.com/sovereign46/s46-cli/internal/workspace"
+	"github.com/sovereign46/cli/internal/airplane"
+	"github.com/sovereign46/cli/internal/api"
+	"github.com/sovereign46/cli/internal/config"
+	"github.com/sovereign46/cli/internal/harness"
+	"github.com/sovereign46/cli/internal/harness/pi"
+	"github.com/sovereign46/cli/internal/strs"
+	"github.com/sovereign46/cli/internal/workspace"
 )
 
 type airplaneSetupOptions struct {
@@ -59,51 +59,57 @@ func runAirplaneSetupWithOptions(ctx context.Context, app *app, options airplane
 	}
 
 	changed := false
-	if configured, err := offerOllamaLaunchctlConfig(ctx, app, service, options); err != nil {
-		return report, err
-	} else if configured {
-		changed = true
-	}
-	if missingCheck(report, "ollama-installed") && service.HomebrewAvailable() {
-		if yes, err := confirmAirplaneSetup(app, options, "[s46] Ollama is not installed.\n[s46] Install with Homebrew? [Y/n] ", true); err != nil {
+	if missingCheck(report, "llamacpp-installed") && service.HomebrewAvailable() {
+		if yes, err := confirmAirplaneSetup(app, options, "[s46] llama.cpp is not installed.\n[s46] Install with Homebrew? [Y/n] ", true); err != nil {
 			return report, err
 		} else if yes {
-			if err := app.renderer.Lines("[s46] installing Ollama with Homebrew..."); err != nil {
+			if err := app.renderer.Lines("[s46] installing llama.cpp with Homebrew..."); err != nil {
 				return report, err
 			}
-			if err := service.InstallOllama(ctx); err != nil {
-				return report, fmt.Errorf("failed to install Ollama with Homebrew: %w", err)
+			if err := service.InstallLlamacpp(ctx); err != nil {
+				return report, fmt.Errorf("failed to install llama.cpp with Homebrew: %w", err)
 			}
 			changed = true
-			report = service.Check(ctx)
+			if checkOK(report, "model-downloaded") {
+				report = service.CheckAssumingVerifiedModel(ctx)
+			} else {
+				report = service.Check(ctx)
+			}
 		}
 	}
-	if checkOK(report, "ollama-installed") && missingCheck(report, "ollama-running") {
-		if yes, err := confirmAirplaneSetup(app, options, "[s46] Ollama is installed but not running.\n[s46] Start Ollama now? [Y/n] ", true); err != nil {
+	if checkOK(report, "llamacpp-installed") && missingCheck(report, "model-downloaded") {
+		var modelChanged bool
+		var err error
+		report, modelChanged, err = offerAirplaneModelDownload(ctx, app, service, report, options)
+		if err != nil {
+			return report, err
+		}
+		changed = changed || modelChanged
+	}
+	if checkOK(report, "llamacpp-installed") && checkOK(report, "model-downloaded") && missingCheck(report, "llamacpp-running") {
+		if yes, err := confirmAirplaneSetup(app, options, "[s46] llama-server is installed but not running.\n[s46] Start llama-server now? [Y/n] ", true); err != nil {
 			return report, err
 		} else if yes {
-			if err := app.renderer.Lines("[s46] starting Ollama..."); err != nil {
+			if err := app.renderer.Lines("[s46] starting llama-server..."); err != nil {
 				return report, err
 			}
-			if err := service.StartOllama(); err != nil {
-				return report, fmt.Errorf("failed to start Ollama: %w", err)
+			if err := service.StartLlamacpp(); err != nil {
+				return report, fmt.Errorf("failed to start llama-server: %w", err)
 			}
 			changed = true
-			report = waitForAirplaneCheck(ctx, service, "ollama-running", 30*time.Second)
+			report = waitForAirplaneCheckAssumingVerifiedModel(ctx, service, "llamacpp-model", 30*time.Second)
 		}
 	}
-	if checkOK(report, "ollama-running") && missingCheck(report, "model-downloaded") {
-		if yes, err := confirmAirplaneSetup(app, options, fmt.Sprintf("[s46] Download %s (~15 GB)? [Y/n] ", airplane.BackendModel), true); err != nil {
+	if checkOK(report, "llamacpp-installed") && checkOK(report, "model-downloaded") && checkOK(report, "llamacpp-running") && missingCheck(report, "llamacpp-model") {
+		if err := app.renderer.Lines(
+			"[s46] llama-server is running but not serving the verified S46 model.",
+			"[s46] Stop the existing llama-server and rerun `s46 airplane setup` so S46 can start the signed model.",
+		); err != nil {
 			return report, err
-		} else if yes {
-			if err := service.PullModel(ctx); err != nil {
-				return report, fmt.Errorf("failed to download %s: %w", airplane.BackendModel, err)
-			}
-			changed = true
-			report = service.Check(ctx)
 		}
+		return report, nil
 	}
-	if missingCheck(report, "local-gateway") && service.GatewayResponding(ctx) && !service.GatewayReady(ctx) {
+	if checkOK(report, "llamacpp-model") && missingCheck(report, "local-gateway") && service.GatewayResponding(ctx) && !service.GatewayReady(ctx) {
 		var err error
 		report, changed, err = offerAirplaneGatewayRestart(ctx, app, service, report, options)
 		if err != nil {
@@ -112,14 +118,14 @@ func runAirplaneSetupWithOptions(ctx context.Context, app *app, options airplane
 		if !changed {
 			return report, nil
 		}
-		if missingCheck(report, "local-gateway") && service.GatewayResponding(ctx) && !service.GatewayReady(ctx) {
+		if checkOK(report, "llamacpp-model") && missingCheck(report, "local-gateway") && service.GatewayResponding(ctx) && !service.GatewayReady(ctx) {
 			if err := app.renderer.Lines(renderAirplaneReport(report)...); err != nil {
 				return report, err
 			}
 			return report, nil
 		}
 	}
-	if missingCheck(report, "local-gateway") {
+	if checkOK(report, "llamacpp-model") && missingCheck(report, "local-gateway") {
 		if _, ok := service.GatewayStartDescription(); !ok && service.GatewayDownloadAvailable() {
 			if yes, err := confirmAirplaneSetup(app, options, fmt.Sprintf("[s46] Local S46 gateway is not installed.\n[s46] Install %s? [Y/n] ", service.GatewayInstallDescription()), true); err != nil {
 				return report, err
@@ -131,11 +137,11 @@ func runAirplaneSetupWithOptions(ctx context.Context, app *app, options airplane
 					return report, fmt.Errorf("failed to install local S46 gateway: %w", err)
 				}
 				changed = true
-				report = service.Check(ctx)
+				report = service.CheckAssumingVerifiedModel(ctx)
 			}
 		}
 	}
-	if missingCheck(report, "local-gateway") {
+	if checkOK(report, "llamacpp-model") && missingCheck(report, "local-gateway") {
 		if description, ok := service.GatewayStartDescription(); ok {
 			if yes, err := confirmAirplaneSetup(app, options, fmt.Sprintf("[s46] Local S46 gateway is available as %s.\n[s46] Start local gateway now? [Y/n] ", description), true); err != nil {
 				return report, err
@@ -143,11 +149,11 @@ func runAirplaneSetupWithOptions(ctx context.Context, app *app, options airplane
 				if err := app.renderer.Lines("[s46] starting local S46 gateway..."); err != nil {
 					return report, err
 				}
-				if err := service.StartGateway(); err != nil {
+				if err := service.StartGatewayAssumingVerifiedModel(); err != nil {
 					return report, fmt.Errorf("failed to start local S46 gateway: %w", err)
 				}
 				changed = true
-				report = waitForAirplaneCheck(ctx, service, "local-gateway", 30*time.Second)
+				report = waitForAirplaneCheckAssumingVerifiedModel(ctx, service, "local-gateway", 30*time.Second)
 			}
 		} else if err := app.renderer.Lines(
 			"[s46] Local S46 gateway is not installed or running.",
@@ -173,71 +179,34 @@ func confirmAirplaneSetup(app *app, options airplaneSetupOptions, prompt string,
 	return promptYesNo(app, prompt, fallback)
 }
 
-func offerOllamaLaunchctlConfig(ctx context.Context, app *app, service airplane.Service, options airplaneSetupOptions) (bool, error) {
-	runtimeReport := service.OllamaRuntime(ctx)
-	if !runtimeReport.NeedsLaunchctlUpdate() {
-		return false, renderOllamaRestartGuidance(app, runtimeReport)
-	}
-	lines := []string{
-		"[s46] macOS GUI Ollama is running without the recommended airplane settings.",
-		"[s46] Recommended launchd settings:",
-	}
-	for _, setting := range airplane.AirplaneOllamaSettings(app.runtime.Env) {
-		lines = append(lines, fmt.Sprintf("[s46]   %s=%s", setting.Key, setting.Value))
-	}
-	if err := app.renderer.Lines(lines...); err != nil {
-		return false, err
-	}
-	if !options.AssumeYes && !app.canPrompt() {
-		return false, app.renderer.Lines("[s46] Run `s46 airplane setup` in a terminal to apply them with launchctl.")
-	}
-	if yes, err := confirmAirplaneSetup(app, options, "[s46] Configure macOS Ollama launchd settings now? [Y/n] ", true); err != nil {
-		return false, err
+func offerAirplaneModelDownload(ctx context.Context, app *app, service airplane.Service, report airplane.Report, options airplaneSetupOptions) (airplane.Report, bool, error) {
+	if yes, err := confirmAirplaneSetup(app, options, fmt.Sprintf("[s46] Download or verify %s (~15 GB)? [Y/n] ", airplane.BackendModel), true); err != nil {
+		return report, false, err
 	} else if !yes {
-		return false, nil
+		return report, false, app.renderer.Lines(renderManualModelDownloadInstructions(report, "Model download skipped.")...)
 	}
-	if err := service.ConfigureMacOSOllamaLaunchd(ctx); err != nil {
-		return false, fmt.Errorf("failed to configure macOS Ollama launchd settings: %w", err)
+
+	if err := app.renderer.Lines("[s46] verifying signed model manifest and local artifact..."); err != nil {
+		return report, false, err
 	}
-	return true, app.renderer.Lines(
-		"[s46] updated macOS Ollama launchd settings.",
-		"[s46] Fully quit and restart Ollama so the GUI app picks up the new settings.",
-	)
+	if err := service.PullModel(ctx); err != nil {
+		return report, false, fmt.Errorf("failed to download or verify %s: %w", airplane.BackendModel, err)
+	}
+	return service.Check(ctx), true, nil
 }
 
-func ensureOllamaRuntimeSettings(ctx context.Context, app *app, service airplane.Service) error {
-	if strs.Truthy(app.runtime.Env["S46_AIRPLANE_SKIP_SETUP_CHECKS"]) {
-		return nil
+func renderManualModelDownloadInstructions(report airplane.Report, reason string) []string {
+	modelURL := "https://models.s46.dev/models/v1/s46/devstral-small-2-24b/manifest.json"
+	return []string{
+		"[s46] " + reason,
+		fmt.Sprintf("[s46] Download metadata: %s", modelURL),
+		fmt.Sprintf("[s46] Automatic setup verifies the signed manifest and model checksum before writing or trusting: %s", report.ModelPath),
+		fmt.Sprintf("[s46] Or set S46_LOCAL_MODEL_PATH=/path/to/%s and rerun `s46 airplane setup`; the file must match the signed S46 manifest.", airplane.GGUFModelFile),
 	}
-	runtimeReport := service.OllamaRuntime(ctx)
-	if runtimeReport.NeedsLaunchctlUpdate() {
-		return fmt.Errorf("macOS GUI Ollama launchd settings differ; run `s46 airplane setup` to apply them")
-	}
-	if runtimeReport.NeedsProcessRestart() {
-		if err := renderOllamaRestartGuidance(app, runtimeReport); err != nil {
-			return err
-		}
-		return fmt.Errorf("Ollama is running with different airplane settings")
-	}
+}
+
+func ensureLlamacppRuntimeSettings(ctx context.Context, app *app, service airplane.Service) error {
 	return nil
-}
-
-func renderOllamaRestartGuidance(app *app, runtimeReport airplane.OllamaRuntime) error {
-	if !runtimeReport.NeedsProcessRestart() {
-		return nil
-	}
-	switch runtimeReport.Server {
-	case "macos-gui":
-		return app.renderer.Lines("[s46] Fully quit and restart Ollama so the GUI app picks up launchd settings.")
-	case "manual":
-		return app.renderer.Lines(
-			"[s46] Manual Ollama is running without the recommended airplane settings.",
-			"[s46] Restart it with:",
-			"[s46]   "+strings.Join(airplane.AirplaneOllamaEnv(app.runtime.Env), " ")+" ollama serve",
-		)
-	default:
-		return nil
-	}
 }
 
 func offerAirplaneGatewayRestart(ctx context.Context, app *app, service airplane.Service, report airplane.Report, options airplaneSetupOptions) (airplane.Report, bool, error) {
@@ -271,16 +240,16 @@ func offerAirplaneGatewayRestart(ctx context.Context, app *app, service airplane
 	if err := app.renderer.Lines("[s46] starting local S46 gateway..."); err != nil {
 		return report, false, err
 	}
-	if err := service.StartGateway(); err != nil {
+	if err := service.StartGatewayAssumingVerifiedModel(); err != nil {
 		return report, false, fmt.Errorf("failed to start local S46 gateway: %w", err)
 	}
-	return waitForAirplaneCheck(ctx, service, "local-gateway", 30*time.Second), true, nil
+	return waitForAirplaneCheckAssumingVerifiedModel(ctx, service, "local-gateway", 30*time.Second), true, nil
 }
 
 func renderAirplaneGatewayConflict(gatewayURL string, listener listeningProcessStatus) []string {
 	return []string{
 		fmt.Sprintf("[s46] Local S46 API is already running at %s, but it is not airplane-ready.", gatewayURL),
-		"[s46] This usually means another s46-api process owns the port without the local Ollama worker configured.",
+		"[s46] This usually means another s46-api process owns the port without the local llama.cpp worker configured.",
 		renderAirplaneGatewayProcess(listener),
 	}
 }
@@ -386,11 +355,11 @@ func sameListeningPID(env map[string]string, port string, pid string) bool {
 	return listener.Status == "listening" && listener.PID == pid
 }
 
-func waitForAirplaneCheck(ctx context.Context, service airplane.Service, name string, timeout time.Duration) airplane.Report {
+func waitForAirplaneCheckAssumingVerifiedModel(ctx context.Context, service airplane.Service, name string, timeout time.Duration) airplane.Report {
 	deadline := time.Now().Add(timeout)
 	var report airplane.Report
 	for {
-		report = service.Check(ctx)
+		report = service.CheckAssumingVerifiedModel(ctx)
 		if checkOK(report, name) || time.Now().After(deadline) {
 			return report
 		}
@@ -421,7 +390,7 @@ func offerAirplaneModeOnAfterSetupWithOptions(ctx context.Context, app *app, rep
 	}
 	service := airplane.Service{Env: app.runtime.Env, Stdin: app.runtime.Stdin, Stdout: app.runtime.Stdout, Stderr: app.runtime.Stderr, LogPrefix: "[s46]"}
 	if airplaneRuntimeNeedsRestart(ctx, app, service) {
-		return app.renderer.Lines("[s46] Airplane mode was not offered because Ollama needs to be restarted with airplane settings.")
+		return app.renderer.Lines("[s46] Airplane mode was not offered because llama-server needs to be restarted with airplane settings.")
 	}
 	cfg, teamName, teamConfig, err := airplaneModeTargetConfig(app)
 	if err != nil {
@@ -465,10 +434,10 @@ func validateAirplaneSetupCommandOptions(app *app, options airplaneSetupCommandO
 }
 
 func airplaneRuntimeNeedsRestart(ctx context.Context, app *app, service airplane.Service) bool {
-	if strs.Truthy(app.runtime.Env["S46_AIRPLANE_SKIP_SETUP_CHECKS"]) {
+	if service.SetupChecksSkipped() {
 		return false
 	}
-	runtimeReport := service.OllamaRuntime(ctx)
+	runtimeReport := service.LlamacppRuntime(ctx)
 	return runtimeReport.NeedsLaunchctlUpdate() || runtimeReport.NeedsProcessRestart()
 }
 
@@ -509,45 +478,22 @@ func renderAirplaneReportWithTitle(report airplane.Report, title string) []strin
 	return lines
 }
 
-func renderOllamaRuntime(runtimeReport airplane.OllamaRuntime) []string {
-	lines := []string{fmt.Sprintf("[s46] Ollama server: %s", renderOllamaServer(runtimeReport))}
+func renderLlamacppRuntime(runtimeReport airplane.LlamacppRuntime) []string {
+	lines := []string{fmt.Sprintf("[s46] llama.cpp server: %s", renderLlamacppServer(runtimeReport))}
 	if !runtimeReport.Running {
 		return lines
 	}
-	if len(runtimeReport.InstalledModels) > 0 {
-		lines = append(lines, fmt.Sprintf("[s46] ollama list: %s", strings.Join(runtimeReport.InstalledModels, ", ")))
+	if runtimeReport.ModelPath != "" {
+		lines = append(lines, fmt.Sprintf("[s46] llama.cpp model: %s", runtimeReport.ModelPath))
 	}
-	if len(runtimeReport.LoadedModels) == 0 {
-		lines = append(lines, "[s46] ollama ps: no models loaded")
-	} else {
-		for _, model := range runtimeReport.LoadedModels {
-			contextText := "context unknown"
-			if model.ContextLength > 0 {
-				contextText = fmt.Sprintf("context %d", model.ContextLength)
-			}
-			until := ""
-			if model.ExpiresAt != "" {
-				until = " · expires " + model.ExpiresAt
-			}
-			lines = append(lines, fmt.Sprintf("[s46] ollama ps: %s · %s%s", strs.FirstNonEmpty(model.Name, model.Model), contextText, until))
-		}
+	if len(runtimeReport.AdvertisedModels) > 0 {
+		lines = append(lines, fmt.Sprintf("[s46] llama.cpp models: %s", strings.Join(runtimeReport.AdvertisedModels, ", ")))
 	}
-	lines = append(lines, renderOllamaSettings(runtimeReport)...)
-	if runtimeReport.NeedsLaunchctlUpdate() {
-		lines = append(lines, "[s46] macOS Ollama launchd settings differ; run `s46 airplane setup` to apply them.")
-	}
-	if runtimeReport.NeedsProcessRestart() {
-		switch runtimeReport.Server {
-		case "macos-gui":
-			lines = append(lines, "[s46] Fully quit and restart Ollama so the GUI app picks up launchd settings.")
-		case "manual":
-			lines = append(lines, "[s46] Restart manual `ollama serve` with the shown OLLAMA_* settings.")
-		}
-	}
+	lines = append(lines, renderLlamacppSettings(runtimeReport)...)
 	return lines
 }
 
-func renderOllamaServer(runtimeReport airplane.OllamaRuntime) string {
+func renderLlamacppServer(runtimeReport airplane.LlamacppRuntime) string {
 	if !runtimeReport.Running {
 		return "not running"
 	}
@@ -561,23 +507,10 @@ func renderOllamaServer(runtimeReport airplane.OllamaRuntime) string {
 	return strings.Join(parts, " · ")
 }
 
-func renderOllamaSettings(runtimeReport airplane.OllamaRuntime) []string {
+func renderLlamacppSettings(runtimeReport airplane.LlamacppRuntime) []string {
 	lines := []string{}
 	for _, setting := range runtimeReport.Settings {
-		parts := []string{fmt.Sprintf("want %s", setting.Expected)}
-		if runtimeReport.LaunchctlKnown {
-			parts = append(parts, fmt.Sprintf("launchctl %s", renderSettingValue(setting.Launchctl, setting.LaunchctlOK)))
-		}
-		if setting.ProcessKnown {
-			parts = append(parts, fmt.Sprintf("process %s", renderSettingValue(setting.Process, setting.ProcessOK)))
-		}
-		lines = append(lines, fmt.Sprintf("[s46] Ollama %s: %s", setting.Key, strings.Join(parts, " · ")))
-	}
-	if runtimeReport.LaunchctlSupported && !runtimeReport.LaunchctlKnown {
-		lines = append(lines, "[s46] Ollama launchctl env: unavailable")
-	}
-	if runtimeReport.Running && !runtimeReport.ProcessEnvKnown {
-		lines = append(lines, "[s46] Ollama process env: unavailable")
+		lines = append(lines, fmt.Sprintf("[s46] llama.cpp %s: want %s", setting.Flag, setting.Expected))
 	}
 	return lines
 }
@@ -619,7 +552,7 @@ func enableAirplaneMode(ctx context.Context, app *app, service airplane.Service,
 	if err := prepareAirplaneRuntime(ctx, app, service, report); err != nil {
 		return err
 	}
-	if err := ensureOllamaRuntimeSettings(ctx, app, service); err != nil {
+	if err := ensureLlamacppRuntimeSettings(ctx, app, service); err != nil {
 		return err
 	}
 	if promptForHarness {
@@ -742,20 +675,20 @@ func mergeAirplaneHarnessSnapshot(existing *config.HarnessSnapshot, next *config
 }
 
 // prepareAirplaneRuntime walks the airplane Report toward Ready: it
-// starts Ollama if installed-but-not-running, optionally re-runs setup
+// starts llama.cpp if installed-but-not-running, optionally re-runs setup
 // when the user agrees, and re-checks after each step. It is idempotent
 // and may be called multiple times; each call only takes the actions
 // needed to make the report Ready.
 func prepareAirplaneRuntime(ctx context.Context, app *app, service airplane.Service, report airplane.Report) error {
-	if checkOK(report, "ollama-installed") && !checkOK(report, "ollama-running") {
-		if err := app.renderer.Lines("[s46] starting Ollama..."); err != nil {
+	if checkOK(report, "llamacpp-installed") && checkOK(report, "model-downloaded") && !checkOK(report, "llamacpp-running") {
+		if err := app.renderer.Lines("[s46] starting llama-server..."); err != nil {
 			return err
 		}
-		if err := service.StartOllama(); err != nil {
-			return fmt.Errorf("could not start Ollama: %w", err)
+		if err := service.StartLlamacpp(); err != nil {
+			return fmt.Errorf("could not start llama-server: %w", err)
 		}
 		time.Sleep(500 * time.Millisecond)
-		report = service.Check(ctx)
+		report = service.CheckAssumingVerifiedModel(ctx)
 	}
 	if report.Ready {
 		return nil
@@ -774,19 +707,19 @@ func prepareAirplaneRuntime(ctx context.Context, app *app, service airplane.Serv
 	if err != nil {
 		return err
 	}
-	if checkOK(report, "ollama-installed") && !checkOK(report, "ollama-running") {
-		if err := service.StartOllama(); err != nil {
-			return fmt.Errorf("could not start Ollama: %w", err)
+	if checkOK(report, "llamacpp-installed") && checkOK(report, "model-downloaded") && !checkOK(report, "llamacpp-running") {
+		if err := service.StartLlamacpp(); err != nil {
+			return fmt.Errorf("could not start llama-server: %w", err)
 		}
 		time.Sleep(500 * time.Millisecond)
-		report = service.Check(ctx)
+		report = service.CheckAssumingVerifiedModel(ctx)
 	}
 	if !checkOK(report, "local-gateway") {
-		if err := service.StartGateway(); err != nil {
+		if err := startGatewayForReport(service, report); err != nil {
 			return fmt.Errorf("could not start local S46 gateway: %w", err)
 		}
 		time.Sleep(500 * time.Millisecond)
-		report = service.Check(ctx)
+		report = service.CheckAssumingVerifiedModel(ctx)
 	}
 	if !report.Ready {
 		return fmt.Errorf("airplane setup is still incomplete")
@@ -794,20 +727,27 @@ func prepareAirplaneRuntime(ctx context.Context, app *app, service airplane.Serv
 	return nil
 }
 
-// startAirplaneRuntime ensures both Ollama and the gateway are running
+func startGatewayForReport(service airplane.Service, report airplane.Report) error {
+	if checkOK(report, "llamacpp-model") {
+		return service.StartGatewayAssumingVerifiedModel()
+	}
+	return service.StartGateway()
+}
+
+// startAirplaneRuntime ensures both llama.cpp and the gateway are running
 // and ready. Called after prepareAirplaneRuntime so a clean install
 // path lands here too.
 func startAirplaneRuntime(ctx context.Context, app *app, service airplane.Service) error {
-	if err := service.StartOllama(); err != nil {
-		return fmt.Errorf("could not start Ollama: %w", err)
+	if err := service.StartLlamacpp(); err != nil {
+		return fmt.Errorf("could not start llama-server: %w", err)
 	}
-	if !service.OllamaRunning(ctx) && !strs.Truthy(app.runtime.Env["S46_AIRPLANE_SKIP_SETUP_CHECKS"]) {
-		return fmt.Errorf("Ollama did not become ready; run `s46 airplane setup`")
+	if !service.LlamacppRunning(ctx) && !service.SetupChecksSkipped() {
+		return fmt.Errorf("llama-server did not become ready; run `s46 airplane setup`")
 	}
-	if err := service.StartGateway(); err != nil {
+	if err := service.StartGatewayAssumingVerifiedModel(); err != nil {
 		return fmt.Errorf("could not start local S46 gateway: %w", err)
 	}
-	if !strs.Truthy(app.runtime.Env["S46_AIRPLANE_SKIP_SETUP_CHECKS"]) && !waitForGatewayReady(ctx, service, 30*time.Second) {
+	if !service.SetupChecksSkipped() && !waitForGatewayReady(ctx, service, 30*time.Second) {
 		return fmt.Errorf("local S46 gateway did not become ready; check ~/.cache/s46/s46-api-airplane.log or rerun `s46 airplane setup`")
 	}
 	return nil

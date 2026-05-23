@@ -16,17 +16,17 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/sovereign46/s46-cli/internal/airplane"
-	"github.com/sovereign46/s46-cli/internal/strs"
+	"github.com/sovereign46/cli/internal/airplane"
+	"github.com/sovereign46/cli/internal/strs"
 )
 
 func airplaneLogsCommand(runtime Runtime, opts *options) *cobra.Command {
 	var follow bool
 	var lines int
 	cmd := &cobra.Command{
-		Use:   "logs [ollama|gateway|all]",
+		Use:   "logs [llamacpp|gateway|all]",
 		Short: "show local airplane-mode logs",
-		Args:  maxArgs("s46 airplane logs [ollama|gateway|all]", 1),
+		Args:  maxArgs("s46 airplane logs [llamacpp|gateway|all]", 1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := newApp(runtime, opts)
 			if err != nil {
@@ -74,7 +74,7 @@ func selectedAirplaneLogFiles(files []airplane.LogFile, selected string) ([]airp
 			return []airplane.LogFile{file}, nil
 		}
 	}
-	return nil, fmt.Errorf("unknown log %q; expected ollama, gateway, or all", selected)
+	return nil, fmt.Errorf("unknown log %q; expected llamacpp, gateway, or all", selected)
 }
 
 // resolveAirplaneLogFiles fills in actual file paths for log entries
@@ -112,8 +112,8 @@ func discoverAirplaneLogPath(env map[string]string, file airplane.LogFile) strin
 
 func airplaneLogPort(env map[string]string, name string) string {
 	switch name {
-	case "ollama":
-		return portFromURL(strs.FirstNonEmpty(strs.EnvValue(env, "S46_LOCAL_OLLAMA_URL"), airplane.LocalOllamaURL))
+	case "llamacpp":
+		return portFromURL(airplane.LlamacppURL(env))
 	case "gateway":
 		return portFromURL(strs.FirstNonEmpty(strs.EnvValue(env, "S46_AIRPLANE_GATEWAY_URL"), airplane.LocalGatewayURL))
 	default:

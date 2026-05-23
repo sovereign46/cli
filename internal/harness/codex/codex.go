@@ -10,9 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/sovereign46/s46-cli/internal/airplane"
-	"github.com/sovereign46/s46-cli/internal/config"
-	"github.com/sovereign46/s46-cli/internal/harness"
+	"github.com/sovereign46/cli/internal/airplane"
+	"github.com/sovereign46/cli/internal/config"
+	"github.com/sovereign46/cli/internal/harness"
 )
 
 // configRelPath is the location of the Codex config relative to $HOME.

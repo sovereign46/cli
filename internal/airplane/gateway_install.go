@@ -18,7 +18,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/sovereign46/s46-cli/internal/strs"
+	"github.com/sovereign46/cli/internal/strs"
 )
 
 const gatewayChecksumMaxBytes = 1 << 20
