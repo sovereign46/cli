@@ -103,15 +103,37 @@ port_open() {
   (echo >/dev/tcp/"$host"/"$port") >/dev/null 2>&1
 }
 
-check_share_server() {
-  local label="$1"
-  local url="$2"
+is_loopback_url() {
+  local url="$1"
+  local host port
+  read -r host port < <(url_host_port "$url")
+  case "$host" in
+    localhost|*.localhost|127.*|0.0.0.0)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+check_local_server() {
+  local url="$1"
   local host port
   read -r host port < <(url_host_port "$url")
   if port_open "$host" "$port"; then
     echo "ready"
   else
     echo "missing"
+  fi
+}
+
+endpoint_status() {
+  local url="$1"
+  if is_loopback_url "$url"; then
+    check_local_server "$url"
+  else
+    echo "hosted"
   fi
 }
 
@@ -136,19 +158,23 @@ if [ -z "${S46_LOG_DIR:-}" ]; then
 fi
 mkdir -p "$S46_LOG_DIR"
 export S46_DEV_SHELL=1
-api_base_default="${S46_DEV_BASE_URL:-http://127.0.0.1:8080}"
-export S46_API_BASE_URL="${S46_API_BASE_URL:-$api_base_default}"
-export S46_DEV_BASE_URL="${S46_DEV_BASE_URL:-$S46_API_BASE_URL}"
+api_base_default="https://api.s46.dev"
+if [ -z "${S46_API_BASE_URL:-}" ] && [ -n "${S46_DEV_BASE_URL:-}" ]; then
+  export S46_API_BASE_URL="$S46_DEV_BASE_URL"
+fi
+api_base="${S46_API_BASE_URL:-$api_base_default}"
 export S46_KEYRING_BACKEND=file
-share_api_default="http://127.0.0.1:8789"
-share_viewer_default="http://127.0.0.1:5173"
-export S46_SHARE_API_URL="${S46_SHARE_API_URL:-$share_api_default}"
-export S46_SHARE_VIEWER_URL="${S46_SHARE_VIEWER_URL:-$share_viewer_default}"
+share_api_default="https://gist.s46.dev"
+share_viewer_default="https://share.s46.dev"
+share_api="${S46_SHARE_API_URL:-$share_api_default}"
+share_viewer="${S46_SHARE_VIEWER_URL:-$share_viewer_default}"
+models_base_default="https://models.s46.dev/models/v1"
+models_base="${S46_MODELS_BASE_URL:-$models_base_default}"
 unset S46_SHARE_UPLOAD_TOKEN
 unset S46_GIST_UPLOAD_TOKEN
 unset S46_SHARE_BACKEND
-share_gist_status="$(check_share_server "s46-gist" "$S46_SHARE_API_URL")"
-share_viewer_status="$(check_share_server "s46-share" "$S46_SHARE_VIEWER_URL")"
+share_gist_status="$(endpoint_status "$share_api")"
+share_viewer_status="$(endpoint_status "$share_viewer")"
 seed_harness_configs
 if [ -z "${S46_API_REPO:-}" ] && [ -d "$api_repo_default/cmd/s46-api" ]; then
   ln -s "$api_repo_default" "$sandbox/s46-api"
@@ -160,22 +186,25 @@ elif [ -n "${S46_API_REPO:-}" ]; then
 fi
 export PATH="$TMP_FOLDER/bin:$PATH"
 
-api_base="$S46_API_BASE_URL"
 api_repo_display="${S46_API_REPO:-not configured}"
 api_repo_display="${api_repo_display/#$TMP_FOLDER/\$TMP_FOLDER}"
 seeded_harnesses_display="none"
 if [ "${#seeded_harnesses[@]}" -gt 0 ]; then
   seeded_harnesses_display="$(join_by_comma "${seeded_harnesses[@]}")"
 fi
-share_status_display="ready"
-share_notice="Share dev servers: ready"
-if [ "$share_gist_status" != "ready" ] || [ "$share_viewer_status" != "ready" ]; then
-  share_status_display="not ready"
-  share_notice="Share dev servers: not ready — s46 share will not work until both are running.
-  s46-gist  ($S46_SHARE_API_URL): $share_gist_status
+share_status_display="hosted"
+share_notice="Share services: using hosted defaults. Set S46_SHARE_API_URL/S46_SHARE_VIEWER_URL to local URLs to test local share servers."
+if [ "$share_gist_status" != "hosted" ] || [ "$share_viewer_status" != "hosted" ]; then
+  share_status_display="ready"
+  share_notice="Share dev servers: ready"
+  if [ "$share_gist_status" != "ready" ] || [ "$share_viewer_status" != "ready" ]; then
+    share_status_display="not ready"
+    share_notice="Share dev servers: not ready — s46 share will not work until both are running.
+  s46-gist  ($share_api): $share_gist_status
     start:  cd ../s46-gist && ./scripts/server
-  s46-share ($S46_SHARE_VIEWER_URL): $share_viewer_status
+  s46-share ($share_viewer): $share_viewer_status
     start:  cd ../s46-share && ./scripts/server"
+  fi
 fi
 
 cat <<EOF
@@ -190,8 +219,9 @@ llama.cpp model dir: $S46_AIRPLANE_MODEL_DIR
 S46 logs: $S46_LOG_DIR
 S46 API repo: $api_repo_display
 Seeded harness configs: $seeded_harnesses_display
-Share API: $S46_SHARE_API_URL
-Share viewer: $S46_SHARE_VIEWER_URL
+Share API: $share_api
+Share viewer: $share_viewer
+Models registry: $models_base
 Share dev server status: $share_status_display
 
 $share_notice

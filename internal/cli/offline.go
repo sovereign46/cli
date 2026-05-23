@@ -123,13 +123,13 @@ func (c offlineSuggestionClient) localAPIBaseURL() string {
 			return client.BaseURL
 		}
 	}
-	for _, candidate := range []string{c.env["S46_API_BASE_URL"], c.env["S46_DEV_BASE_URL"]} {
-		if baseURL := localBaseURL(candidate); baseURL != "" {
-			return baseURL
-		}
+	if baseURL := localBaseURL(c.env["S46_API_BASE_URL"]); baseURL != "" {
+		return baseURL
 	}
 	if strs.Truthy(c.env["S46_DEV_SHELL"]) {
-		return api.DefaultDevelopmentBaseURL
+		if baseURL := localBaseURL(c.env["S46_DEV_BASE_URL"]); baseURL != "" {
+			return baseURL
+		}
 	}
 	return ""
 }
@@ -148,7 +148,7 @@ func localBaseURL(raw string) string {
 func localAPIUnavailableSuggestion(env map[string]string, baseURL string) string {
 	lines := []string{
 		fmt.Sprintf("local S46 API is not running at %s.", baseURL),
-		"Start the API server, or unset S46_API_BASE_URL / exit make shell to use the cloud API.",
+		"Start the API server, or unset S46_API_BASE_URL/S46_DEV_BASE_URL to use the cloud API.",
 	}
 	if repo := strings.TrimSpace(env["S46_API_REPO"]); repo != "" {
 		lines = append(lines, fmt.Sprintf("Try: cd %s && go run ./cmd/s46-api", repo))
@@ -160,13 +160,14 @@ func cloudCall(env map[string]string) bool {
 	if env == nil {
 		return true
 	}
-	if env["S46_API_MODE"] == "mock" || strs.Truthy(env["S46_DEV_SHELL"]) {
+	if env["S46_API_MODE"] == "mock" {
 		return false
 	}
-	if base := strings.TrimSpace(env["S46_API_BASE_URL"]); base != "" {
-		if _, ok := api.LocalDevelopmentOrigin(base); ok {
-			return false
-		}
+	if localBaseURL(env["S46_API_BASE_URL"]) != "" {
+		return false
+	}
+	if strs.Truthy(env["S46_DEV_SHELL"]) && localBaseURL(env["S46_DEV_BASE_URL"]) != "" {
+		return false
 	}
 	return true
 }

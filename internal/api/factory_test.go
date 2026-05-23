@@ -2,7 +2,7 @@ package api
 
 import "testing"
 
-func TestDevShellUsesLocalHTTPAPI(t *testing.T) {
+func TestDevShellUsesConfiguredLocalHTTPAPI(t *testing.T) {
 	client, err := NewClientFromEnv(map[string]string{"S46_DEV_SHELL": "1", "S46_DEV_BASE_URL": "http://127.0.0.1:8080"})
 	if err != nil {
 		t.Fatal(err)
@@ -16,7 +16,7 @@ func TestDevShellUsesLocalHTTPAPI(t *testing.T) {
 	}
 }
 
-func TestDevShellDefaultsToLocalHTTPAPI(t *testing.T) {
+func TestDevShellDefaultsToProductionAPI(t *testing.T) {
 	client, err := NewClientFromEnv(map[string]string{"S46_DEV_SHELL": "1"})
 	if err != nil {
 		t.Fatal(err)
@@ -25,7 +25,7 @@ func TestDevShellDefaultsToLocalHTTPAPI(t *testing.T) {
 	if !ok {
 		t.Fatalf("client = %T, want *HTTPClient", client)
 	}
-	if httpClient.BaseURL != DefaultDevelopmentBaseURL {
+	if httpClient.BaseURL != DefaultProductionBaseURL {
 		t.Fatalf("base URL = %q", httpClient.BaseURL)
 	}
 }

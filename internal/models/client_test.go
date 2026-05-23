@@ -20,6 +20,19 @@ import (
 	"time"
 )
 
+func TestBaseURLUsesHostedRegistryByDefault(t *testing.T) {
+	if got := BaseURL(nil); got != DefaultBaseURL {
+		t.Fatalf("BaseURL() = %q, want %q", got, DefaultBaseURL)
+	}
+}
+
+func TestBaseURLUsesEnvOverride(t *testing.T) {
+	env := map[string]string{"S46_MODELS_BASE_URL": " http://127.0.0.1:8790/models/v1/ "}
+	if got := BaseURL(env); got != "http://127.0.0.1:8790/models/v1" {
+		t.Fatalf("BaseURL() = %q", got)
+	}
+}
+
 func TestInstallDownloadsSignedModelAndWritesReceipt(t *testing.T) {
 	fixture := newModelFixture(t, []byte("small signed model"))
 	server := fixture.server(t, nil)

@@ -314,10 +314,11 @@ func TestAirplaneSessionCallsDoNotSendCloudBearer(t *testing.T) {
 func TestListForbiddenExplainsMatchingTeamAndLocalAPI(t *testing.T) {
 	home := t.TempDir()
 	env := map[string]string{
-		"HOME":            home,
-		"XDG_CONFIG_HOME": home + "/.config",
-		"XDG_DATA_HOME":   home + "/.data",
-		"S46_DEV_SHELL":   "1",
+		"HOME":             home,
+		"XDG_CONFIG_HOME":  home + "/.config",
+		"XDG_DATA_HOME":    home + "/.data",
+		"S46_API_BASE_URL": "http://127.0.0.1:8080",
+		"S46_DEV_SHELL":    "1",
 	}
 	store := config.NewStore(env, "")
 	team := api.Team{Name: "s46", Endpoint: "http://127.0.0.1:8080", Lane: "EU-OPO", DefaultModel: api.DefaultModel}

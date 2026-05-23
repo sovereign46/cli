@@ -33,6 +33,10 @@ test ! -L "$HOME/.pi/agent/models.json"
 grep -q 'pi models' "$HOME/.pi/agent/models.json"
 grep -q 'claude settings' "$HOME/.claude/settings.json"
 grep -q 'codex config' "$HOME/.codex/config.toml"
+test "$S46_DEV_SHELL" = "1"
+test "${S46_API_BASE_URL-}" = ""
+test "${S46_DEV_BASE_URL-}" = ""
+test "${S46_MODELS_BASE_URL-}" = ""
 test "$S46_SHARE_API_URL" = "http://127.0.0.1:1"
 test "$S46_SHARE_VIEWER_URL" = "http://127.0.0.1:2"
 test "${S46_SHARE_UPLOAD_TOKEN-}" = ""
@@ -54,6 +58,9 @@ printf ok > "$S46_HOST_HOME/seed-ok"
 		"GOMODCACHE="+gomodcache,
 		"GOCACHE="+gocache,
 		"GOPATH="+gopath,
+		"S46_API_BASE_URL=",
+		"S46_DEV_BASE_URL=",
+		"S46_MODELS_BASE_URL=",
 		"S46_SHARE_API_URL=http://127.0.0.1:1",
 		"S46_SHARE_VIEWER_URL=http://127.0.0.1:2",
 	)
@@ -65,6 +72,9 @@ printf ok > "$S46_HOST_HOME/seed-ok"
 	}
 	if got, err := os.ReadFile(marker); err != nil || string(got) != "ok" {
 		t.Fatalf("fake shell did not verify seeded configs, marker=%q err=%v\n%s", got, err, out.String())
+	}
+	if !strings.Contains(out.String(), "API base: https://api.s46.dev") || !strings.Contains(out.String(), "Models registry: https://models.s46.dev/models/v1") {
+		t.Fatalf("missing hosted endpoint summary:\n%s", out.String())
 	}
 	if !strings.Contains(out.String(), "Seeded harness configs: pi, claude-code, codex") {
 		t.Fatalf("missing seeded harness summary:\n%s", out.String())

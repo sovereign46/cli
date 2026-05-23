@@ -244,7 +244,12 @@ func localDevelopmentAPI(env map[string]string) bool {
 	if _, ok := api.LocalDevelopmentOrigin(env["S46_API_BASE_URL"]); ok {
 		return true
 	}
-	return strs.Truthy(env["S46_DEV_SHELL"])
+	if strs.Truthy(env["S46_DEV_SHELL"]) {
+		if _, ok := api.LocalDevelopmentOrigin(env["S46_DEV_BASE_URL"]); ok {
+			return true
+		}
+	}
+	return false
 }
 
 func (s Service) Detach(ctx context.Context, sessionID string, harness string, box string) (api.Session, error) {

@@ -6,10 +6,7 @@ import (
 	"github.com/sovereign46/cli/internal/strs"
 )
 
-const (
-	DefaultProductionBaseURL  = "https://api.s46.dev"
-	DefaultDevelopmentBaseURL = "http://127.0.0.1:8080"
-)
+const DefaultProductionBaseURL = "https://api.s46.dev"
 
 // ErrMockUnavailable is returned when S46_API_MODE=mock is requested in a
 // build that does not include the mock API fixtures.
@@ -32,11 +29,9 @@ func NewClientFromEnv(env map[string]string) (Client, error) {
 			return mockClientFactory(env), nil
 		}
 		if strs.Truthy(env["S46_DEV_SHELL"]) {
-			baseURL := env["S46_DEV_BASE_URL"]
-			if baseURL == "" {
-				baseURL = DefaultDevelopmentBaseURL
+			if baseURL := env["S46_DEV_BASE_URL"]; baseURL != "" {
+				return NewHTTPClient(baseURL), nil
 			}
-			return NewHTTPClient(baseURL), nil
 		}
 	}
 	return NewHTTPClient(DefaultProductionBaseURL), nil

@@ -54,11 +54,7 @@ func tenantEndpointOK(env map[string]string, teamName string, endpoint string) b
 		return true
 	}
 	if strs.Truthy(env["S46_DEV_SHELL"]) {
-		baseURL := env["S46_DEV_BASE_URL"]
-		if baseURL == "" {
-			baseURL = "http://127.0.0.1:8080"
-		}
-		if origin, ok := api.LocalDevelopmentOrigin(baseURL); ok && endpoint == origin {
+		if origin, ok := api.LocalDevelopmentOrigin(env["S46_DEV_BASE_URL"]); ok && endpoint == origin {
 			return true
 		}
 	}
