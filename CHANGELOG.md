@@ -8,6 +8,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Added `s46 ask` for S46 CLI guidance through the configured chat endpoint.
 - Added resumable parallel downloads for signed airplane model artifacts when the registry supports HTTP ranges.
 - Added `s46 teams list` for discovering connected team configurations and the active team.
 - Added current-project local Pi, Claude Code, and Codex transcript discovery to `s46 sessions`.
@@ -20,13 +21,20 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Changed `s46 share` with no session argument to share the latest listed session.
 - Changed airplane gateway setup to install verified release archives from the `sovereign46/api` repository.
 - Changed airplane model setup to download from the signed S46 model registry at `models.s46.dev` instead of Hugging Face.
+- Changed airplane mode to serve local models through `llama-server` from llama.cpp instead of Ollama.
 - Changed interactive harness selection to default to `claude-code`.
 - Changed `s46 airplane setup` to prompt for the harness to configure when enabling airplane mode interactively.
-- Changed airplane mode to configure local Ollama and supported harnesses with 64k context, 4096 max output tokens, one parallel request, one loaded model, Flash Attention, q8_0 KV cache, 10m keep-alive, and 10m gateway write-timeout defaults, overridable with environment variables.
-- Changed `s46 status` to include local Ollama runtime diagnostics and changed `s46 airplane setup` to detect macOS GUI Ollama and offer to apply recommended `launchctl` settings before local coding.
+- Changed airplane mode to configure local `llama-server` and supported harnesses with 64k context, 4096 max output tokens, one parallel request, Flash Attention, q8_0 KV cache, 10m server timeout, and 10m gateway write-timeout defaults, overridable with environment variables.
+- Changed `s46 status` to include local `llama-server` runtime diagnostics.
 - Moved active-team switching from `s46 use <team>` to `s46 teams use <team>`.
 - Renamed airplane model IDs from role-style names to concrete model names (`s46/devstral-small-2-24b`, `s46/qwen3-coder-30b`).
 - Changed Claude Code harness config to set the active model (`model` and `ANTHROPIC_MODEL`) in addition to alias defaults so airplane demos use the local S46 model.
+- Changed `make shell` to use hosted API, share, and model-registry services by default, with local servers enabled only through endpoint environment variables.
+- Changed `s46 share` uploads to use anonymous client IDs and proof-of-work challenges instead of upload-token environment variables.
+
+### Removed
+
+- Removed the global `--dry-run` flag.
 
 ### Fixed
 
@@ -34,7 +42,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Fixed `s46 airplane mode off` to restore harness files to their pre-airplane state instead of regenerating generic cloud config.
 - Fixed airplane-mode harness snapshot restoration to preserve exact file bytes/modes and roll back config/harness state if restore fails.
 - Fixed `s46 airplane setup` to offer restarting an existing `s46-api` listener in airplane mode when it owns the local gateway port but is not airplane-ready.
-- Fixed `s46 airplane logs` to discover log files attached to running Ollama/gateway processes started from another shell.
+- Fixed `s46 airplane logs` to discover log files attached to running `llama-server`/gateway processes started from another shell.
 - Fixed `make shell` to write S46 airplane logs to a stable host log directory via `S46_LOG_DIR` so logs survive temporary shell cleanup.
 - Fixed `make shell` to seed disposable Pi, Claude Code, and Codex config copies so harnesses keep normal model/provider settings without risking host config files.
 - Fixed `s46 airplane mode off` to remove local-only airplane teams instead of inventing hosted `*.s46.dev` team endpoints.
