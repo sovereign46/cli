@@ -8,6 +8,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Added `s46 share --local` to build and validate a local share artifact without uploading it.
 - Added a documented CLI HTTP API contract for the future S46 server.
 
 ### Changed

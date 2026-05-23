@@ -40,7 +40,7 @@ s46 update
 s46 sessions
 s46 detach <session>
 s46 resume <session>
-s46 share [session] [--ttl=1d|7d|30d|365d|never]
+s46 share [session] [--ttl=1d|7d|30d|365d|never] [--local]
 s46 share revoke <session-or-share-id>
 s46 session land [session]
 s46 mode [cloud|airplane]
@@ -63,7 +63,7 @@ Global flags: `--config <path>`, `--json`, `--jsonl`, `--no-input`, `--verbose`,
 
 Secrets live in the OS keychain (`internal/keyring.Store`). The file keyring backend is test-only.
 
-Encrypted shares are uploaded to `S46_SHARE_API_URL` (default `https://gist.s46.dev`) and viewed at `S46_SHARE_VIEWER_URL` (default `https://share.s46.dev`). Writes are anonymous: the CLI keeps a generated anonymous install id in local state and solves a short proof-of-work challenge before uploads/updates. Revoke keys are stored only in local state so `s46 share revoke` can delete the blob later. `s46 sessions` lists supported local harness transcripts (Pi, Claude Code, and Codex) for the current project together with S46 state/API sessions, and `s46 share` with no argument shares the latest listed session. When the target matches a supported harness session id or JSONL path, `s46 share` asks that harness adapter to ingest the real local transcript, omitting private reasoning blocks and preserving user-visible messages plus tool calls/results.
+Encrypted shares are uploaded to `S46_SHARE_API_URL` (default `https://gist.s46.dev`) and viewed at `S46_SHARE_VIEWER_URL` (default `https://share.s46.dev`). Writes are anonymous: the CLI keeps a generated anonymous install id in local state and solves a short proof-of-work challenge before uploads/updates. Revoke keys are stored only in local state so `s46 share revoke` can delete the blob later. `s46 sessions` lists supported local harness transcripts (Pi, Claude Code, and Codex) for the current project together with S46 state/API sessions, and `s46 share` with no argument shares the latest listed session. Use `s46 share --local --json` to build and validate the same local artifact without encrypting or uploading it. When the target matches a supported harness session id or JSONL path, `s46 share` asks that harness adapter to ingest the real local transcript, omitting private reasoning blocks and preserving user-visible messages plus tool calls/results.
 
 `s46 connect` requires a valid login for cloud teams so the API can verify team access, then writes harness config to `~/.claude/settings.json`, `~/.codex/config.toml`, or `~/.pi/agent/models.json`. Existing files are merged and backed up with `.s46-backup-<timestamp>`. A connect failure that leaves files half-written is rolled back automatically.
 

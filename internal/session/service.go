@@ -347,6 +347,26 @@ func (s Service) Share(ctx context.Context, sessionID string, ttl string) (Share
 	return result, nil
 }
 
+func (s Service) LocalShareArtifact(ctx context.Context, sessionID string) (sharepkg.Artifact, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		latest, ok, err := s.LatestSession(ctx)
+		if err != nil {
+			return sharepkg.Artifact{}, err
+		}
+		if !ok {
+			return sharepkg.Artifact{}, fmt.Errorf("no sessions found; start a coding session, run `s46 sessions`, or pass a session id")
+		}
+		sessionID = latest.ID
+	}
+	ctxState, _, err := s.relaxedContextState()
+	if err != nil {
+		return sharepkg.Artifact{}, err
+	}
+	session := findOrDefault(ctxState.State, sessionID, ctxState.Team, ctxState.TeamConfig)
+	return s.artifactForShare(ctx, ctxState, session)
+}
+
 func (s Service) RevokeShare(ctx context.Context, target string) (RevokeResult, error) {
 	ctxState, _, err := s.relaxedContextState()
 	if err != nil {

@@ -187,7 +187,7 @@ func airplaneHelpActive(env map[string]string, configPath string) bool {
 func airplaneHelpNotice() string {
 	return strings.Join([]string{
 		"[s46✈] Airplane mode is on. Local coding commands use the local gateway/model.",
-		"[s46✈] Cloud-only commands are unavailable: login, devices, update, detach, resume, share, session land.",
+		"[s46✈] Cloud-only commands are unavailable: login, devices, update, detach, resume, share uploads, session land.",
 		"[s46✈] Turn airplane mode off with: s46 airplane mode off",
 	}, "\n")
 }
@@ -1374,6 +1374,7 @@ func runResume(ctx context.Context, app *app, sessionID string) error {
 
 func shareCommand(runtime Runtime, opts *options) *cobra.Command {
 	var ttl string
+	var local bool
 	cmd := &cobra.Command{
 		Use:   "share [session]",
 		Short: "share a session as an encrypted static page",
@@ -1387,10 +1388,11 @@ func shareCommand(runtime Runtime, opts *options) *cobra.Command {
 			if len(args) == 1 {
 				sessionID = args[0]
 			}
-			return runShare(cmd.Context(), app, sessionID, ttl)
+			return runShare(cmd.Context(), app, sessionID, ttl, local)
 		},
 	}
 	cmd.Flags().StringVar(&ttl, "ttl", "30d", "share expiration: 1d, 7d, 30d, 365d, never")
+	cmd.Flags().BoolVar(&local, "local", false, "build the share artifact locally without uploading")
 	cmd.AddCommand(&cobra.Command{
 		Use:   "revoke <session-or-share-id>",
 		Short: "delete a previously created encrypted share",
@@ -1406,7 +1408,7 @@ func shareCommand(runtime Runtime, opts *options) *cobra.Command {
 	return cmd
 }
 
-func runShare(ctx context.Context, app *app, sessionID string, ttl string) error {
+func runShare(ctx context.Context, app *app, sessionID string, ttl string, local bool) error {
 	service := app.sessionService()
 	var inferred *sessioncmd.ListedSession
 	if strings.TrimSpace(sessionID) == "" {
@@ -1419,6 +1421,9 @@ func runShare(ctx context.Context, app *app, sessionID string, ttl string) error
 		}
 		sessionID = latest.ID
 		inferred = &latest
+	}
+	if local {
+		return runLocalShare(ctx, app, service, sessionID, inferred)
 	}
 	if err := app.requireCloudFeature("share"); err != nil {
 		if inferred != nil {
@@ -1450,6 +1455,25 @@ func runShare(ctx context.Context, app *app, sessionID string, ttl string) error
 		fmt.Sprintf("[s46] Share URL: %s", result.ViewerURL),
 		fmt.Sprintf("[s46] Blob:      %s", result.BlobURL),
 		fmt.Sprintf("[s46] %s encrypted share · TTL: %s · Provider: %s", verb, result.TTL, provider),
+	)
+	return app.renderer.Lines(lines...)
+}
+
+func runLocalShare(ctx context.Context, app *app, service sessioncmd.Service, sessionID string, inferred *sessioncmd.ListedSession) error {
+	artifact, err := service.LocalShareArtifact(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	if ok, err := app.writeStructured(artifact); ok {
+		return err
+	}
+	lines := inferredShareLines(inferred)
+	lines = append(lines,
+		fmt.Sprintf("[s46] local share artifact: %s", artifact.Session.ID),
+		fmt.Sprintf("[s46] harness: %s · model: %s", artifact.Session.Harness.Name, artifact.Session.Model.Name),
+		fmt.Sprintf("[s46] steps:   %d", len(artifact.Steps)),
+		fmt.Sprintf("[s46] files:   %d", len(artifact.Files)),
+		"[s46] no upload performed; rerun without --local to create a share URL",
 	)
 	return app.renderer.Lines(lines...)
 }

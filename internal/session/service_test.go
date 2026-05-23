@@ -191,6 +191,41 @@ func TestGistShareCreateUpdateAndRevoke(t *testing.T) {
 	}
 }
 
+func TestLocalShareArtifactBuildsPiJSONLWithoutPersistingShare(t *testing.T) {
+	const sessionID = "019e4ad2-ba3a-71f7-b34a-205e84be280e"
+	service, store := newTestService(t, api.Team{Name: "s46", Endpoint: airplane.LocalGatewayURL, Lane: "local", DefaultModel: airplane.LocalModelID}, config.ModeAirplane, nil)
+	writeSessionJSONL(t, filepath.Join(service.Config.Env["HOME"], ".pi", "agent", "sessions", "--Users-nuno-dev-app--", "2026-05-21T10-00-00-000Z_"+sessionID+".jsonl"), `
+{"type":"session","id":"019e4ad2-ba3a-71f7-b34a-205e84be280e","timestamp":"2026-05-21T10:00:00.000Z","cwd":"/Users/nuno/dev/app"}
+{"type":"message","timestamp":"2026-05-21T10:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"actual pi prompt"}],"timestamp":"2026-05-21T10:00:01.000Z"}}
+{"type":"message","timestamp":"2026-05-21T10:00:02.000Z","message":{"role":"assistant","model":"s46/devstral-small-2-24b","content":[{"type":"thinking","thinking":"private chain"},{"type":"text","text":"actual pi response"}],"timestamp":"2026-05-21T10:00:02.000Z"}}
+`)
+
+	artifact, err := service.LocalShareArtifact(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if artifact.Session.ID != sessionID || artifact.Session.Harness.Name != "pi" || artifact.Session.Model.Name != airplane.LocalModelID || artifact.Session.Task != "actual pi prompt" {
+		t.Fatalf("unexpected artifact session: %#v", artifact.Session)
+	}
+	if len(artifact.Steps) != 2 || artifact.Steps[1].Body != "actual pi response" {
+		t.Fatalf("unexpected artifact steps: %#v", artifact.Steps)
+	}
+	raw, err := json.Marshal(artifact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "private chain") {
+		t.Fatalf("artifact leaked reasoning: %s", raw)
+	}
+	state, err := store.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Shares) != 0 || state.AnonymousClientID != "" {
+		t.Fatalf("local artifact should not persist share state: %#v", state)
+	}
+}
+
 func TestShareBuildsArtifactFromPiJSONL(t *testing.T) {
 	const sessionID = "019e4ad2-ba3a-71f7-b34a-205e84be280e"
 	const shareID = "pi-share-1"

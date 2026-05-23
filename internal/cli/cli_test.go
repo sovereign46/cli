@@ -19,6 +19,7 @@ import (
 	"github.com/sovereign46/cli/internal/airplane"
 	"github.com/sovereign46/cli/internal/api"
 	"github.com/sovereign46/cli/internal/config"
+	sharepkg "github.com/sovereign46/cli/internal/share"
 )
 
 func TestResolveConnectModePrecedence(t *testing.T) {
@@ -532,6 +533,35 @@ func TestSessionsListsOnlyCurrentProjectTranscriptsAndShareDefaultsToLatest(t *t
 	}
 	if !strings.Contains(share, "Share URL: https://share.s46.dev/0123456789abcdef0123456789abcdef#") {
 		t.Fatalf("unexpected share output:\n%s", share)
+	}
+}
+
+func TestShareLocalWorksInAirplaneMode(t *testing.T) {
+	env := testEnv(t)
+	projectRoot := filepath.Join(env["HOME"], "dev", "app")
+	if err := os.MkdirAll(projectRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	env["PWD"] = projectRoot
+	sessionID := "319e4ad2-ba3a-71f7-b34a-205e84be2811"
+	writePiSessionFixture(t, filepath.Join(env["HOME"], ".pi", "agent", "sessions", "--Users-dscape-dev-app--", "2026-05-21T11-00-00-000Z_"+sessionID+".jsonl"), sessionID, projectRoot, "airplane local prompt")
+	requireOK(t, run(t, env, "mode", "airplane"))
+
+	local := requireOK(t, run(t, env, "share", "--local", "--json"))
+	var artifact sharepkg.Artifact
+	if err := json.Unmarshal([]byte(local), &artifact); err != nil {
+		t.Fatalf("invalid local share artifact JSON: %v\n%s", err, local)
+	}
+	if artifact.Session.ID != sessionID || artifact.Session.Harness.Name != "pi" || artifact.Session.Model.Name != airplane.LocalModelID || artifact.Session.Task != "airplane local prompt" {
+		t.Fatalf("unexpected artifact: %#v", artifact.Session)
+	}
+	if artifact.Schema != sharepkg.SchemaVersion || len(artifact.Steps) == 0 {
+		t.Fatalf("incomplete artifact: %#v", artifact)
+	}
+
+	defaultShare := run(t, env, "share", sessionID)
+	if defaultShare.err == nil || !strings.Contains(defaultShare.err.Error(), "share requires cloud connectivity") {
+		t.Fatalf("airplane share upload should still fail, got err=%v stdout=%s", defaultShare.err, defaultShare.stdout)
 	}
 }
 
@@ -1491,7 +1521,7 @@ func TestAirplaneHelpShowsUnavailableCloudCommandsAndModeOff(t *testing.T) {
 		out := requireOK(t, run(t, env, args...))
 		for _, want := range []string{
 			"[s46✈] Airplane mode is on. Local coding commands use the local gateway/model.",
-			"[s46✈] Cloud-only commands are unavailable: login, devices, update, detach, resume, share, session land.",
+			"[s46✈] Cloud-only commands are unavailable: login, devices, update, detach, resume, share uploads, session land.",
 			"[s46✈] Turn airplane mode off with: s46 airplane mode off",
 		} {
 			if !strings.Contains(out, want) {
