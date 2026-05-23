@@ -1,4 +1,4 @@
-.PHONY: lint test coverage pre-commit install-hooks build shell release-changelog-context release-patch release-minor release-major
+.PHONY: lint test coverage pre-commit install-hooks build shell e2e-airplane-harnesses release-changelog-context release-patch release-minor release-major
 
 build:
 	go build ./cmd/s46
@@ -28,6 +28,9 @@ install-hooks:
 
 shell:
 	./scripts/shell
+
+e2e-airplane-harnesses:
+	./scripts/e2e-airplane-harnesses
 
 release-changelog-context:
 	go run ./scripts/release.go changelog-context

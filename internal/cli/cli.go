@@ -749,7 +749,7 @@ func runConnect(ctx context.Context, app *app, req connectRequest) error {
 		return err
 	}
 	result := connectResult(team, harnessName, selectedModel, targetMode, plan)
-	cfgBefore, cfgAfter := buildConnectConfigs(cfg, team, harnessName, selectedModel, targetMode, existing)
+	cfgBefore, cfgAfter := buildConnectConfigs(cfg, team, harnessName, selectedModel, targetMode, existing, plan)
 	applied, err := applyAtomicConfigAndHarness(ctx, app, cfgBefore, cfgAfter, adapter, plan, "connect")
 	if err != nil {
 		return err
@@ -823,14 +823,17 @@ func connectResult(team api.Team, harnessName, model, mode string, plan harness.
 	}
 }
 
-func buildConnectConfigs(cfg config.Config, team api.Team, harnessName, model, mode string, existing config.TeamConfig) (config.Config, config.Config) {
+func buildConnectConfigs(cfg config.Config, team api.Team, harnessName, model, mode string, existing config.TeamConfig, plan harness.Plan) (config.Config, config.Config) {
 	before := cfg.Clone()
 	after := cfg.Clone()
 	after.ActiveTeam = team.Name
 	after.Mode = mode
 	teamConfig := config.TeamConfigFromAPI(team, harnessName, model, mode)
-	if mode == config.ModeAirplane && existing.APISnapshot.Endpoint != "" && !isLocalEndpoint(existing.APISnapshot.Endpoint) {
-		teamConfig.APISnapshot = existing.APISnapshot
+	if mode == config.ModeAirplane {
+		if existing.APISnapshot.Endpoint != "" && !isLocalEndpoint(existing.APISnapshot.Endpoint) {
+			teamConfig.APISnapshot = existing.APISnapshot
+		}
+		teamConfig.HarnessSnapshot = mergeAirplaneHarnessSnapshot(existing.HarnessSnapshot, harness.SnapshotPlan(plan))
 	}
 	after.Teams[team.Name] = teamConfig
 	return before, after

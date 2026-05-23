@@ -1,0 +1,370 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+host_home="${HOME:-}"
+sandbox="$(mktemp -d "${TMPDIR:-/tmp}/s46-e2e-airplane.XXXXXX")"
+sandbox="$(cd "$sandbox" && pwd -P)"
+keep_sandbox="${S46_E2E_KEEP_SANDBOX:-0}"
+
+cleanup() {
+  if [ "$keep_sandbox" = "1" ]; then
+    echo "[s46-e2e] sandbox preserved: $sandbox"
+    return
+  fi
+  if [ -d "$sandbox" ]; then
+    find -P "$sandbox" -type d -exec chmod u+rwx {} + 2>/dev/null || true
+    rm -rf "$sandbox"
+  fi
+}
+trap cleanup EXIT
+trap 'exit 143' TERM
+
+log() {
+  printf '[s46-e2e] %s\n' "$*"
+}
+
+fail() {
+  printf '[s46-e2e] error: %s\n' "$*" >&2
+  exit 1
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || fail "$1 is required on PATH"
+}
+
+assert_file_contains() {
+  local path="$1"
+  local expected="$2"
+  [ -f "$path" ] || fail "expected file $path to exist"
+  grep -Fq "$expected" "$path" || fail "expected $path to contain: $expected"
+}
+
+assert_harness_file_contains() {
+  local harness="$1"
+  local path="$2"
+  local expected="$3"
+  if [ ! -f "$path" ] || ! grep -Fq "$expected" "$path"; then
+    log "$harness stdout tail:"
+    tail -80 "$sandbox/$harness.out" 2>/dev/null || true
+    log "$harness stderr tail:"
+    tail -80 "$sandbox/$harness.err" 2>/dev/null || true
+    assert_file_contains "$path" "$expected"
+  fi
+}
+
+assert_no_cloud_endpoint_in_file() {
+  local path="$1"
+  [ -f "$path" ] || fail "expected config file $path to exist"
+  if grep -E "https://api\\.anthropic\\.com|https://api\\.openai\\.com|https://[^[:space:]\"']+\\.s46\\.dev" "$path" >/dev/null; then
+    fail "config $path contains a cloud endpoint"
+  fi
+}
+
+assert_file_matches() {
+  local path="$1"
+  local expected="$2"
+  [ -f "$path" ] || fail "expected restored config $path to exist"
+  if ! cmp -s "$path" "$expected"; then
+    log "config restore diff for $path:"
+    diff -u "$expected" "$path" || true
+    fail "config $path was not restored to its original bytes"
+  fi
+}
+
+run_capture_timeout() {
+  local seconds="$1"
+  local stdout="$2"
+  local stderr="$3"
+  shift 3
+  "$@" >"$stdout" 2>"$stderr" &
+  local pid="$!"
+  local start
+  start="$(date +%s)"
+  while kill -0 "$pid" 2>/dev/null; do
+    local now
+    now="$(date +%s)"
+    if [ $((now - start)) -ge "$seconds" ]; then
+      kill "$pid" 2>/dev/null || true
+      sleep 1
+      kill -9 "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      fail "command timed out after ${seconds}s: $*"
+    fi
+    sleep 1
+  done
+  if wait "$pid"; then
+    return 0
+  else
+    local status="$?"
+    log "command stdout tail:"
+    tail -80 "$stdout" 2>/dev/null || true
+    log "command stderr tail:"
+    tail -80 "$stderr" 2>/dev/null || true
+    fail "command exited $status: $*"
+  fi
+}
+
+local_model="s46/devstral-small-2-24b"
+backend_model="${S46_LOCAL_MODEL:-devstral-small-2:24b-instruct-2512-q4_K_M}"
+harness_timeout="${S46_E2E_HARNESS_TIMEOUT:-420}"
+
+require_command cmp
+require_command diff
+require_command python3
+require_command pi
+require_command claude
+require_command codex
+require_command llama-server
+
+mkdir -p "$sandbox/home" "$sandbox/bin" "$sandbox/project"
+cd "$repo_root"
+log "building s46"
+go build -o "$sandbox/bin/s46" ./cmd/s46
+
+export HOME="$sandbox/home"
+export XDG_CONFIG_HOME="$HOME/.config"
+export XDG_DATA_HOME="$HOME/.local/share"
+export XDG_CACHE_HOME="$HOME/.cache"
+export S46_KEYRING_BACKEND=file
+export S46_SKIP_STARTUP_UPDATE_CHECK=1
+export S46_AIRPLANE_MODEL_DIR="${S46_AIRPLANE_MODEL_DIR:-$host_home/.local/share/s46/models/devstral}"
+export S46_LOG_DIR="${S46_LOG_DIR:-$host_home/.cache/s46}"
+export PATH="$sandbox/bin:$PATH"
+export PI_OFFLINE=1
+export S46_AIRPLANE_TOKEN="${S46_AIRPLANE_TOKEN:-local-airplane-e2e-token}"
+
+unset S46_API_MODE
+unset S46_API_BASE_URL
+unset S46_DEV_BASE_URL
+unset S46_DEV_SHELL
+unset S46_SHARE_BACKEND
+unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_OAUTH_TOKEN
+unset OPENAI_API_KEY AZURE_OPENAI_API_KEY DEEPSEEK_API_KEY GEMINI_API_KEY GROQ_API_KEY
+unset MISTRAL_API_KEY TOGETHER_API_KEY FIREWORKS_API_KEY OPENROUTER_API_KEY
+unset XAI_API_KEY CEREBRAS_API_KEY KIMI_API_KEY MINIMAX_API_KEY ZAI_API_KEY
+
+mkdir -p "$S46_LOG_DIR"
+cd "$sandbox/project"
+
+pi_models="$HOME/.pi/agent/models.json"
+pi_settings="$HOME/.pi/agent/settings.json"
+claude_settings="$HOME/.claude/settings.json"
+codex_config="$HOME/.codex/config.toml"
+original_pi_models="$sandbox/original-configs/pi-models.json"
+original_pi_settings="$sandbox/original-configs/pi-settings.json"
+original_claude_settings="$sandbox/original-configs/claude-settings.json"
+original_codex_config="$sandbox/original-configs/codex-config.toml"
+
+seed_original_harness_configs() {
+  mkdir -p "$(dirname "$pi_models")" "$(dirname "$claude_settings")" "$(dirname "$codex_config")" "$sandbox/original-configs"
+  cat >"$pi_models" <<'EOF'
+{
+  "providers": {
+    "custom": {
+      "baseUrl": "https://custom.example/v1"
+    }
+  },
+  "custom": true
+}
+EOF
+  cat >"$pi_settings" <<'EOF'
+{
+  "defaultProvider": "openai",
+  "defaultModel": "gpt-4.1",
+  "theme": "dark"
+}
+EOF
+  cat >"$claude_settings" <<'EOF'
+{
+  "apiKeyHelper": "custom-helper",
+  "model": "custom-model",
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://custom.example/anthropic",
+    "CUSTOM": "keep"
+  },
+  "unrelated": true
+}
+EOF
+  cat >"$codex_config" <<'EOF'
+[profiles.default]
+model = "gpt-4"
+approval_policy = "never"
+
+[custom]
+keep = true
+EOF
+  chmod 0640 "$pi_models" "$pi_settings" "$claude_settings" "$codex_config"
+  cp "$pi_models" "$original_pi_models"
+  cp "$pi_settings" "$original_pi_settings"
+  cp "$claude_settings" "$original_claude_settings"
+  cp "$codex_config" "$original_codex_config"
+}
+
+enable_airplane_harness_configs() {
+  log "enabling airplane mode for Pi"
+  s46 airplane setup --mode=on --harness=pi --yes
+  log "configuring Claude Code and Codex for local team"
+  s46 connect local --harness=claude-code
+  s46 connect local --harness=codex
+}
+
+assert_airplane_harness_configs() {
+  log "checking harness configuration targets localhost"
+  assert_file_contains "$pi_models" "http://127.0.0.1:8080/v1"
+  assert_file_contains "$pi_settings" '"defaultProvider": "s46"'
+  assert_file_contains "$pi_settings" "\"defaultModel\": \"$local_model\""
+  assert_file_contains "$claude_settings" "http://127.0.0.1:8080/anthropic"
+  assert_file_contains "$claude_settings" "\"model\": \"$local_model\""
+  assert_file_contains "$codex_config" 'base_url = "http://127.0.0.1:8080/codex"'
+  assert_file_contains "$codex_config" "model = \"$local_model\""
+  assert_no_cloud_endpoint_in_file "$pi_models"
+  assert_no_cloud_endpoint_in_file "$claude_settings"
+  assert_no_cloud_endpoint_in_file "$codex_config"
+}
+
+assert_airplane_mode_off_restores_configs() {
+  log "turning airplane mode off and checking exact config restore"
+  s46 airplane mode off >"$sandbox/mode-off.out" 2>"$sandbox/mode-off.err"
+  assert_file_matches "$pi_models" "$original_pi_models"
+  assert_file_matches "$pi_settings" "$original_pi_settings"
+  assert_file_matches "$claude_settings" "$original_claude_settings"
+  assert_file_matches "$codex_config" "$original_codex_config"
+  python3 - "$XDG_CONFIG_HOME/s46/config.json" <<'PY'
+import json, sys
+config = json.load(open(sys.argv[1]))
+if config.get("mode") not in ("", "cloud"):
+    raise SystemExit(f"mode was not restored to cloud: {config.get('mode')!r}")
+if config.get("activeTeam"):
+    raise SystemExit(f"active team was not cleared: {config.get('activeTeam')!r}")
+if config.get("teams"):
+    raise SystemExit(f"local airplane team was not removed: {config.get('teams')!r}")
+PY
+}
+
+log "sandbox: $sandbox"
+log "model dir: $S46_AIRPLANE_MODEL_DIR"
+seed_original_harness_configs
+enable_airplane_harness_configs
+assert_airplane_harness_configs
+assert_airplane_mode_off_restores_configs
+enable_airplane_harness_configs
+assert_airplane_harness_configs
+
+log "poisoning non-local cloud egress for harness runs"
+export NO_PROXY="127.0.0.1,localhost,::1"
+export no_proxy="$NO_PROXY"
+export HTTP_PROXY="http://127.0.0.1:9"
+export HTTPS_PROXY="http://127.0.0.1:9"
+export ALL_PROXY="http://127.0.0.1:9"
+export http_proxy="$HTTP_PROXY"
+export https_proxy="$HTTPS_PROXY"
+export all_proxy="$ALL_PROXY"
+
+run_pi() {
+  log "running Pi against airplane gateway"
+  run_capture_timeout "$harness_timeout" "$sandbox/pi.out" "$sandbox/pi.err" \
+    pi \
+    --offline \
+    --no-context-files \
+    --no-extensions \
+    --no-skills \
+    --no-prompt-templates \
+    --provider s46 \
+    --model "$local_model" \
+    --tools write \
+    -p 'Create file pi_hello.py with exactly this content:
+
+def hello_from_pi():
+    return "hello from pi"
+
+Do not modify any other file.'
+  assert_harness_file_contains pi "$sandbox/project/pi_hello.py" 'def hello_from_pi():'
+  assert_harness_file_contains pi "$sandbox/project/pi_hello.py" 'return "hello from pi"'
+}
+
+run_claude() {
+  log "running Claude Code against airplane gateway"
+  run_capture_timeout "$harness_timeout" "$sandbox/claude.out" "$sandbox/claude.err" \
+    claude \
+    --bare \
+    --settings "$claude_settings" \
+    --permission-mode bypassPermissions \
+    --dangerously-skip-permissions \
+    --tools Bash,Write \
+    --model "$local_model" \
+    --append-system-prompt 'You are running inside Claude Code. The valid tool names are exactly Bash and Write. To create files, call Bash with a shell command or Write with file_path/content. Never call lowercase bash or invented tools.' \
+    -p 'Call the Bash tool exactly once to run this shell command:
+
+printf '\''def hello_from_claude():\n    return "hello from claude"\n'\'' > claude_hello.py
+
+Then stop.'
+  assert_harness_file_contains claude "$sandbox/project/claude_hello.py" 'def hello_from_claude():'
+  assert_harness_file_contains claude "$sandbox/project/claude_hello.py" 'return "hello from claude"'
+}
+
+run_codex() {
+  log "running Codex against airplane gateway"
+  run_capture_timeout "$harness_timeout" "$sandbox/codex.out" "$sandbox/codex.err" \
+    codex exec \
+    --profile s46 \
+    --cd "$sandbox/project" \
+    --dangerously-bypass-approvals-and-sandbox \
+    'Create file codex_hello.py with exactly this content:
+
+def hello_from_codex():
+    return "hello from codex"
+
+Do not modify any other file.'
+  assert_harness_file_contains codex "$sandbox/project/codex_hello.py" 'def hello_from_codex():'
+  assert_harness_file_contains codex "$sandbox/project/codex_hello.py" 'return "hello from codex"'
+}
+
+session_id_for_harness() {
+  local harness="$1"
+  s46 sessions --json >"$sandbox/sessions.json"
+  python3 - "$sandbox/sessions.json" "$harness" <<'PY'
+import json, sys
+path, harness = sys.argv[1], sys.argv[2]
+sessions = json.load(open(path))["sessions"]
+for session in sessions:
+    if session.get("source") == "local" and session.get("harness") == harness:
+        print(session["id"])
+        break
+else:
+    raise SystemExit(f"no local {harness} session found")
+PY
+}
+
+assert_local_share() {
+  local harness="$1"
+  local session_id
+  session_id="$(session_id_for_harness "$harness")"
+  log "building local share artifact for $harness session $session_id"
+  s46 share --local --json "$session_id" >"$sandbox/share-$harness.json"
+  python3 - "$sandbox/share-$harness.json" "$harness" "$local_model" "$backend_model" <<'PY'
+import json, sys
+path, harness, local_model, backend_model = sys.argv[1:5]
+artifact = json.load(open(path))
+session = artifact["session"]
+model = session["model"]["name"]
+if artifact.get("schema") != "s46.share.v1":
+    raise SystemExit(f"bad schema: {artifact.get('schema')}")
+if session["harness"]["name"] != harness:
+    raise SystemExit(f"bad harness: {session['harness']['name']} != {harness}")
+if model not in {local_model, backend_model}:
+    raise SystemExit(f"bad model for {harness}: {model}")
+if not artifact.get("steps"):
+    raise SystemExit(f"no share steps for {harness}")
+PY
+}
+
+run_pi
+assert_local_share pi
+run_claude
+assert_local_share claude-code
+run_codex
+assert_local_share codex
+
+log "all harnesses wrote files, produced local sessions, and built local share artifacts"
+log "project: $sandbox/project"

@@ -1406,6 +1406,91 @@ func TestAirplaneModeOffRestoresManagedHarnessesExactly(t *testing.T) {
 	}
 }
 
+func TestAirplaneModeOffRestoresAllAirplaneHarnessConnectsExactly(t *testing.T) {
+	env := testEnv(t)
+	originals := map[string]string{
+		filepath.Join(env["HOME"], ".pi", "agent", "models.json"): `{
+  "providers": {
+    "openai": {
+      "baseUrl": "https://api.openai.com/v1"
+    }
+  },
+  "custom": true
+}
+`,
+		filepath.Join(env["HOME"], ".pi", "agent", "settings.json"): `{
+  "defaultProvider": "openai",
+  "defaultModel": "gpt-4.1",
+  "theme": "dark"
+}
+`,
+		filepath.Join(env["HOME"], ".claude", "settings.json"): `{
+  "apiKeyHelper": "custom-helper",
+  "model": "custom-model",
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://custom.example/anthropic",
+    "CUSTOM": "keep"
+  },
+  "unrelated": true
+}
+`,
+		filepath.Join(env["HOME"], ".codex", "config.toml"): `[profiles.default]
+model = "gpt-4"
+approval_policy = "never"
+
+[custom]
+keep = true
+`,
+	}
+	for path, original := range originals {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(original), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	requireOK(t, run(t, env, "airplane", "mode", "on", "--harness=pi"))
+	requireOK(t, run(t, env, "connect", "local", "--harness=claude-code"))
+	requireOK(t, run(t, env, "connect", "local", "--harness=codex"))
+	for path, original := range originals {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(raw) == original {
+			t.Fatalf("expected airplane config to rewrite %s", path)
+		}
+	}
+
+	requireOK(t, run(t, env, "airplane", "mode", "off"))
+	for path, original := range originals {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(raw) != original {
+			t.Fatalf("config was not restored exactly for %s\n--- got ---\n%s\n--- want ---\n%s", path, raw, original)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o640 {
+			t.Fatalf("config mode for %s = %s, want 0640", path, info.Mode().Perm())
+		}
+	}
+	assertNoHarnessSnapshot(t, env)
+	cfg, err := config.NewStore(env, "").LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ActiveMode() != config.ModeCloud || cfg.ActiveTeam != "" || len(cfg.Teams) != 0 {
+		t.Fatalf("expected local airplane team removed after mode off, got %#v", cfg)
+	}
+}
+
 func prepareCustomPiConfig(t *testing.T, env map[string]string) (string, []byte) {
 	t.Helper()
 	requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))

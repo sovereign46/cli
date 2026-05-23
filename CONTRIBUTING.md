@@ -35,6 +35,20 @@ Set `S46_MODELS_BASE_URL` as well when testing a local model registry. `S46_DEV_
 
 Inside the shell, every `s46` command writes only inside the tempdir; copied harness files are disposable and never symlinked back to the host config.
 
+## Airplane harness E2E
+
+The real Pi, Claude Code, and Codex airplane-mode path is covered by an opt-in integration test. It builds a temporary `s46` binary, uses an isolated `HOME`, enables airplane mode, verifies managed configs point at localhost, turns airplane mode off and checks the original configs are restored byte-for-byte, then asks each harness to write a file in a temporary project and verifies `s46 sessions` plus `s46 share --local --json` for each transcript.
+
+It requires installed `pi`, `claude`, `codex`, `llama-server`, a verified local S46 model, and a startable local gateway:
+
+```sh
+make e2e-airplane-harnesses
+# or through go test:
+S46_E2E_AIRPLANE=1 go test ./scripts -run TestAirplaneHarnessE2E -timeout 30m -v
+```
+
+Set `S46_E2E_KEEP_SANDBOX=1` to inspect the temporary project after failure.
+
 ## Run without installing
 
 ```sh
