@@ -57,6 +57,7 @@ func (s Service) PullModel(ctx context.Context) error {
 		BackendModel: s.backendModel(),
 		TargetPath:   s.modelPath(),
 		HTTPClient:   s.Client,
+		Progress:     s.modelInstallProgress(),
 	})
 }
 
@@ -98,6 +99,10 @@ func (s Service) requireVerifiedLlamacppRuntime(ctx context.Context) error {
 	if err := s.requireVerifiedModel(ctx); err != nil {
 		return err
 	}
+	return s.requireLlamacppRuntime(ctx)
+}
+
+func (s Service) requireLlamacppRuntime(ctx context.Context) error {
 	if !s.llamacppRunning(ctx) {
 		return fmt.Errorf("llama-server is not responding")
 	}

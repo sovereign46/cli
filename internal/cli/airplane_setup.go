@@ -70,7 +70,11 @@ func runAirplaneSetupWithOptions(ctx context.Context, app *app, options airplane
 				return report, fmt.Errorf("failed to install llama.cpp with Homebrew: %w", err)
 			}
 			changed = true
-			report = service.Check(ctx)
+			if checkOK(report, "model-downloaded") {
+				report = service.CheckAssumingVerifiedModel(ctx)
+			} else {
+				report = service.Check(ctx)
+			}
 		}
 	}
 	if checkOK(report, "llamacpp-installed") && missingCheck(report, "model-downloaded") {
@@ -93,7 +97,7 @@ func runAirplaneSetupWithOptions(ctx context.Context, app *app, options airplane
 				return report, fmt.Errorf("failed to start llama-server: %w", err)
 			}
 			changed = true
-			report = waitForAirplaneCheck(ctx, service, "llamacpp-model", 30*time.Second)
+			report = waitForAirplaneCheckAssumingVerifiedModel(ctx, service, "llamacpp-model", 30*time.Second)
 		}
 	}
 	if checkOK(report, "llamacpp-installed") && checkOK(report, "model-downloaded") && checkOK(report, "llamacpp-running") && missingCheck(report, "llamacpp-model") {
@@ -133,7 +137,7 @@ func runAirplaneSetupWithOptions(ctx context.Context, app *app, options airplane
 					return report, fmt.Errorf("failed to install local S46 gateway: %w", err)
 				}
 				changed = true
-				report = service.Check(ctx)
+				report = service.CheckAssumingVerifiedModel(ctx)
 			}
 		}
 	}
@@ -145,11 +149,11 @@ func runAirplaneSetupWithOptions(ctx context.Context, app *app, options airplane
 				if err := app.renderer.Lines("[s46] starting local S46 gateway..."); err != nil {
 					return report, err
 				}
-				if err := service.StartGateway(); err != nil {
+				if err := service.StartGatewayAssumingVerifiedModel(); err != nil {
 					return report, fmt.Errorf("failed to start local S46 gateway: %w", err)
 				}
 				changed = true
-				report = waitForAirplaneCheck(ctx, service, "local-gateway", 30*time.Second)
+				report = waitForAirplaneCheckAssumingVerifiedModel(ctx, service, "local-gateway", 30*time.Second)
 			}
 		} else if err := app.renderer.Lines(
 			"[s46] Local S46 gateway is not installed or running.",
@@ -236,10 +240,10 @@ func offerAirplaneGatewayRestart(ctx context.Context, app *app, service airplane
 	if err := app.renderer.Lines("[s46] starting local S46 gateway..."); err != nil {
 		return report, false, err
 	}
-	if err := service.StartGateway(); err != nil {
+	if err := service.StartGatewayAssumingVerifiedModel(); err != nil {
 		return report, false, fmt.Errorf("failed to start local S46 gateway: %w", err)
 	}
-	return waitForAirplaneCheck(ctx, service, "local-gateway", 30*time.Second), true, nil
+	return waitForAirplaneCheckAssumingVerifiedModel(ctx, service, "local-gateway", 30*time.Second), true, nil
 }
 
 func renderAirplaneGatewayConflict(gatewayURL string, listener listeningProcessStatus) []string {
@@ -351,11 +355,11 @@ func sameListeningPID(env map[string]string, port string, pid string) bool {
 	return listener.Status == "listening" && listener.PID == pid
 }
 
-func waitForAirplaneCheck(ctx context.Context, service airplane.Service, name string, timeout time.Duration) airplane.Report {
+func waitForAirplaneCheckAssumingVerifiedModel(ctx context.Context, service airplane.Service, name string, timeout time.Duration) airplane.Report {
 	deadline := time.Now().Add(timeout)
 	var report airplane.Report
 	for {
-		report = service.Check(ctx)
+		report = service.CheckAssumingVerifiedModel(ctx)
 		if checkOK(report, name) || time.Now().After(deadline) {
 			return report
 		}
@@ -684,7 +688,7 @@ func prepareAirplaneRuntime(ctx context.Context, app *app, service airplane.Serv
 			return fmt.Errorf("could not start llama-server: %w", err)
 		}
 		time.Sleep(500 * time.Millisecond)
-		report = service.Check(ctx)
+		report = service.CheckAssumingVerifiedModel(ctx)
 	}
 	if report.Ready {
 		return nil
@@ -708,19 +712,26 @@ func prepareAirplaneRuntime(ctx context.Context, app *app, service airplane.Serv
 			return fmt.Errorf("could not start llama-server: %w", err)
 		}
 		time.Sleep(500 * time.Millisecond)
-		report = service.Check(ctx)
+		report = service.CheckAssumingVerifiedModel(ctx)
 	}
 	if !checkOK(report, "local-gateway") {
-		if err := service.StartGateway(); err != nil {
+		if err := startGatewayForReport(service, report); err != nil {
 			return fmt.Errorf("could not start local S46 gateway: %w", err)
 		}
 		time.Sleep(500 * time.Millisecond)
-		report = service.Check(ctx)
+		report = service.CheckAssumingVerifiedModel(ctx)
 	}
 	if !report.Ready {
 		return fmt.Errorf("airplane setup is still incomplete")
 	}
 	return nil
+}
+
+func startGatewayForReport(service airplane.Service, report airplane.Report) error {
+	if checkOK(report, "llamacpp-model") {
+		return service.StartGatewayAssumingVerifiedModel()
+	}
+	return service.StartGateway()
 }
 
 // startAirplaneRuntime ensures both llama.cpp and the gateway are running
@@ -733,7 +744,7 @@ func startAirplaneRuntime(ctx context.Context, app *app, service airplane.Servic
 	if !service.LlamacppRunning(ctx) && !service.SetupChecksSkipped() {
 		return fmt.Errorf("llama-server did not become ready; run `s46 airplane setup`")
 	}
-	if err := service.StartGateway(); err != nil {
+	if err := service.StartGatewayAssumingVerifiedModel(); err != nil {
 		return fmt.Errorf("could not start local S46 gateway: %w", err)
 	}
 	if !service.SetupChecksSkipped() && !waitForGatewayReady(ctx, service, 30*time.Second) {

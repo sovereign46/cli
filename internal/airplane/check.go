@@ -39,6 +39,16 @@ type Report struct {
 }
 
 func (s Service) Check(ctx context.Context) Report {
+	return s.check(ctx, false)
+}
+
+// CheckAssumingVerifiedModel runs readiness checks without re-hashing the model artifact.
+// Use only after the current setup flow has already verified the signed model.
+func (s Service) CheckAssumingVerifiedModel(ctx context.Context) Report {
+	return s.check(ctx, true)
+}
+
+func (s Service) check(ctx context.Context, assumeVerifiedModel bool) Report {
 	if s.setupChecksSkipped() {
 		return s.skippedReport()
 	}
@@ -68,7 +78,10 @@ func (s Service) Check(ctx context.Context) Report {
 	report.LlamacppPath = llamacppPath
 	report.add(Check{Name: "llamacpp-installed", OK: llamacppOK, Required: true, Message: strs.FirstNonEmpty(llamacppPath, "llama-server not found")})
 
-	modelDownloaded := s.modelDownloaded(ctx)
+	modelDownloaded := assumeVerifiedModel
+	if !assumeVerifiedModel {
+		modelDownloaded = s.modelDownloaded(ctx)
+	}
 	report.add(Check{Name: "model-downloaded", OK: modelDownloaded, Required: true, Message: boolMessage(modelDownloaded, s.modelPath(), "model is not verified by a signed S46 manifest")})
 
 	llamacppRunning := s.runBoolCheck(ctx, s.checkTimeout(), s.llamacppRunning)
@@ -149,7 +162,7 @@ func (s Service) modelDownloaded(ctx context.Context) bool {
 	if downloaded, ok := s.seamModelDownloaded(); ok {
 		return downloaded
 	}
-	ok, err := models.VerifyInstalled(ctx, models.InstallRequest{Env: s.Env, ModelID: LocalModelID, BackendModel: s.backendModel(), TargetPath: s.modelPath()})
+	ok, err := models.VerifyInstalled(ctx, models.InstallRequest{Env: s.Env, ModelID: LocalModelID, BackendModel: s.backendModel(), TargetPath: s.modelPath(), Progress: s.modelInstallProgress()})
 	return err == nil && ok
 }
 

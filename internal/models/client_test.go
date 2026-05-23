@@ -43,6 +43,42 @@ func TestInstallDownloadsSignedModelAndWritesReceipt(t *testing.T) {
 	}
 }
 
+func TestInstallReportsDownloadProgress(t *testing.T) {
+	fixture := newModelFixture(t, []byte(strings.Repeat("x", 64*1024)))
+	server := fixture.server(t, nil)
+	defer server.Close()
+	fixture.manifest.URL = server.URL + "/artifacts/model.gguf"
+	fixture.sign(t)
+
+	var events []InstallProgress
+	target := filepath.Join(t.TempDir(), "model.gguf")
+	err := Install(context.Background(), InstallRequest{
+		Env:             fixture.env(server.URL),
+		ManifestBaseURL: server.URL + "/models/v1",
+		ModelID:         fixture.manifest.ModelID,
+		BackendModel:    fixture.manifest.BackendModel,
+		TargetPath:      target,
+		HTTPClient:      server.Client(),
+		Progress: func(event InstallProgress) {
+			events = append(events, event)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) < 3 {
+		t.Fatalf("expected start, copy, and done progress events, got %#v", events)
+	}
+	first := events[0]
+	if first.Phase != InstallProgressDownloading || first.Current != 0 || first.Total != int64(len(fixture.artifact)) || first.Filename != fixture.manifest.Filename {
+		t.Fatalf("unexpected first progress event: %#v", first)
+	}
+	last := events[len(events)-1]
+	if !last.Done || last.Current != int64(len(fixture.artifact)) || last.Total != int64(len(fixture.artifact)) {
+		t.Fatalf("unexpected final progress event: %#v", last)
+	}
+}
+
 func TestInstallRejectsBadSignature(t *testing.T) {
 	fixture := newModelFixture(t, []byte("model"))
 	server := fixture.server(t, nil)

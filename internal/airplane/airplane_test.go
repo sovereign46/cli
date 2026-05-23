@@ -16,7 +16,45 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sovereign46/cli/internal/models"
 )
+
+func TestModelInstallProgressRendererShowsFlyingPlane(t *testing.T) {
+	var out bytes.Buffer
+	renderer := &modelInstallProgressRenderer{out: &out, prefix: "[s46]"}
+	renderer.Update(models.InstallProgress{Phase: models.InstallProgressDownloading, Filename: GGUFModelFile, Current: 50, Total: 100, Done: true})
+
+	got := out.String()
+	for _, want := range []string{"\r[s46] downloading " + GGUFModelFile, " 50%", "✈", "50 B/100 B"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("progress output missing %q: %q", want, got)
+		}
+	}
+	if !strings.HasSuffix(got, "\n") {
+		t.Fatalf("progress output should end with a newline: %q", got)
+	}
+}
+
+func TestModelInstallProgressRendererFitsConfiguredWidth(t *testing.T) {
+	now := time.Unix(1000, 0)
+	renderer := &modelInstallProgressRenderer{prefix: "[s46]", lineWidth: 80, startedAt: now.Add(-10 * time.Second)}
+	line := renderer.format(models.InstallProgress{
+		Phase:    models.InstallProgressDownloading,
+		Filename: GGUFModelFile,
+		Current:  25 * 1000 * 1000,
+		Total:    14 * 1000 * 1000 * 1000,
+	}, now)
+
+	if width := progressLineVisibleWidth(line); width > 79 {
+		t.Fatalf("progress line width = %d, want <= 79: %q", width, line)
+	}
+	for _, want := range []string{"[s46] downloading", "…", "✈", "25 MB/14 GB"} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("progress line missing %q: %q", want, line)
+		}
+	}
+}
 
 func TestCheckReportsSkippedReadyState(t *testing.T) {
 	report := Service{Env: map[string]string{"S46_AIRPLANE_SKIP_SETUP_CHECKS": "1"}}.Check(context.Background())
@@ -145,6 +183,29 @@ func TestCheckRefusesToProbeOrAcceptGatewayBeforeModelVerified(t *testing.T) {
 	}
 }
 
+func TestCheckAssumingVerifiedModelSkipsArtifactVerification(t *testing.T) {
+	env := map[string]string{
+		"S46_AIRPLANE_MODEL_DIR":           t.TempDir(),
+		"S46_TEST_MEMORY_BYTES":            "68000000000",
+		"S46_TEST_FREE_DISK_BYTES":         "61000000000",
+		"S46_TEST_LLAMACPP_PATH":           "/opt/homebrew/bin/llama-server",
+		"S46_TEST_LLAMACPP_RUNNING":        "1",
+		"S46_TEST_LLAMACPP_VERIFIED_MODEL": "1",
+		"S46_TEST_MODEL_PROBE":             "1",
+		"S46_TEST_GATEWAY_READY":           "1",
+	}
+
+	strict := Service{Env: env}.Check(context.Background())
+	if checkOK(strict, "model-downloaded") || checkOK(strict, "llamacpp-model") {
+		t.Fatalf("strict check should require an installed receipt and artifact: %#v", strict.Checks)
+	}
+
+	report := Service{Env: env}.CheckAssumingVerifiedModel(context.Background())
+	if !report.Ready || !checkOK(report, "model-downloaded") || !checkOK(report, "llamacpp-model") {
+		t.Fatalf("assumed-verified check should skip artifact verification and report runtime readiness: %#v", report)
+	}
+}
+
 func TestCheckRefusesLlamacppServingDifferentModel(t *testing.T) {
 	report := Service{Env: map[string]string{
 		"S46_TEST_MEMORY_BYTES":            "68000000000",
@@ -177,6 +238,23 @@ func TestStartGatewayRequiresVerifiedRuntime(t *testing.T) {
 	}}.StartGateway()
 	if err == nil || !strings.Contains(err.Error(), "not serving verified model") {
 		t.Fatalf("expected verified-runtime error, got %v", err)
+	}
+}
+
+func TestStartGatewayAssumingVerifiedModelSkipsArtifactVerification(t *testing.T) {
+	env := map[string]string{
+		"S46_AIRPLANE_MODEL_DIR":           t.TempDir(),
+		"S46_TEST_LLAMACPP_RUNNING":        "1",
+		"S46_TEST_LLAMACPP_VERIFIED_MODEL": "1",
+		"S46_TEST_GATEWAY_READY":           "0",
+		"S46_TEST_START_GATEWAY_OK":        "1",
+	}
+
+	if err := (Service{Env: env}).StartGateway(); err == nil || !strings.Contains(err.Error(), "model is not verified") {
+		t.Fatalf("expected strict gateway start to require artifact verification, got %v", err)
+	}
+	if err := (Service{Env: env}).StartGatewayAssumingVerifiedModel(); err != nil {
+		t.Fatalf("expected assumed-verified gateway start to skip artifact verification: %v", err)
 	}
 }
 

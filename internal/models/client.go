@@ -28,6 +28,27 @@ type InstallRequest struct {
 	TargetPath      string
 	HTTPClient      *http.Client
 	ManifestBaseURL string
+	Progress        InstallProgressFunc
+}
+
+type InstallProgressFunc func(InstallProgress)
+
+type InstallProgressPhase string
+
+const (
+	InstallProgressVerifying   InstallProgressPhase = "verifying"
+	InstallProgressDownloading InstallProgressPhase = "downloading"
+)
+
+type InstallProgress struct {
+	Phase        InstallProgressPhase
+	ModelID      string
+	BackendModel string
+	Filename     string
+	Path         string
+	Current      int64
+	Total        int64
+	Done         bool
 }
 
 type verifiedManifest struct {
@@ -52,7 +73,7 @@ func Install(ctx context.Context, request InstallRequest) error {
 	} else if ok {
 		return nil
 	}
-	if ok, err := verifyExistingArtifact(request.TargetPath, manifest.Manifest); err != nil {
+	if ok, err := verifyExistingArtifact(request, manifest.Manifest); err != nil {
 		return err
 	} else if ok {
 		return writeReceipt(request.TargetPath, manifest)
@@ -235,7 +256,7 @@ func downloadAndInstallArtifact(ctx context.Context, request InstallRequest, man
 	tmpPath := tmp.Name()
 	defer func() { _ = os.Remove(tmpPath) }()
 	hash := sha256.New()
-	written, err := io.Copy(io.MultiWriter(tmp, hash), response.Body)
+	written, err := copyWithInstallProgress(io.MultiWriter(tmp, hash), response.Body, request.Progress, installProgress(request, manifest.Manifest, InstallProgressDownloading))
 	if closeErr := tmp.Close(); err == nil {
 		err = closeErr
 	}
@@ -254,8 +275,8 @@ func downloadAndInstallArtifact(ctx context.Context, request InstallRequest, man
 	return writeReceipt(request.TargetPath, manifest)
 }
 
-func verifyExistingArtifact(targetPath string, manifest Manifest) (bool, error) {
-	info, err := os.Stat(targetPath)
+func verifyExistingArtifact(request InstallRequest, manifest Manifest) (bool, error) {
+	info, err := os.Stat(request.TargetPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return false, nil
@@ -265,13 +286,13 @@ func verifyExistingArtifact(targetPath string, manifest Manifest) (bool, error) 
 	if info.IsDir() || info.Size() != manifest.Size {
 		return false, nil
 	}
-	file, err := os.Open(targetPath)
+	file, err := os.Open(request.TargetPath)
 	if err != nil {
 		return false, err
 	}
 	defer file.Close()
 	hash := sha256.New()
-	written, err := io.Copy(hash, file)
+	written, err := copyWithInstallProgress(hash, file, request.Progress, installProgress(request, manifest, InstallProgressVerifying))
 	if err != nil {
 		return false, err
 	}
@@ -279,6 +300,50 @@ func verifyExistingArtifact(targetPath string, manifest Manifest) (bool, error) 
 		return false, nil
 	}
 	return true, nil
+}
+
+func installProgress(request InstallRequest, manifest Manifest, phase InstallProgressPhase) InstallProgress {
+	return InstallProgress{
+		Phase:        phase,
+		ModelID:      manifest.ModelID,
+		BackendModel: manifest.BackendModel,
+		Filename:     manifest.Filename,
+		Path:         request.TargetPath,
+		Total:        manifest.Size,
+	}
+}
+
+func copyWithInstallProgress(dst io.Writer, src io.Reader, progress InstallProgressFunc, event InstallProgress) (int64, error) {
+	if progress == nil || event.Total <= 0 {
+		return io.Copy(dst, src)
+	}
+	event.Current = 0
+	event.Done = false
+	progress(event)
+	writer := &installProgressWriter{writer: dst, progress: progress, event: event}
+	written, err := io.Copy(writer, src)
+	event.Current = written
+	event.Done = true
+	progress(event)
+	return written, err
+}
+
+type installProgressWriter struct {
+	writer   io.Writer
+	progress InstallProgressFunc
+	event    InstallProgress
+	current  int64
+}
+
+func (w *installProgressWriter) Write(p []byte) (int, error) {
+	n, err := w.writer.Write(p)
+	if n > 0 {
+		w.current += int64(n)
+		event := w.event
+		event.Current = w.current
+		w.progress(event)
+	}
+	return n, err
 }
 
 func verifyArtifactDigest(size int64, digest []byte, manifest Manifest) error {
@@ -395,7 +460,7 @@ func verifyInstalledReceiptForManifest(request InstallRequest, expected Manifest
 	}
 	defer file.Close()
 	hash := sha256.New()
-	written, err := io.Copy(hash, file)
+	written, err := copyWithInstallProgress(hash, file, request.Progress, installProgress(request, manifest, InstallProgressVerifying))
 	if err != nil {
 		return false, err
 	}

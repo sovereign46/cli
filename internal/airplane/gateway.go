@@ -19,11 +19,27 @@ type gatewayCommand struct {
 }
 
 func (s Service) StartGateway() error {
+	return s.startGateway(false)
+}
+
+// StartGatewayAssumingVerifiedModel starts the gateway without re-hashing the model artifact.
+// Use only after setup has already verified the signed model.
+func (s Service) StartGatewayAssumingVerifiedModel() error {
+	return s.startGateway(true)
+}
+
+func (s Service) startGateway(assumeVerifiedModel bool) error {
 	if s.setupChecksSkipped() {
 		return nil
 	}
 	ctx := context.Background()
-	if err := s.requireVerifiedLlamacppRuntime(ctx); err != nil {
+	var err error
+	if assumeVerifiedModel {
+		err = s.requireLlamacppRuntime(ctx)
+	} else {
+		err = s.requireVerifiedLlamacppRuntime(ctx)
+	}
+	if err != nil {
 		return err
 	}
 	if s.gatewayReady(ctx) {
