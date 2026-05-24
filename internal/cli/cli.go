@@ -1296,25 +1296,23 @@ func compactSessionTask(task string, limit int) string {
 
 func detachCommand(runtime Runtime, opts *options) *cobra.Command {
 	var harnessName string
-	var box string
 	cmd := &cobra.Command{
 		Use:   "detach <session>",
-		Short: "detach a session to an S46 box",
+		Short: "detach a session to an S46 worker job",
 		Args:  exactArgs("s46 detach <session>", 1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := newApp(runtime, opts)
 			if err != nil {
 				return err
 			}
-			return runDetach(cmd.Context(), app, args[0], harnessName, box)
+			return runDetach(cmd.Context(), app, args[0], harnessName)
 		},
 	}
 	cmd.Flags().StringVar(&harnessName, "harness", "", "override harness")
-	cmd.Flags().StringVar(&box, "box", "", "target box")
 	return cmd
 }
 
-func runDetach(ctx context.Context, app *app, sessionID string, harnessName string, box string) error {
+func runDetach(ctx context.Context, app *app, sessionID string, harnessName string) error {
 	if err := app.requireCloudFeature("detach"); err != nil {
 		return err
 	}
@@ -1322,7 +1320,7 @@ func runDetach(ctx context.Context, app *app, sessionID string, harnessName stri
 	var result api.Session
 	if err := app.withLock(ctx, func() error {
 		var err error
-		result, err = service.Detach(ctx, sessionID, harnessName, box)
+		result, err = service.Detach(ctx, sessionID, harnessName)
 		return err
 	}); err != nil {
 		return err
@@ -1330,11 +1328,14 @@ func runDetach(ctx context.Context, app *app, sessionID string, harnessName stri
 	if ok, err := app.writeStructured(map[string]any{"session": result}); ok {
 		return err
 	}
-	return app.renderer.Lines(
-		fmt.Sprintf("[s46] detached %s session %s", result.Harness, result.ID),
-		fmt.Sprintf("[s46] running on %s", result.Location),
-		"[s46] you can close your laptop",
-	)
+	lines := []string{fmt.Sprintf("[s46] detached %s session %s", result.Harness, result.ID)}
+	if jobID, ok := strings.CutPrefix(result.Location, "scheduler:"); ok {
+		lines = append(lines, fmt.Sprintf("[s46] queued continuation job %s", jobID))
+	} else {
+		lines = append(lines, fmt.Sprintf("[s46] state: %s · location: %s", result.State, result.Location))
+	}
+	lines = append(lines, "[s46] you can close your laptop")
+	return app.renderer.Lines(lines...)
 }
 
 func resumeCommand(runtime Runtime, opts *options) *cobra.Command {
@@ -1345,11 +1346,11 @@ func resumeCommand(runtime Runtime, opts *options) *cobra.Command {
 		Short: "resume a session remotely by default, or materialize it locally",
 		Args:  exactArgs("s46 resume <session>", 1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			app, err := newApp(runtime, opts)
+			target, err := resumeTarget(remote, local)
 			if err != nil {
 				return err
 			}
-			target, err := resumeTarget(remote, local)
+			app, err := newApp(runtime, opts)
 			if err != nil {
 				return err
 			}
@@ -1585,21 +1586,34 @@ func sessionCommand(runtime Runtime, opts *options) *cobra.Command {
 			if ok, err := app.writeStructured(result); ok {
 				return err
 			}
-			return app.renderer.Lines(
+			lines := []string{
 				fmt.Sprintf("# %s", result.Title),
 				fmt.Sprintf("# Branch:  %s", result.Branch),
 				fmt.Sprintf("# Ran-on:  %s", strings.Join(result.RanOn, " → ")),
 				fmt.Sprintf("# Harness: %s · Model: %s", result.Harness, result.Model),
 				fmt.Sprintf("# Session: %s · Cost: %s", result.ID, result.Cost),
+			}
+			if result.Status != "" {
+				lines = append(lines, fmt.Sprintf("# Status:  %s", result.Status))
+			}
+			if result.BlockedReason != "" {
+				lines = append(lines, fmt.Sprintf("# Blocked: %s", result.BlockedReason))
+			}
+			lines = append(lines,
 				"",
 				"Review package:",
 				fmt.Sprintf("- Summary: %s", result.Review.Summary),
 				fmt.Sprintf("- Checklist: %s", strings.Join(result.Review.Checklist, "; ")),
 				"- Suggested next commands:",
-				"  git diff",
-				"  git status",
-				"  gh pr create --fill",
 			)
+			commands := result.Review.SuggestedCommands
+			if len(commands) == 0 {
+				commands = []string{"git diff", "git status"}
+			}
+			for _, command := range commands {
+				lines = append(lines, "  "+command)
+			}
+			return app.renderer.Lines(lines...)
 		},
 	}
 	land.Flags().StringVar(&title, "title", "", "review title")

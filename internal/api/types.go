@@ -120,7 +120,6 @@ type Session struct {
 type DetachRequest struct {
 	SessionID   string `json:"sessionId"`
 	Harness     string `json:"harness"`
-	Box         string `json:"box"`
 	Team        Team   `json:"team"`
 	AccessToken string `json:"-"`
 }
@@ -154,14 +153,17 @@ type LandRequest struct {
 }
 
 type LandResult struct {
-	ID      string       `json:"id"`
-	Title   string       `json:"title"`
-	Branch  string       `json:"branch"`
-	RanOn   []string     `json:"ranOn"`
-	Harness string       `json:"harness"`
-	Model   string       `json:"model"`
-	Cost    string       `json:"cost"`
-	Review  ReviewPacket `json:"review"`
+	ID             string       `json:"id"`
+	Title          string       `json:"title"`
+	Branch         string       `json:"branch"`
+	RanOn          []string     `json:"ranOn"`
+	Harness        string       `json:"harness"`
+	Model          string       `json:"model"`
+	Cost           string       `json:"cost"`
+	Status         string       `json:"status"`
+	PullRequestURL string       `json:"pullRequestUrl,omitempty"`
+	BlockedReason  string       `json:"blockedReason,omitempty"`
+	Review         ReviewPacket `json:"review"`
 }
 
 type ReviewPacket struct {

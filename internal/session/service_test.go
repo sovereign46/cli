@@ -52,11 +52,11 @@ func TestRunStoresSessionAndListReturnsLocalState(t *testing.T) {
 func TestDetachAndResumePersistSessionState(t *testing.T) {
 	service, store := newTestService(t, api.Team{Name: "s46", Endpoint: "https://s46.s46.dev", Lane: "EU-OPO", DefaultModel: api.DefaultModel}, config.ModeCloud, nil)
 
-	detached, err := service.Detach(context.Background(), "@nunojob/task", "", "")
+	detached, err := service.Detach(context.Background(), "@nunojob/task", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if detached.State != "running" || detached.Harness != "standard" {
+	if detached.State != "queued" || detached.Harness != "standard" || detached.Location != "scheduler:job_mock" {
 		t.Fatalf("detached = %#v", detached)
 	}
 	resumed, previous, err := service.Resume(context.Background(), detached.ID, "local")

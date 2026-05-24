@@ -117,7 +117,7 @@ All session list/action endpoints are authenticated and scoped with `?team=<team
 Response:
 
 ```json
-{"sessions":[{"id":"@dscape/auth-redirect-fix","state":"running","harness":"claude-code","location":"box-04.acme.s46.dev","lane":"EU-OPO","model":"s46/kimi-k2.6","age":"0m","spent":"€0.00","task":"fix auth redirect"}]}
+{"sessions":[{"id":"@dscape/auth-redirect-fix","state":"queued","harness":"claude-code","location":"scheduler:job_046","lane":"EU-OPO","model":"s46/kimi-k2.6","age":"0m","spent":"€0.00","task":"fix auth redirect"}]}
 ```
 
 ### `POST /v1/sessions/{sessionId}/detach?team={team}`
@@ -125,10 +125,10 @@ Response:
 Request:
 
 ```json
-{"sessionId":"@dscape/auth-redirect-fix","harness":"claude-code","box":"box-04","team":{"name":"acme"}}
+{"sessionId":"@dscape/auth-redirect-fix","harness":"claude-code","team":{"name":"acme"}}
 ```
 
-Response: session object.
+Response: queued session object with `location:"scheduler:<jobId>"`.
 
 ### `POST /v1/sessions/{sessionId}/resume?team={team}`
 
@@ -153,7 +153,7 @@ Request:
 Response:
 
 ```json
-{"sessionId":"@dscape/auth-redirect-fix","url":"wss://box-04.acme.s46.dev/session/auth-redirect-fix","protocol":"websocket"}
+{"sessionId":"@dscape/auth-redirect-fix","url":"https://api.s46.dev/v1/sessions/dscape%2Fauth-redirect-fix/stream?team=acme","protocol":"sse"}
 ```
 
 ### `POST /v1/sessions/{sessionId}/land?team={team}`
@@ -170,15 +170,17 @@ Response:
 {
   "id": "@dscape/auth-redirect-fix",
   "title": "Auth redirect fix",
-  "branch": "auth-redirect-fix",
-  "ranOn": ["box-04.acme.s46.dev"],
+  "branch": "s46/dscape-auth-redirect-fix",
+  "ranOn": ["local checkpoint", "S46 worker VM"],
   "harness": "claude-code",
   "model": "s46/kimi-k2.6",
   "cost": "€0.00",
+  "status": "blocked",
+  "blockedReason": "github_repository_not_configured",
   "review": {
-    "summary": "Ready for review.",
-    "checklist": ["Tests pass"],
-    "suggestedCommands": ["go test ./..."]
+    "summary": "Ready for policy-gated review.",
+    "checklist": ["inspect git diff", "run tests", "run /review", "connect a GitHub App repository"],
+    "suggestedCommands": ["git diff", "git status", "s46 session land --json"]
   }
 }
 ```

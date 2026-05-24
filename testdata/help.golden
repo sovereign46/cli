@@ -12,7 +12,7 @@ Available Commands:
   airplane    manage local airplane mode
   ask         ask the local S46 model for a command plan
   connect     connect a team and configure a harness
-  detach      detach a session to an S46 box
+  detach      detach a session to an S46 worker job
   devices     list and revoke paired devices
   disconnect  remove S46 configuration for a team and harness
   help        Help about any command

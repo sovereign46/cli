@@ -1869,7 +1869,7 @@ func TestTeamsListShowsConnectedTeamsAndActiveTeam(t *testing.T) {
 func TestSessionLifecycleAndRunSlug(t *testing.T) {
 	env := testEnv(t)
 	requireOK(t, run(t, env, "login", "--email", "dscape@acme.s46.dev"))
-	if out := requireOK(t, run(t, env, "detach", "@dscape/auth-redirect-fix")); !strings.Contains(out, "detached standard session") {
+	if out := requireOK(t, run(t, env, "detach", "@dscape/auth-redirect-fix")); !strings.Contains(out, "detached standard session") || !strings.Contains(out, "queued continuation job job_mock") {
 		t.Fatalf("unexpected detach: %s", out)
 	}
 	if out := requireOK(t, run(t, env, "resume", "@dscape/auth-redirect-fix")); !strings.Contains(out, "queued remote resume for @dscape/auth-redirect-fix") {
@@ -1878,7 +1878,7 @@ func TestSessionLifecycleAndRunSlug(t *testing.T) {
 	if out := requireOK(t, run(t, env, "resume", "@dscape/auth-redirect-fix", "--local")); !strings.Contains(out, "resumed @dscape/auth-redirect-fix on localhost") {
 		t.Fatalf("unexpected local resume: %s", out)
 	}
-	if out := requireOK(t, run(t, env, "session", "land")); !strings.Contains(out, "Review package:") || !strings.Contains(out, "gh pr create --fill") {
+	if out := requireOK(t, run(t, env, "session", "land")); !strings.Contains(out, "Review package:") || !strings.Contains(out, "github_repository_not_configured") || strings.Contains(out, "gh pr create --fill") {
 		t.Fatalf("unexpected land output: %s", out)
 	}
 	runRaw := requireOK(t, run(t, env, "run", "fix the failing auth redirect test", "--json"))

@@ -4,8 +4,22 @@ package api
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
+
+func TestMockResumeValidatesTarget(t *testing.T) {
+	client := NewMockClient(nil)
+	_, err := client.Resume(context.Background(), ResumeRequest{SessionID: "@dscape/task", Target: "elsewhere"})
+	var apiErr Error
+	if !errors.As(err, &apiErr) || apiErr.Code != "invalid_request" || apiErr.StatusCode != 400 {
+		t.Fatalf("resume error = %#v, want invalid_request", err)
+	}
+	resumed, err := client.Resume(context.Background(), ResumeRequest{SessionID: "@dscape/task", Target: " LOCAL "})
+	if err != nil || resumed.State != "resumed" || resumed.Location != "localhost" {
+		t.Fatalf("local resume = %#v err=%v", resumed, err)
+	}
+}
 
 func TestMockModeUsesProductionURLs(t *testing.T) {
 	client, err := NewClientFromEnv(map[string]string{"S46_API_MODE": "mock"})

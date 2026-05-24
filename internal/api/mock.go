@@ -180,15 +180,11 @@ func (c *MockClient) Detach(ctx context.Context, req DetachRequest) (Session, er
 	if harness == "" {
 		harness = "claude-code"
 	}
-	box := req.Box
-	if box == "" {
-		box = c.fixtures().DefaultBox
-	}
 	return Session{
 		ID:       req.SessionID,
-		State:    "running",
+		State:    "queued",
 		Harness:  harness,
-		Location: box,
+		Location: "scheduler:job_mock",
 		Lane:     req.Team.Lane,
 		Model:    req.Team.DefaultModel,
 		Age:      "0m",
@@ -197,9 +193,16 @@ func (c *MockClient) Detach(ctx context.Context, req DetachRequest) (Session, er
 }
 
 func (c *MockClient) Resume(ctx context.Context, req ResumeRequest) (Session, error) {
+	target := strings.ToLower(strings.TrimSpace(req.Target))
+	if target == "" {
+		target = "remote"
+	}
+	if target != "remote" && target != "local" {
+		return Session{}, Error{Code: "invalid_request", Message: "invalid request", StatusCode: 400}
+	}
 	session := req.Session
 	session.ID = req.SessionID
-	if req.Target == "local" {
+	if target == "local" {
 		session.State = "resumed"
 		session.Location = "localhost"
 	} else {
@@ -245,17 +248,19 @@ func (c *MockClient) Land(ctx context.Context, req LandRequest) (LandResult, err
 	branchSlug := strings.TrimPrefix(req.SessionID, "@")
 	branchSlug = strings.ReplaceAll(branchSlug, "/", "-")
 	return LandResult{
-		ID:      req.SessionID,
-		Title:   title,
-		Branch:  "s46/" + branchSlug,
-		RanOn:   []string{"localhost", strs.FirstNonEmpty(session.Location, fixtures.DefaultBox), "localhost"},
-		Harness: session.Harness,
-		Model:   session.Model,
-		Cost:    session.Spent,
+		ID:            req.SessionID,
+		Title:         title,
+		Branch:        "s46/" + branchSlug,
+		RanOn:         []string{"localhost", strs.FirstNonEmpty(session.Location, fixtures.DefaultBox), "localhost"},
+		Harness:       session.Harness,
+		Model:         session.Model,
+		Cost:          session.Spent,
+		Status:        "blocked",
+		BlockedReason: "github_repository_not_configured",
 		Review: ReviewPacket{
-			Summary:           fmt.Sprintf("%s. Prepared from %s for human review.", title, req.SessionID),
-			Checklist:         []string{"inspect git diff", "run tests", "review generated summary", "open PR"},
-			SuggestedCommands: []string{"git diff", "git status", "gh pr create --fill"},
+			Summary:           fmt.Sprintf("%s. Prepared from %s for policy-gated review.", title, req.SessionID),
+			Checklist:         []string{"inspect git diff", "run tests", "run /review", "connect a GitHub App repository"},
+			SuggestedCommands: []string{"git diff", "git status", "s46 session land --json"},
 		},
 	}, nil
 }

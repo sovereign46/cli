@@ -252,7 +252,7 @@ func localDevelopmentAPI(env map[string]string) bool {
 	return false
 }
 
-func (s Service) Detach(ctx context.Context, sessionID string, harness string, box string) (api.Session, error) {
+func (s Service) Detach(ctx context.Context, sessionID string, harness string) (api.Session, error) {
 	ctxState, err := s.contextState()
 	if err != nil {
 		return api.Session{}, err
@@ -265,7 +265,7 @@ func (s Service) Detach(ctx context.Context, sessionID string, harness string, b
 	if tokenErr != nil {
 		return api.Session{}, fmt.Errorf("could not obtain s46 access token: %w; run `s46 login` if your session expired", tokenErr)
 	}
-	result, err := s.API.Detach(ctx, api.DetachRequest{SessionID: sessionID, Harness: harness, Box: box, Team: ctxState.Team, AccessToken: accessToken})
+	result, err := s.API.Detach(ctx, api.DetachRequest{SessionID: sessionID, Harness: harness, Team: ctxState.Team, AccessToken: accessToken})
 	if err != nil {
 		return api.Session{}, err
 	}

@@ -38,7 +38,7 @@ s46 status [--verbose]
 s46 version
 s46 update
 s46 sessions
-s46 detach <session>
+s46 detach <session>              # queues a continuation job
 s46 resume <session> [--remote|--local]
 s46 share [session] [--ttl=1d|7d|30d|365d|never] [--local]
 s46 share revoke <session-or-share-id>
