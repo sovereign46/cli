@@ -22,7 +22,7 @@ func TestPlanConnectPreservesProvidersAndAddsS46(t *testing.T) {
 	if err := os.WriteFile(modelsPath, []byte(`{"providers":{"ollama":{"baseUrl":"http://localhost:11434/v1"}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	team := api.Team{Name: "acme", Endpoint: "https://acme.s46.dev", Models: api.DefaultModels, DefaultModel: api.DefaultModel}
+	team := api.Team{Name: "acme", Endpoint: "https://acme.s46.dev", Models: api.DefaultModelList(), DefaultModel: api.DefaultModel}
 	plan, err := New().PlanConnect(context.Background(), harness.ConnectRequest{Env: env, Team: team, Model: api.DefaultModel})
 	if err != nil {
 		t.Fatal(err)
@@ -71,7 +71,7 @@ func TestPlanConnectLeavesPiSettingsAloneByDefault(t *testing.T) {
 	if err := os.WriteFile(settingsPath, []byte(`{"defaultProvider":"openai-codex","defaultModel":"gpt-5.5"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	team := api.Team{Name: "acme", Endpoint: "https://acme.s46.dev", Models: api.DefaultModels, DefaultModel: api.DefaultModel}
+	team := api.Team{Name: "acme", Endpoint: "https://acme.s46.dev", Models: api.DefaultModelList(), DefaultModel: api.DefaultModel}
 	plan, err := New().PlanConnect(context.Background(), harness.ConnectRequest{Env: env, Team: team, Model: api.DefaultModel})
 	if err != nil {
 		t.Fatal(err)
@@ -120,7 +120,7 @@ func TestStatusReportsMissingConfig(t *testing.T) {
 func TestStatusReadsConfiguredFile(t *testing.T) {
 	home := t.TempDir()
 	env := map[string]string{"HOME": home}
-	team := api.Team{Name: "acme", Endpoint: "https://acme.s46.dev", Models: api.DefaultModels, DefaultModel: api.DefaultModel}
+	team := api.Team{Name: "acme", Endpoint: "https://acme.s46.dev", Models: api.DefaultModelList(), DefaultModel: api.DefaultModel}
 	plan, err := New().PlanConnect(context.Background(), harness.ConnectRequest{Env: env, Team: team, Model: api.DefaultModel})
 	if err != nil {
 		t.Fatal(err)

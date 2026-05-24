@@ -16,12 +16,6 @@ import (
 // New code: import this constant rather than hardcoding "[s46]".
 const DefaultPrefix = "[s46]"
 
-type Interface interface {
-	WriteJSON(value any) error
-	WriteJSONL(value any) error
-	Lines(lines ...string) error
-}
-
 // Renderer prints either JSON, JSONL, or plain lines. Plain output respects
 // the active brand prefix: lines that begin with DefaultPrefix have
 // it swapped for r.Prefix; lines that begin with the status markers

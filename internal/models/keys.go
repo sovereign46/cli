@@ -7,17 +7,13 @@ import (
 	"strings"
 )
 
-const defaultSigningKeyID = "s46-models-2026-05"
-
-var defaultTrustedKeys = map[string]string{
-	defaultSigningKeyID: "ayvzAt4pU76dVDY1hynEtzGDjRAY94tbdJGc10l8YeU",
-}
+const (
+	defaultSigningKeyID  = "s46-models-2026-05"
+	defaultSigningPublic = "ayvzAt4pU76dVDY1hynEtzGDjRAY94tbdJGc10l8YeU"
+)
 
 func trustedKeys(env map[string]string) (map[string]ed25519.PublicKey, error) {
-	values := map[string]string{}
-	for keyID, raw := range defaultTrustedKeys {
-		values[keyID] = raw
-	}
+	values := map[string]string{defaultSigningKeyID: defaultSigningPublic}
 	for keyID, raw := range extraTrustedKeyStrings(env) {
 		values[keyID] = raw
 	}

@@ -17,6 +17,8 @@ import (
 	"github.com/sovereign46/cli/internal/share"
 )
 
+// projectsRelPath is the location of Claude Code project transcripts
+// relative to $HOME. Update this if Claude moves its transcript storage.
 var projectsRelPath = filepath.Join(".claude", "projects")
 
 func (a Adapter) ShareArtifact(ctx context.Context, req harness.ShareRequest) (share.Artifact, bool, error) {

@@ -12,6 +12,8 @@ import (
 	"github.com/sovereign46/cli/internal/strs"
 )
 
+var errInteractiveCanceled = errors.New("interactive prompt canceled")
+
 // promptLoginRequest fills a LoginRequest from interactive stdin input,
 // using existing local state and env vars as defaults.
 func promptLoginRequest(app *app, req auth.LoginRequest) (auth.LoginRequest, error) {

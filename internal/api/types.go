@@ -5,14 +5,20 @@ import (
 	"time"
 )
 
-const DefaultModel = "s46/kimi-k2.6"
+const (
+	DefaultModel       = "s46/kimi-k2.6"
+	ResumeTargetLocal  = "local"
+	ResumeTargetRemote = "remote"
+)
 
-var DefaultModels = []string{
-	"s46/kimi-k2.6",
-	"s46/gemma-3",
-	"s46/deepseek-coder-v3",
-	"s46/qwen3-coder",
-	"s46/mistral-large",
+func DefaultModelList() []string {
+	return []string{
+		"s46/kimi-k2.6",
+		"s46/gemma-3",
+		"s46/deepseek-coder-v3",
+		"s46/qwen3-coder",
+		"s46/mistral-large",
+	}
 }
 
 // DeviceAuthAPI covers magic-link / device-auth flows.

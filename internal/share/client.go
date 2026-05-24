@@ -10,6 +10,7 @@ import (
 	"io"
 	"math/bits"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -24,7 +25,10 @@ const (
 	MaxPOWDifficulty = 26
 )
 
-var ValidTTLs = map[string]bool{"1d": true, "7d": true, "30d": true, "365d": true, "never": true}
+var (
+	validTTLs           = []string{"1d", "7d", "30d", "365d", "never"}
+	validTTLDescription = strings.Join(validTTLs, ", ")
+)
 
 type Client struct {
 	BaseURL           string
@@ -76,8 +80,8 @@ func NormalizeTTL(ttl string) (string, error) {
 		return DefaultTTL, nil
 	}
 	ttl = strings.ToLower(strings.TrimSpace(ttl))
-	if !ValidTTLs[ttl] {
-		return "", fmt.Errorf("invalid share ttl %q; expected one of 1d, 7d, 30d, 365d, never", ttl)
+	if !slices.Contains(validTTLs, ttl) {
+		return "", fmt.Errorf("invalid share ttl %q; expected one of %s", ttl, validTTLDescription)
 	}
 	return ttl, nil
 }

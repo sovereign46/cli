@@ -14,20 +14,17 @@ import (
 	"github.com/sovereign46/cli/internal/harness"
 )
 
-// modelsRelPath is the location of Pi's models config relative to
-// $HOME. Update this if Pi moves its config.
-var modelsRelPath = filepath.Join(".pi", "agent", "models.json")
-
-// settingsRelPath is the location of Pi's settings config relative to
-// $HOME. Update this if Pi moves its config.
-var settingsRelPath = filepath.Join(".pi", "agent", "settings.json")
+const (
+	piDirName  = ".pi"
+	piAgentDir = "agent"
+)
 
 func modelsPath(env map[string]string) string {
-	return filepath.Join(config.HomeDir(env), modelsRelPath)
+	return filepath.Join(config.HomeDir(env), piDirName, piAgentDir, "models.json")
 }
 
 func settingsPath(env map[string]string) string {
-	return filepath.Join(config.HomeDir(env), settingsRelPath)
+	return filepath.Join(config.HomeDir(env), piDirName, piAgentDir, "settings.json")
 }
 
 func CurrentDefault(env map[string]string) (string, string, error) {

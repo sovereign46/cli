@@ -13,19 +13,19 @@ import (
 	"github.com/sovereign46/cli/internal/harness"
 )
 
-// settingsRelPath is the location of the Claude Code settings file
-// relative to $HOME. Project-scoped writes use the same filename under
-// the working directory. Update this if Claude moves its config.
-var settingsRelPath = filepath.Join(".claude", "settings.json")
-
 type Adapter struct{}
 
 func New() Adapter { return Adapter{} }
 
 func (a Adapter) Name() string { return "claude-code" }
 
+// settingsRelPath is the location of the Claude Code settings file
+// relative to $HOME. Project-scoped writes use the same filename under
+// the working directory. Update this if Claude moves its config.
+var settingsRelPath = filepath.Join(".claude", "settings.json")
+
 func userSettingsPath(env map[string]string) string {
-	return filepath.Join(config.HomeDir(env), settingsRelPath)
+	return settingsPath(env, "user")
 }
 
 func (a Adapter) Detect(ctx context.Context, env map[string]string) (harness.Detection, error) {
@@ -144,7 +144,7 @@ func (a Adapter) Apply(ctx context.Context, plan harness.Plan) (harness.AppliedP
 }
 
 func (a Adapter) Status(ctx context.Context, req harness.StatusRequest) []harness.StatusCheck {
-	path := filepath.Join(config.HomeDir(req.Env), ".claude", "settings.json")
+	path := userSettingsPath(req.Env)
 	raw, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return []harness.StatusCheck{{Name: "claude-config", OK: false, Message: fmt.Sprintf("not configured; run `s46 connect %s --harness=claude-code`", req.TeamName)}}

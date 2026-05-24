@@ -15,18 +15,6 @@ import (
 	"github.com/sovereign46/cli/internal/strs"
 )
 
-// init wires the mock client factory into the api package on non-release
-// builds. The release build excludes this file (see the //go:build tag at
-// the top), leaving mockClientFactory nil so S46_API_MODE=mock fails closed
-// instead of selecting production. This is a deliberate compile-time choice;
-// callers cannot opt-in to the mock at runtime in a release build.
-//
-// The factory must not depend on package-level state that's initialized
-// after init() runs. Right now it captures nothing, which keeps it safe.
-func init() {
-	mockClientFactory = func(env map[string]string) Client { return NewMockClient() }
-}
-
 type MockFixtures struct {
 	Account         string
 	Team            string
@@ -43,30 +31,37 @@ type MockFixtures struct {
 	VerificationURI string
 }
 
-var DefaultMockFixtures = MockFixtures{
-	Account:         "dscape@acme.s46.dev",
-	Team:            "acme",
-	Lane:            "EU-OPO",
-	Mode:            "cloud",
-	Boxes:           []string{"box-01", "box-02"},
-	DefaultBox:      "box-04.acme.s46.dev",
-	DefaultSession:  "@dscape/auth-redirect-fix",
-	DefaultTask:     "Fix auth redirect handling",
-	DefaultSpend:    "€4.20",
-	DeviceCode:      "mock-device-code",
-	UserCode:        "WXYZ-1234",
-	VerificationURI: "https://s46.dev/v1/auth/magic/consume",
+func defaultMockFixtures() MockFixtures {
+	return MockFixtures{
+		Account:         "dscape@acme.s46.dev",
+		Team:            "acme",
+		Lane:            "EU-OPO",
+		Mode:            "cloud",
+		Boxes:           []string{"box-01", "box-02"},
+		DefaultBox:      "box-04.acme.s46.dev",
+		DefaultSession:  "@dscape/auth-redirect-fix",
+		DefaultTask:     "Fix auth redirect handling",
+		DefaultSpend:    "€4.20",
+		DeviceCode:      "mock-device-code",
+		UserCode:        "WXYZ-1234",
+		VerificationURI: "https://s46.dev/v1/auth/magic/consume",
+	}
 }
 
 type MockClient struct {
 	Fixtures     MockFixtures
+	Models       []string
 	LastLogin    DeviceLoginRequest
 	RevokedIDs   map[string]bool
 	LastDeviceID string
 }
 
 func NewMockClient() *MockClient {
-	return &MockClient{Fixtures: DefaultMockFixtures}
+	return &MockClient{Fixtures: defaultMockFixtures(), Models: DefaultModelList()}
+}
+
+func newMockClientFromEnv(map[string]string) (Client, error) {
+	return NewMockClient(), nil
 }
 
 func (c *MockClient) StartDeviceLogin(ctx context.Context, req DeviceLoginRequest) (DeviceLogin, error) {
@@ -162,8 +157,15 @@ func (c *MockClient) Team(ctx context.Context, name string, opts TeamOptions) (T
 		Lane:         lane,
 		Boxes:        append([]string(nil), fixtures.Boxes...),
 		DefaultModel: model,
-		Models:       append([]string(nil), DefaultModels...),
+		Models:       c.modelList(),
 	}, nil
+}
+
+func (c *MockClient) modelList() []string {
+	if c != nil && len(c.Models) > 0 {
+		return c.Models
+	}
+	return DefaultModelList()
 }
 
 func (c *MockClient) Sessions(ctx context.Context, team Team, accessToken string) ([]Session, error) {
@@ -195,14 +197,14 @@ func (c *MockClient) Detach(ctx context.Context, req DetachRequest) (Session, er
 func (c *MockClient) Resume(ctx context.Context, req ResumeRequest) (Session, error) {
 	target := strings.ToLower(strings.TrimSpace(req.Target))
 	if target == "" {
-		target = "remote"
+		target = ResumeTargetRemote
 	}
-	if target != "remote" && target != "local" {
+	if target != ResumeTargetRemote && target != ResumeTargetLocal {
 		return Session{}, Error{Code: "invalid_request", Message: "invalid request", StatusCode: 400}
 	}
 	session := req.Session
 	session.ID = req.SessionID
-	if target == "local" {
+	if target == ResumeTargetLocal {
 		session.State = "resumed"
 		session.Location = "localhost"
 	} else {
@@ -266,41 +268,43 @@ func (c *MockClient) Land(ctx context.Context, req LandRequest) (LandResult, err
 }
 
 func defaultMockSession(team Team) Session {
+	defaults := defaultMockFixtures()
 	if team.Name == "" {
-		team.Name = DefaultMockFixtures.Team
+		team.Name = defaults.Team
 	}
 	if team.Lane == "" {
-		team.Lane = DefaultMockFixtures.Lane
+		team.Lane = defaults.Lane
 	}
 	if team.DefaultModel == "" {
 		team.DefaultModel = DefaultModel
 	}
 	return Session{
-		ID:       DefaultMockFixtures.DefaultSession,
+		ID:       defaults.DefaultSession,
 		State:    "running",
 		Harness:  team.DefaultHarness(),
-		Location: DefaultMockFixtures.DefaultBox,
+		Location: defaults.DefaultBox,
 		Lane:     team.Lane,
 		Model:    team.DefaultModel,
 		Age:      "14h",
-		Spent:    DefaultMockFixtures.DefaultSpend,
-		Task:     DefaultMockFixtures.DefaultTask,
+		Spent:    defaults.DefaultSpend,
+		Task:     defaults.DefaultTask,
 	}
 }
 
 func (c *MockClient) fixtures() MockFixtures {
+	defaults := defaultMockFixtures()
 	if c == nil || c.Fixtures.Account == "" {
-		return DefaultMockFixtures
+		return defaults
 	}
 	fixtures := c.Fixtures
 	if len(fixtures.Boxes) == 0 {
-		fixtures.Boxes = DefaultMockFixtures.Boxes
+		fixtures.Boxes = defaults.Boxes
 	}
 	if fixtures.DefaultBox == "" {
-		fixtures.DefaultBox = DefaultMockFixtures.DefaultBox
+		fixtures.DefaultBox = defaults.DefaultBox
 	}
 	if fixtures.DefaultSpend == "" {
-		fixtures.DefaultSpend = DefaultMockFixtures.DefaultSpend
+		fixtures.DefaultSpend = defaults.DefaultSpend
 	}
 	return fixtures
 }

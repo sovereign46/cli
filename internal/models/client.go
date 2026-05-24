@@ -21,6 +21,10 @@ import (
 
 const metadataMaxBytes = 1 << 20
 
+// InstallRequest configures a model install or verification. Production
+// callers rely on built-in trusted keys. Cross-package tests in non-release
+// builds can inject ephemeral signing keys through S46_MODELS_KEY_ID and
+// S46_MODELS_PUBLIC_KEY; release builds intentionally ignore those overrides.
 type InstallRequest struct {
 	Env             map[string]string
 	ModelID         string
@@ -29,6 +33,7 @@ type InstallRequest struct {
 	HTTPClient      *http.Client
 	ManifestBaseURL string
 	Progress        InstallProgressFunc
+	trustedKeys     map[string]ed25519.PublicKey
 }
 
 type InstallProgressFunc func(InstallProgress)
@@ -126,7 +131,7 @@ func fetchVerifiedManifest(ctx context.Context, request InstallRequest) (verifie
 	if err := json.Unmarshal(sigBody, &signature); err != nil {
 		return verifiedManifest{}, fmt.Errorf("decode model manifest signature: %w", err)
 	}
-	if err := verifySignature(body, signature, request.Env); err != nil {
+	if err := verifySignature(body, signature, request); err != nil {
 		return verifiedManifest{}, err
 	}
 	var manifest Manifest
@@ -170,16 +175,19 @@ func downloadMetadata(ctx context.Context, client *http.Client, policy trustPoli
 	return body, nil
 }
 
-func verifySignature(body []byte, signature Signature, env map[string]string) error {
+func verifySignature(body []byte, signature Signature, request InstallRequest) error {
 	if signature.Schema != SchemaVersion {
 		return fmt.Errorf("unsupported model signature schema %d", signature.Schema)
 	}
 	if signature.Algorithm != SignatureAlgorithm {
 		return fmt.Errorf("unsupported model signature algorithm %q", signature.Algorithm)
 	}
-	keys, err := trustedKeys(env)
+	keys, err := trustedKeys(request.Env)
 	if err != nil {
 		return err
+	}
+	for keyID, publicKey := range request.trustedKeys {
+		keys[keyID] = publicKey
 	}
 	publicKey, ok := keys[signature.KeyID]
 	if !ok {
@@ -395,7 +403,7 @@ func verifyInstalledReceiptForManifest(request InstallRequest, expected Manifest
 	if err != nil {
 		return false, nil
 	}
-	if err := verifySignature(manifestBody, receipt.Signature, request.Env); err != nil {
+	if err := verifySignature(manifestBody, receipt.Signature, request); err != nil {
 		return false, nil
 	}
 	var manifest Manifest

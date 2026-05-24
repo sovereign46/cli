@@ -219,7 +219,7 @@ func TestLockSerializesConcurrentSaveConfig(t *testing.T) {
 
 func TestTeamConfigRoundTripWithAPI(t *testing.T) {
 	t.Parallel()
-	team := api.Team{Name: "acme", Endpoint: "https://acme.s46.dev", Lane: "EU-OPO", Boxes: []string{"box-01"}, DefaultModel: api.DefaultModel, Models: api.DefaultModels}
+	team := api.Team{Name: "acme", Endpoint: "https://acme.s46.dev", Lane: "EU-OPO", Boxes: []string{"box-01"}, DefaultModel: api.DefaultModel, Models: api.DefaultModelList()}
 	tc := TeamConfigFromAPI(team, "claude-code", api.DefaultModel, ModeCloud)
 	if tc.DefaultHarness != "claude-code" || tc.Endpoint != team.Endpoint {
 		t.Fatalf("TeamConfigFromAPI = %#v", tc)

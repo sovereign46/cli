@@ -165,7 +165,7 @@ func (r *Registry) Names() []string {
 }
 
 func (r *Registry) NamesString() string {
-	return "pi, claude-code, codex, standard"
+	return strings.Join(r.Names(), ", ")
 }
 
 func (r *Registry) ShareArtifact(ctx context.Context, req ShareRequest) (share.Artifact, bool, error) {
