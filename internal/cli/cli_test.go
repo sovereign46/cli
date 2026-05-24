@@ -75,7 +75,7 @@ func seedActiveTeam(t *testing.T, env map[string]string, name string, endpoint s
 		DefaultHarness: "claude-code",
 		DefaultModel:   api.DefaultModel,
 		Boxes:          []string{"box-01"},
-		Models:         api.DefaultModels,
+		Models:         api.DefaultModelList(),
 	}
 	cfg := config.Config{ActiveTeam: name, Teams: map[string]config.TeamConfig{name: teamConfig}}
 	if err := store.SaveConfig(cfg); err != nil {
@@ -1942,7 +1942,7 @@ func TestTeamsUseWithoutTeamShowsExpectedInput(t *testing.T) {
 		t.Fatal("expected teams use without team to fail")
 	}
 	message := result.err.Error()
-	if !strings.Contains(message, "missing team") || !strings.Contains(message, "expected: s46 teams use <team>") {
+	if !strings.Contains(message, "missing argument") || !strings.Contains(message, "expected: s46 teams use <team>") {
 		t.Fatalf("unexpected error: %v", result.err)
 	}
 }

@@ -36,17 +36,13 @@ type Service struct {
 	Auth    AuthTokens
 	Config  *config.Store
 	Keyring keyring.Store
-	Harness ShareArtifactResolver
+	Harness *harness.Registry
 }
 
 // AuthTokens is the small bit of the auth package session needs:
 // give me a bearer token (or empty in airplane mode).
 type AuthTokens interface {
 	AccessToken(ctx context.Context) (string, error)
-}
-
-type ShareArtifactResolver interface {
-	ShareArtifact(ctx context.Context, req harness.ShareRequest) (sharepkg.Artifact, bool, error)
 }
 
 type ShareResult struct {
@@ -143,7 +139,7 @@ func (s Service) ListEntries(ctx context.Context) ([]ListedSession, error) {
 			if ctxState.TeamConfig.DefaultHarness != "" {
 				session.Harness = ctxState.TeamConfig.DefaultHarness
 			}
-			addListedSession(&entries, seen, ListedSession{Session: session, Source: "remote"})
+			addListedSession(&entries, seen, ListedSession{Session: session, Source: api.ResumeTargetRemote})
 		}
 	}
 	sortListedSessions(entries)
@@ -162,13 +158,10 @@ func (s Service) LatestSession(ctx context.Context) (ListedSession, bool, error)
 }
 
 func (s Service) localSessionEntries(ctx context.Context, ctxState workspaceContext) ([]ListedSession, error) {
-	lister, ok := s.Harness.(interface {
-		ListSessions(context.Context, map[string]string) ([]harness.LocalSession, error)
-	})
-	if !ok {
+	if s.Harness == nil {
 		return nil, nil
 	}
-	locals, err := lister.ListSessions(ctx, s.Config.Env)
+	locals, err := s.Harness.ListSessions(ctx, s.Config.Env)
 	if err != nil {
 		return nil, err
 	}
@@ -192,7 +185,7 @@ func (s Service) localSessionEntries(ctx context.Context, ctxState workspaceCont
 				Spent:    formatCostUSD(local.CostUSD),
 				Task:     local.Task,
 			},
-			Source:         "local",
+			Source:         api.ResumeTargetLocal,
 			TranscriptPath: config.DisplayPath(local.Path, s.Config.Env),
 			updatedAt:      updatedAt,
 		}
@@ -691,11 +684,11 @@ func listedSessionPreferred(candidate, existing ListedSession) bool {
 
 func sessionSourceRank(source string) int {
 	switch source {
-	case "local":
+	case api.ResumeTargetLocal:
 		return 3
 	case "state":
 		return 2
-	case "remote":
+	case api.ResumeTargetRemote:
 		return 1
 	default:
 		return 0

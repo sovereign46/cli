@@ -17,7 +17,9 @@ import (
 	"github.com/sovereign46/cli/internal/share"
 )
 
-var sessionsRelPath = filepath.Join(".pi", "agent", "sessions")
+// sessionsRelPath is the location of Pi session transcripts relative to
+// $HOME. Update this if Pi moves its transcript storage.
+var sessionsRelPath = filepath.Join(piDirName, piAgentDir, "sessions")
 
 func (a Adapter) ShareArtifact(ctx context.Context, req harness.ShareRequest) (share.Artifact, bool, error) {
 	path, ok, err := transcript.ResolveJSONL(config.HomeDir(req.Env), sessionsRelPath, req.Session.ID, transcript.FilenameAfterLastUnderscore, piHeaderID)

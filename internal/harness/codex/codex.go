@@ -15,12 +15,10 @@ import (
 	"github.com/sovereign46/cli/internal/harness"
 )
 
-// configRelPath is the location of the Codex config relative to $HOME.
-// Update both the constant and the harness test if Codex moves it.
-var configRelPath = filepath.Join(".codex", "config.toml")
+const codexDirName = ".codex"
 
 func configPath(env map[string]string) string {
-	return filepath.Join(config.HomeDir(env), configRelPath)
+	return filepath.Join(config.HomeDir(env), codexDirName, "config.toml")
 }
 
 type Adapter struct{}

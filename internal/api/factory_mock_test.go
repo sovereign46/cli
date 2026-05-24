@@ -9,7 +9,7 @@ import (
 )
 
 func TestMockResumeValidatesTarget(t *testing.T) {
-	client := NewMockClient(nil)
+	client := NewMockClient()
 	_, err := client.Resume(context.Background(), ResumeRequest{SessionID: "@dscape/task", Target: "elsewhere"})
 	var apiErr Error
 	if !errors.As(err, &apiErr) || apiErr.Code != "invalid_request" || apiErr.StatusCode != 400 {

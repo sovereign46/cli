@@ -59,7 +59,7 @@ func TestDetachAndResumePersistSessionState(t *testing.T) {
 	if detached.State != "queued" || detached.Harness != "standard" || detached.Location != "scheduler:job_mock" {
 		t.Fatalf("detached = %#v", detached)
 	}
-	resumed, previous, err := service.Resume(context.Background(), detached.ID, "local")
+	resumed, previous, err := service.Resume(context.Background(), detached.ID, api.ResumeTargetLocal)
 	if err != nil {
 		t.Fatal(err)
 	}

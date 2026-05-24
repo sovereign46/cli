@@ -17,7 +17,9 @@ import (
 	"github.com/sovereign46/cli/internal/share"
 )
 
-var sessionsRelPath = filepath.Join(".codex", "sessions")
+// sessionsRelPath is the location of Codex session transcripts relative
+// to $HOME. Update this if Codex moves its transcript storage.
+var sessionsRelPath = filepath.Join(codexDirName, "sessions")
 
 func (a Adapter) ShareArtifact(ctx context.Context, req harness.ShareRequest) (share.Artifact, bool, error) {
 	path, ok, err := transcript.ResolveJSONL(config.HomeDir(req.Env), sessionsRelPath, req.Session.ID, codexFilenameID, codexHeaderID)

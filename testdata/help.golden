@@ -20,7 +20,7 @@ Available Commands:
   logout      clear local credentials
   mode        view or set operating mode
   resume      resume a session remotely by default, or materialize it locally
-  run         start a direct mocked s46 session
+  run         start a local s46 session
   session     session subcommands
   sessions    list local and remote sessions
   share       share a session as an encrypted static page

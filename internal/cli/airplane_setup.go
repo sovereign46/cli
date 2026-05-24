@@ -968,7 +968,7 @@ func cloudTeamSnapshot(teamName string, teamConfig config.TeamConfig) (api.Team,
 		snapshot.DefaultModel = api.DefaultModel
 	}
 	if len(snapshot.Models) == 0 {
-		snapshot.Models = api.DefaultModels
+		snapshot.Models = api.DefaultModelList()
 	}
 	return snapshot, true
 }
