@@ -645,6 +645,73 @@ func TestLoginTellsUserToCheckEmail(t *testing.T) {
 	}
 }
 
+func TestJohnCLIEndToEndLoginAirplaneAndLocalRun(t *testing.T) {
+	env := testEnv(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/auth/device/start":
+			var body map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body["email"] != "john@yld.example" || body["deviceId"] != "john-yld-cli" || body["deviceName"] != "John YLD CLI" {
+				t.Fatalf("unexpected start body: %#v", body)
+			}
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]any{"deviceCode": "john-device", "userCode": "YLD-1234", "verificationUri": "https://api.s46.dev/v1/auth/magic/consume", "intervalSeconds": 1, "expiresAt": time.Now().Add(time.Minute).UTC().Format(time.RFC3339)})
+		case "/v1/auth/device/poll":
+			_ = json.NewEncoder(w).Encode(map[string]any{"account": "john@yld.example", "organization": "yld", "deviceId": "john-yld-cli", "accessToken": "john-access", "refreshToken": "john-refresh", "expiresAt": time.Now().Add(time.Hour).UTC().Format(time.RFC3339)})
+		case "/v1/me":
+			if r.Header.Get("Authorization") != "Bearer john-access" {
+				t.Fatalf("missing auth header: %s", r.Header.Get("Authorization"))
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"email": "john@yld.example", "organization": "yld", "team": "@yld/platform", "role": "owner"})
+		case "/v1/teams/@yld/platform":
+			if r.Header.Get("Authorization") != "Bearer john-access" {
+				t.Fatalf("missing auth header: %s", r.Header.Get("Authorization"))
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"name": "@yld/platform", "endpoint": "https://gateway.s46.dev", "region": "EU-OPO", "mode": "cloud", "workerHosts": []string{"worker-yld-01"}, "defaultModel": api.DefaultModel, "models": api.DefaultModelList()})
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.String())
+		}
+	}))
+	defer server.Close()
+	env["S46_API_BASE_URL"] = server.URL
+
+	login := requireOK(t, run(t, env, "login", "--user", "john@yld.example", "--device-id", "john-yld-cli", "--device-name", "John YLD CLI"))
+	if !strings.Contains(login, "authenticated as john@yld.example") || !strings.Contains(login, "s46 connect @yld/platform") {
+		t.Fatalf("unexpected login output:\n%s", login)
+	}
+	teams := requireOK(t, run(t, env, "teams", "list"))
+	if !strings.Contains(teams, "@yld/platform") {
+		t.Fatalf("unexpected teams output:\n%s", teams)
+	}
+	connect := requireOK(t, run(t, env, "connect", "@yld/platform", "--harness=pi"))
+	if !strings.Contains(connect, "team:    @yld/platform") || !strings.Contains(connect, "harness: pi") {
+		t.Fatalf("unexpected connect output:\n%s", connect)
+	}
+	setup := requireOK(t, run(t, env, "airplane", "setup", "--mode=on", "--harness=pi", "--yes"))
+	if !strings.Contains(setup, "[s46] airplane setup: ready") || !strings.Contains(setup, "[s46✈] team: @yld/platform") {
+		t.Fatalf("unexpected setup output:\n%s", setup)
+	}
+	status := requireOK(t, run(t, env, "status", "--verbose"))
+	if !strings.Contains(status, "auth:    john@yld.example") || !strings.Contains(status, "team:    @yld/platform") || !strings.Contains(status, "mode:    airplane") {
+		t.Fatalf("unexpected status output:\n%s", status)
+	}
+	if token := strings.TrimSpace(requireOK(t, run(t, env, "token", "--refresh"))); token != "s46_airplane_local" {
+		t.Fatalf("unexpected airplane token %q", token)
+	}
+	runOut := requireOK(t, run(t, env, "run", "offline tyre-kick task"))
+	if !strings.Contains(runOut, "@john/offline-tyre-kick-task-") || !strings.Contains(runOut, "state:   local") {
+		t.Fatalf("unexpected run output:\n%s", runOut)
+	}
+	sessions := requireOK(t, run(t, env, "sessions"))
+	if !strings.Contains(sessions, "@john/offline-tyre-kick-task-") || strings.Contains(sessions, "@mary/") {
+		t.Fatalf("unexpected sessions output:\n%s", sessions)
+	}
+}
+
 func TestUpdateCommandUsesHomebrewInstruction(t *testing.T) {
 	env := testEnv(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -875,6 +942,22 @@ func TestConnectWithTeamPromptsForMissingAmbiguousHarness(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("interactive connect output missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestAirplaneSetupRendersStartableGatewayAsTodo(t *testing.T) {
+	lines := renderAirplaneReport(airplane.Report{
+		Model:        airplane.LocalModelID,
+		BackendModel: airplane.BackendModel,
+		Checks: []airplane.Check{
+			{Name: "memory", OK: true, Required: true, Message: "64 GB detected"},
+			{Name: "disk", OK: true, Required: true, Message: "64 GB free"},
+			{Name: "local-gateway", OK: false, Required: true, Message: "startable: /tmp/s46-gateway"},
+		},
+	})
+	out := strings.Join(lines, "\n")
+	if !strings.Contains(out, "[s46] [todo] local-gateway: startable: /tmp/s46-gateway") || strings.Contains(out, "[fail] local-gateway") || !strings.Contains(out, "airplane setup: needs setup") {
+		t.Fatalf("unexpected startable gateway report:\n%s", out)
 	}
 }
 
