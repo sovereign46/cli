@@ -696,7 +696,7 @@ func sessionSourceRank(source string) int {
 }
 
 func localSessionBelongsToContext(local harness.LocalSession, ctxState workspaceContext) bool {
-	if ctxState.State.CurrentUser == "" && ctxState.TeamName == "" {
+	if ctxState.State.CurrentUser == "" {
 		return true
 	}
 	if _, ok := ctxState.State.Sessions[local.ID]; ok {

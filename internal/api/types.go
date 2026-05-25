@@ -79,6 +79,7 @@ type DeviceLogin struct {
 
 type TokenSet struct {
 	Account      string    `json:"account"`
+	Organization string    `json:"organization,omitempty"`
 	DeviceID     string    `json:"deviceId"`
 	AccessToken  string    `json:"accessToken"`
 	RefreshToken string    `json:"refreshToken"`
@@ -94,8 +95,9 @@ type Device struct {
 }
 
 type User struct {
-	Email string `json:"email"`
-	Team  string `json:"team"`
+	Email        string `json:"email"`
+	Organization string `json:"organization,omitempty"`
+	Team         string `json:"team"`
 }
 
 type TeamOptions struct {
