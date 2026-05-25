@@ -7,6 +7,24 @@
 
 # Local test state
 .coverage/
+.tmp/
 
 # Local agent state
 .pi/
+
+# Local secrets
+.env
+.env.*
+!.env.example
+.envrc
+.secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.private
+*.private.*
+id_rsa*
+id_ed25519*
