@@ -520,11 +520,7 @@ func renderAirplaneReportWithTitle(report airplane.Report, title string) []strin
 		fmt.Sprintf("[s46] model: %s -> %s", report.Model, report.BackendModel),
 	}
 	for _, check := range report.Checks {
-		status := "ok"
-		if !check.OK {
-			status = "fail"
-		}
-		lines = append(lines, fmt.Sprintf("[s46] [%s] %s: %s", status, check.Name, check.Message))
+		lines = append(lines, fmt.Sprintf("[s46] [%s] %s: %s", airplaneCheckStatus(check), check.Name, check.Message))
 	}
 	if !checkOK(report, "memory") && report.MemoryGB > 0 {
 		lines = append(lines,
@@ -542,9 +538,19 @@ func renderAirplaneReportWithTitle(report airplane.Report, title string) []strin
 	if report.Ready {
 		lines = append(lines, fmt.Sprintf("[s46] %s: ready", title))
 	} else {
-		lines = append(lines, fmt.Sprintf("[s46] %s: incomplete", title))
+		lines = append(lines, fmt.Sprintf("[s46] %s: needs setup", title))
 	}
 	return lines
+}
+
+func airplaneCheckStatus(check airplane.Check) string {
+	if check.OK {
+		return "ok"
+	}
+	if check.Name == "local-gateway" && strings.HasPrefix(check.Message, "startable:") {
+		return "todo"
+	}
+	return "fail"
 }
 
 func renderLlamacppRuntime(runtimeReport airplane.LlamacppRuntime) []string {

@@ -482,6 +482,22 @@ func TestListReturnsLocalSessionsWithoutActiveTeam(t *testing.T) {
 	}
 }
 
+func TestLocalSessionBelongsToContextFiltersCurrentAccount(t *testing.T) {
+	ctxState := workspaceContext{TeamName: "@yld/platform", State: config.State{Authenticated: true, CurrentUser: "john@yld.example", Sessions: map[string]api.Session{"uuid-from-state": {ID: "uuid-from-state"}}}}
+	if !localSessionBelongsToContext(harness.LocalSession{ID: "@john/task"}, ctxState) {
+		t.Fatal("expected john-prefixed local session to be visible")
+	}
+	if !localSessionBelongsToContext(harness.LocalSession{ID: "uuid-from-state"}, ctxState) {
+		t.Fatal("expected state-owned local session to be visible")
+	}
+	if localSessionBelongsToContext(harness.LocalSession{ID: "@mary/task"}, ctxState) {
+		t.Fatal("expected mary-prefixed local session to be hidden")
+	}
+	if localSessionBelongsToContext(harness.LocalSession{ID: "uuid-not-owned"}, ctxState) {
+		t.Fatal("expected unowned uuid local session to be hidden")
+	}
+}
+
 func TestLandReturnsAPIErrorUnchanged(t *testing.T) {
 	home := t.TempDir()
 	env := map[string]string{

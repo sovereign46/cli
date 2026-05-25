@@ -169,7 +169,7 @@ func (s Service) localSessionEntries(ctx context.Context, ctxState workspaceCont
 	now := time.Now()
 	entries := make([]ListedSession, 0, len(locals))
 	for _, local := range locals {
-		if strings.TrimSpace(local.ID) == "" || !sessionInProject(projectRoot, local.CWD, s.Config.Env) {
+		if strings.TrimSpace(local.ID) == "" || !localSessionBelongsToContext(local, ctxState) || !sessionInProject(projectRoot, local.CWD, s.Config.Env) {
 			continue
 		}
 		updatedAt := local.UpdatedAt
@@ -693,6 +693,23 @@ func sessionSourceRank(source string) int {
 	default:
 		return 0
 	}
+}
+
+func localSessionBelongsToContext(local harness.LocalSession, ctxState workspaceContext) bool {
+	if ctxState.State.CurrentUser == "" && ctxState.TeamName == "" {
+		return true
+	}
+	if _, ok := ctxState.State.Sessions[local.ID]; ok {
+		return true
+	}
+	if ctxState.State.CurrentUser == "" || !strings.HasPrefix(local.ID, "@") {
+		return false
+	}
+	name := userSlugSanitizer.ReplaceAllString(strings.Split(ctxState.State.CurrentUser, "@")[0], "")
+	if name == "" {
+		return false
+	}
+	return strings.HasPrefix(local.ID, "@"+name+"/")
 }
 
 func sortListedSessions(entries []ListedSession) {
