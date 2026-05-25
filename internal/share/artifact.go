@@ -37,7 +37,7 @@ type ArtifactSession struct {
 	SharedBy        SharedBy    `json:"sharedBy"`
 	Harness         HarnessInfo `json:"harness"`
 	Model           ModelInfo   `json:"model"`
-	Lane            LaneInfo    `json:"lane"`
+	Region          RegionInfo  `json:"region"`
 	DurationSeconds int         `json:"durationSeconds"`
 	Usage           Usage       `json:"usage"`
 }
@@ -56,7 +56,7 @@ type ModelInfo struct {
 	Name string `json:"name"`
 }
 
-type LaneInfo struct {
+type RegionInfo struct {
 	ID string `json:"id"`
 }
 
@@ -130,7 +130,7 @@ func BuildArtifact(session api.Session, opts BuildOptions) Artifact {
 			SharedBy:        sharedBy(opts.User),
 			Harness:         HarnessInfo{Name: valueOr(session.Harness, "s46")},
 			Model:           ModelInfo{Name: valueOr(session.Model, api.DefaultModel)},
-			Lane:            LaneInfo{ID: valueOr(session.Lane, "S46")},
+			Region:          RegionInfo{ID: valueOr(session.Region, "s46")},
 			DurationSeconds: 0,
 			Usage:           Usage{},
 		},
@@ -162,7 +162,7 @@ func titleFor(session api.Session) string {
 			return line
 		}
 	}
-	return valueOr(session.ID, "S46 session")
+	return valueOr(session.ID, "s46 session")
 }
 
 func statusFor(state string) string {

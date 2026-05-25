@@ -20,18 +20,18 @@ func TestLoginRefreshTokenAndLogout(t *testing.T) {
 	store := config.NewStore(env, "")
 	service := Service{API: api.NewMockClient(), Config: store, Keyring: keyring.FileStore{Path: filepath.Join(home, "keyring.json")}}
 
-	login, err := service.Login(context.Background(), "dscape@acme.s46.dev", "")
+	login, err := service.Login(context.Background(), "dscape@s46.dev", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !login.Authenticated || login.Team != "acme" || login.DeviceID == "" {
+	if !login.Authenticated || login.Team != "@s46/engineering" || login.DeviceID == "" {
 		t.Fatalf("unexpected login: %#v", login)
 	}
 	user, err := service.Whoami(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if user != "dscape@acme.s46.dev" {
+	if user != "dscape@s46.dev" {
 		t.Fatalf("user = %q", user)
 	}
 	token, err := service.Token(context.Background(), true)
@@ -45,7 +45,7 @@ func TestLoginRefreshTokenAndLogout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if previous != "dscape@acme.s46.dev" {
+	if previous != "dscape@s46.dev" {
 		t.Fatalf("previous = %q", previous)
 	}
 	if _, err := service.Whoami(context.Background()); err == nil {
@@ -62,8 +62,8 @@ func TestTokenReturnsLocalAirplaneTokenWithoutCloudRefresh(t *testing.T) {
 		"S46_AIRPLANE_TOKEN": "local-dev-token",
 	}
 	store := config.NewStore(env, "")
-	team := api.Team{Name: "acme", Endpoint: airplane.LocalGatewayURL, DefaultModel: airplane.LocalModelID}
-	if err := store.SaveConfig(config.Config{Mode: config.ModeAirplane, ActiveTeam: "acme", Teams: map[string]config.TeamConfig{"acme": config.TeamConfigFromAPI(team, "standard", airplane.LocalModelID, config.ModeAirplane)}}); err != nil {
+	team := api.Team{Name: "@s46/engineering", Endpoint: airplane.LocalGatewayURL, DefaultModel: airplane.LocalModelID}
+	if err := store.SaveConfig(config.Config{Mode: config.ModeAirplane, ActiveTeam: "@s46/engineering", Teams: map[string]config.TeamConfig{"@s46/engineering": config.TeamConfigFromAPI(team, "standard", airplane.LocalModelID, config.ModeAirplane)}}); err != nil {
 		t.Fatal(err)
 	}
 	service := Service{API: refreshFailsAPI{Client: api.NewMockClient()}, Config: store, Keyring: keyring.FileStore{Path: filepath.Join(home, "keyring.json")}}
@@ -84,7 +84,7 @@ func TestDevicesAndSelfRevoke(t *testing.T) {
 	apiClient := api.NewMockClient()
 	service := Service{API: apiClient, Config: store, Keyring: keyring.FileStore{Path: filepath.Join(home, "keyring.json")}}
 
-	if _, err := service.LoginWithDeviceCallback(context.Background(), LoginRequest{Email: "dscape@acme.s46.dev", DeviceID: "dev-laptop", DeviceName: "Dev laptop"}, nil); err != nil {
+	if _, err := service.LoginWithDeviceCallback(context.Background(), LoginRequest{Email: "dscape@s46.dev", DeviceID: "dev-laptop", DeviceName: "Dev laptop"}, nil); err != nil {
 		t.Fatal(err)
 	}
 	devices, err := service.Devices(context.Background())
@@ -110,14 +110,14 @@ func TestLoginUsesAuthoritativeTeamFromMe(t *testing.T) {
 	home := t.TempDir()
 	env := map[string]string{"HOME": home, "XDG_CONFIG_HOME": filepath.Join(home, ".config"), "XDG_DATA_HOME": filepath.Join(home, ".data")}
 	store := config.NewStore(env, "")
-	apiClient := &authoritativeTeamAPI{MockClient: api.NewMockClient(), email: "nunojob@icloud.com", team: "acme"}
+	apiClient := &authoritativeTeamAPI{MockClient: api.NewMockClient(), email: "nunojob@icloud.com", team: "@s46/engineering"}
 	service := Service{API: apiClient, Config: store, Keyring: keyring.FileStore{Path: filepath.Join(home, "keyring.json")}}
 
 	login, err := service.LoginWithDeviceCallback(context.Background(), LoginRequest{Email: "nunojob@icloud.com", DeviceID: "icloud-device", DeviceName: "iCloud Device"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if login.User != "nunojob@icloud.com" || login.Team != "acme" || apiClient.teamRequested != "acme" {
+	if login.User != "nunojob@icloud.com" || login.Team != "@s46/engineering" || apiClient.teamRequested != "@s46/engineering" {
 		t.Fatalf("login=%#v teamRequested=%q", login, apiClient.teamRequested)
 	}
 }
@@ -155,7 +155,7 @@ func TestLoginPrintsBeforePollingAndWaitsForApproval(t *testing.T) {
 	service := Service{API: apiClient, Config: store, Keyring: keyring.FileStore{Path: filepath.Join(home, "keyring.json")}}
 
 	callbackPolls := -1
-	login, err := service.LoginWithDeviceCallback(context.Background(), LoginRequest{Email: "dscape@acme.s46.dev", DeviceID: "test-device", DeviceName: "Test device"}, func(device api.DeviceLogin) error {
+	login, err := service.LoginWithDeviceCallback(context.Background(), LoginRequest{Email: "dscape@s46.dev", DeviceID: "test-device", DeviceName: "Test device"}, func(device api.DeviceLogin) error {
 		callbackPolls = apiClient.polls
 		return nil
 	})
@@ -209,7 +209,7 @@ func TestAccessTokenReturnsBearerFromKeyring(t *testing.T) {
 	store := config.NewStore(env, "")
 	service := Service{API: api.NewMockClient(), Config: store, Keyring: keyring.FileStore{Path: filepath.Join(home, "keyring.json")}}
 
-	if _, err := service.Login(context.Background(), "dscape@acme.s46.dev", ""); err != nil {
+	if _, err := service.Login(context.Background(), "dscape@s46.dev", ""); err != nil {
 		t.Fatal(err)
 	}
 	token, err := service.AccessToken(context.Background())
@@ -266,11 +266,11 @@ func TestAccessTokenPersistsRotatedRefreshToken(t *testing.T) {
 	service := Service{API: rotator, Config: store, Keyring: keyringStore}
 
 	// First, log in normally so there's a token to refresh.
-	if _, err := service.Login(context.Background(), "dscape@acme.s46.dev", ""); err != nil {
+	if _, err := service.Login(context.Background(), "dscape@s46.dev", ""); err != nil {
 		t.Fatal(err)
 	}
 	// Stamp the stored token as already-expired so AccessToken triggers a refresh.
-	raw, err := keyringStore.Get(context.Background(), TokenService, "dscape@acme.s46.dev")
+	raw, err := keyringStore.Get(context.Background(), TokenService, "dscape@s46.dev")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,7 +283,7 @@ func TestAccessTokenPersistsRotatedRefreshToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := keyringStore.Set(context.Background(), TokenService, "dscape@acme.s46.dev", string(encoded)); err != nil {
+	if err := keyringStore.Set(context.Background(), TokenService, "dscape@s46.dev", string(encoded)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -296,7 +296,7 @@ func TestAccessTokenPersistsRotatedRefreshToken(t *testing.T) {
 	}
 
 	// Verify the rotated refresh token is now what's stored.
-	raw, err = keyringStore.Get(context.Background(), TokenService, "dscape@acme.s46.dev")
+	raw, err = keyringStore.Get(context.Background(), TokenService, "dscape@s46.dev")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,14 +329,14 @@ func TestCurrentLoginReturnsResultAfterLogin(t *testing.T) {
 	env := map[string]string{"HOME": home, "XDG_CONFIG_HOME": filepath.Join(home, ".config"), "XDG_DATA_HOME": filepath.Join(home, ".data")}
 	store := config.NewStore(env, "")
 	service := Service{API: api.NewMockClient(), Config: store, Keyring: keyring.FileStore{Path: filepath.Join(home, "keyring.json")}}
-	if _, err := service.Login(context.Background(), "dscape@acme.s46.dev", ""); err != nil {
+	if _, err := service.Login(context.Background(), "dscape@s46.dev", ""); err != nil {
 		t.Fatal(err)
 	}
 	result, ok := service.CurrentLogin(context.Background())
 	if !ok {
 		t.Fatal("expected CurrentLogin to succeed after Login")
 	}
-	if !result.Authenticated || result.User != "dscape@acme.s46.dev" || result.Team != "acme" {
+	if !result.Authenticated || result.User != "dscape@s46.dev" || result.Team != "@s46/engineering" {
 		t.Fatalf("unexpected CurrentLogin result: %#v", result)
 	}
 }

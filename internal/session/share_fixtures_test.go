@@ -52,7 +52,7 @@ func TestShareBuildsArtifactsFromPublicHarnessFixtures(t *testing.T) {
 			}))
 			defer server.Close()
 
-			service, _ := newTestService(t, api.Team{Name: "fixture", Endpoint: "https://fixture.s46.dev", Lane: "EU-OPO", DefaultModel: api.DefaultModel}, config.ModeCloud, map[string]string{"S46_SHARE_API_URL": server.URL, "S46_SHARE_VIEWER_URL": "https://share.test"})
+			service, _ := newTestService(t, api.Team{Name: "fixture", Endpoint: "https://fixture.s46.dev", Region: "EU-OPO", DefaultModel: api.DefaultModel}, config.ModeCloud, map[string]string{"S46_SHARE_API_URL": server.URL, "S46_SHARE_VIEWER_URL": "https://share.test"})
 			service.Harness = harness.NewRegistry(claude.New(), codex.New(), pi.New())
 			copyFixtureTree(t, tc.fixtureDir, filepath.Join(service.Config.Env["HOME"], tc.homeRel), service.Config.Env["HOME"])
 

@@ -7,7 +7,7 @@ import (
 )
 
 func FuzzReadJSON(f *testing.F) {
-	f.Add([]byte(`{"activeTeam":"acme","teams":{}}`))
+	f.Add([]byte(`{"activeTeam":"@s46/engineering","teams":{}}`))
 	f.Add([]byte(``))
 	f.Add([]byte(`not json`))
 	f.Fuzz(func(t *testing.T, input []byte) {

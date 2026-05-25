@@ -28,7 +28,7 @@ func resumeCommand(runtime Runtime, opts *options) *cobra.Command {
 			return runResume(cmd.Context(), app, args[0], target)
 		},
 	}
-	cmd.Flags().BoolVar(&remote, "remote", false, "resume on a remote S46 worker (default)")
+	cmd.Flags().BoolVar(&remote, "remote", false, "resume on a remote s46 worker (default)")
 	cmd.Flags().BoolVar(&local, "local", false, "materialize the session locally")
 	return cmd
 }

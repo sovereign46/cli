@@ -14,7 +14,7 @@ func disconnectCommand(runtime Runtime, opts *options) *cobra.Command {
 	var scope string
 	cmd := &cobra.Command{
 		Use:   "disconnect <team>",
-		Short: "remove S46 configuration for a team and harness",
+		Short: "remove s46 configuration for a team and harness",
 		Args:  exactArgs("s46 disconnect <team>", 1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := newApp(runtime, opts)

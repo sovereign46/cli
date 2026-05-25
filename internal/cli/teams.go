@@ -65,7 +65,7 @@ func teamsUseCommand(runtime Runtime, opts *options) *cobra.Command {
 type teamListEntry struct {
 	Name     string `json:"name"`
 	Active   bool   `json:"active"`
-	Lane     string `json:"lane"`
+	Region   string `json:"region"`
 	Harness  string `json:"harness"`
 	Model    string `json:"model"`
 	Endpoint string `json:"endpoint"`
@@ -98,7 +98,7 @@ func teamListEntries(cfg config.Config) []teamListEntry {
 		entries = append(entries, teamListEntry{
 			Name:     name,
 			Active:   name == cfg.ActiveTeam,
-			Lane:     team.Lane,
+			Region:   team.Region,
 			Harness:  strs.FirstNonEmpty(team.DefaultHarness, harness.DefaultName),
 			Model:    team.DefaultModel,
 			Endpoint: team.Endpoint,
@@ -109,13 +109,13 @@ func teamListEntries(cfg config.Config) []teamListEntry {
 
 func renderTeamsList(entries []teamListEntry) []string {
 	rows := make([][]string, 0, len(entries)+1)
-	rows = append(rows, []string{"ACTIVE", "TEAM", "LANE", "HARNESS", "MODEL", "ENDPOINT"})
+	rows = append(rows, []string{"ACTIVE", "TEAM", "REGION", "HARNESS", "MODEL", "ENDPOINT"})
 	for _, entry := range entries {
 		active := ""
 		if entry.Active {
 			active = "*"
 		}
-		rows = append(rows, []string{active, entry.Name, entry.Lane, entry.Harness, entry.Model, entry.Endpoint})
+		rows = append(rows, []string{active, entry.Name, entry.Region, entry.Harness, entry.Model, entry.Endpoint})
 	}
 	lines := []string{"[s46] connected teams:"}
 	lines = append(lines, output.Table(rows[0], rows[1:])...)

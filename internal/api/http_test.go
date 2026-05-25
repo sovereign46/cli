@@ -22,7 +22,7 @@ func TestHTTPClientWireShape(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Fatal(err)
 			}
-			if body.Email != "dscape@acme.s46.dev" || body.DeviceID != "dev-laptop" || body.DeviceName != "Dev laptop" {
+			if body.Email != "dscape@s46.dev" || body.DeviceID != "dev-laptop" || body.DeviceName != "Dev laptop" {
 				t.Fatalf("unexpected body: %#v", body)
 			}
 			w.WriteHeader(http.StatusAccepted)
@@ -35,12 +35,12 @@ func TestHTTPClientWireShape(t *testing.T) {
 			if body["deviceCode"] != "dev" || body["userHint"] != "" || len(body) != 1 {
 				t.Fatalf("unexpected body: %#v", body)
 			}
-			_ = json.NewEncoder(w).Encode(TokenSet{Account: "dscape@acme.s46.dev", DeviceID: "dev-laptop", AccessToken: "access", RefreshToken: "refresh", ExpiresAt: time.Now().Add(time.Hour).UTC()})
+			_ = json.NewEncoder(w).Encode(TokenSet{Account: "dscape@s46.dev", DeviceID: "dev-laptop", AccessToken: "access", RefreshToken: "refresh", ExpiresAt: time.Now().Add(time.Hour).UTC()})
 		case "/v1/me":
 			if r.Header.Get("Authorization") != "Bearer access" {
 				t.Fatalf("missing auth header: %s", r.Header.Get("Authorization"))
 			}
-			_ = json.NewEncoder(w).Encode(User{Email: "dscape@acme.s46.dev", Team: "acme"})
+			_ = json.NewEncoder(w).Encode(User{Email: "dscape@s46.dev", Team: "@s46/engineering"})
 		case "/v1/devices":
 			requireBearer(t, r)
 			_ = json.NewEncoder(w).Encode(map[string]any{"devices": []Device{{ID: "dev-laptop", Name: "Dev laptop", LastSeenAt: time.Now().UTC(), LastSeenIP: "203.0.113.9"}}})
@@ -50,32 +50,32 @@ func TestHTTPClientWireShape(t *testing.T) {
 				t.Fatalf("method = %s", r.Method)
 			}
 			w.WriteHeader(http.StatusNoContent)
-		case "/v1/teams/acme":
+		case "/v1/teams/@s46/engineering":
 			requireBearer(t, r)
-			_ = json.NewEncoder(w).Encode(Team{Name: "acme", Endpoint: "https://acme.s46.dev", Lane: "EU-OPO", Boxes: []string{"box-01.acme.s46.dev"}, DefaultModel: DefaultModel})
+			_ = json.NewEncoder(w).Encode(Team{Name: "@s46/engineering", Endpoint: "https://gateway.s46.dev", Region: "EU-OPO", WorkerHosts: []string{"worker-01.eu-opo.s46.dev"}, DefaultModel: DefaultModel})
 		case "/v1/sessions":
 			requireBearer(t, r)
-			if r.URL.Query().Get("team") != "acme" {
+			if r.URL.Query().Get("team") != "@s46/engineering" {
 				t.Fatalf("team query = %q", r.URL.Query().Get("team"))
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"sessions": []Session{{ID: "@dscape/auth-redirect-fix", State: "running", Location: "box-04.acme.s46.dev"}}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"sessions": []Session{{ID: "@dscape/auth-redirect-fix", State: "running", Location: "worker-04.eu-opo.s46.dev"}}})
 		case "/v1/sessions/@dscape/auth-redirect-fix/detach":
 			requireBearer(t, r)
-			requireTeamQuery(t, r, "acme")
-			requireSessionActionBody(t, r, "acme")
-			_ = json.NewEncoder(w).Encode(Session{ID: "@dscape/auth-redirect-fix", State: "running", Location: "box-04.acme.s46.dev"})
+			requireTeamQuery(t, r, "@s46/engineering")
+			requireSessionActionBody(t, r, "@s46/engineering")
+			_ = json.NewEncoder(w).Encode(Session{ID: "@dscape/auth-redirect-fix", State: "running", Location: "worker-04.eu-opo.s46.dev"})
 		case "/v1/sessions/@dscape/auth-redirect-fix/resume":
 			requireBearer(t, r)
-			requireTeamQuery(t, r, "acme")
-			_ = json.NewEncoder(w).Encode(Session{ID: "@dscape/auth-redirect-fix", State: "resumed", Location: "box-04.acme.s46.dev"})
+			requireTeamQuery(t, r, "@s46/engineering")
+			_ = json.NewEncoder(w).Encode(Session{ID: "@dscape/auth-redirect-fix", State: "resumed", Location: "worker-04.eu-opo.s46.dev"})
 		case "/v1/sessions/@dscape/auth-redirect-fix/attach":
 			requireBearer(t, r)
-			requireTeamQuery(t, r, "acme")
-			_ = json.NewEncoder(w).Encode(AttachResult{SessionID: "@dscape/auth-redirect-fix", URL: "wss://box-04.acme.s46.dev/session/auth-redirect-fix", Protocol: "websocket"})
+			requireTeamQuery(t, r, "@s46/engineering")
+			_ = json.NewEncoder(w).Encode(AttachResult{SessionID: "@dscape/auth-redirect-fix", URL: "wss://worker-04.eu-opo.s46.dev/session/auth-redirect-fix", Protocol: "websocket"})
 		case "/v1/sessions/@dscape/auth-redirect-fix/land":
 			requireBearer(t, r)
-			requireTeamQuery(t, r, "acme")
-			_ = json.NewEncoder(w).Encode(LandResult{ID: "@dscape/auth-redirect-fix", RanOn: []string{"box-04.acme.s46.dev"}})
+			requireTeamQuery(t, r, "@s46/engineering")
+			_ = json.NewEncoder(w).Encode(LandResult{ID: "@dscape/auth-redirect-fix", RanOn: []string{"worker-04.eu-opo.s46.dev"}})
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
@@ -90,7 +90,7 @@ func TestHTTPClientWireShape(t *testing.T) {
 	if client.Client.Timeout != DefaultHTTPTimeout {
 		t.Fatalf("timeout = %s", client.Client.Timeout)
 	}
-	device, err := client.StartDeviceLogin(context.Background(), DeviceLoginRequest{Email: "dscape@acme.s46.dev", DeviceID: "dev-laptop", DeviceName: "Dev laptop"})
+	device, err := client.StartDeviceLogin(context.Background(), DeviceLoginRequest{Email: "dscape@s46.dev", DeviceID: "dev-laptop", DeviceName: "Dev laptop"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestHTTPClientWireShape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if user.Team != "acme" {
+	if user.Team != "@s46/engineering" {
 		t.Fatalf("user = %#v", user)
 	}
 	devices, err := client.Devices(context.Background(), "access")
@@ -124,12 +124,12 @@ func TestHTTPClientWireShape(t *testing.T) {
 	if err := client.DeleteDevice(context.Background(), "dev-laptop", "access"); err != nil {
 		t.Fatal(err)
 	}
-	team, err := client.Team(context.Background(), "acme", TeamOptions{AccessToken: "access"})
+	team, err := client.Team(context.Background(), "@s46/engineering", TeamOptions{AccessToken: "access"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if team.Endpoint != server.URL || len(team.Boxes) != 1 || team.Boxes[0] != serverBase.Host {
-		t.Fatalf("team = %#v, want endpoint %q and box %q", team, server.URL, serverBase.Host)
+	if team.Endpoint != server.URL || len(team.WorkerHosts) != 1 || team.WorkerHosts[0] != serverBase.Host {
+		t.Fatalf("team = %#v, want endpoint %q and workerHost %q", team, server.URL, serverBase.Host)
 	}
 	sessions, err := client.Sessions(context.Background(), team, "access")
 	if err != nil {
@@ -231,7 +231,7 @@ func TestHTTPClientProductionURLsStayProduction(t *testing.T) {
 	if got := client.rewriteS46URL("/device"); got != "https://api.s46.dev/device" {
 		t.Fatalf("relative rewrite = %q", got)
 	}
-	if got := client.rewriteS46Location("box-04.acme.s46.dev"); got != "box-04.acme.s46.dev" {
+	if got := client.rewriteS46Location("worker-04.eu-opo.s46.dev"); got != "worker-04.eu-opo.s46.dev" {
 		t.Fatalf("location rewrite = %q", got)
 	}
 }

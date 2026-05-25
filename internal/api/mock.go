@@ -18,10 +18,10 @@ import (
 type MockFixtures struct {
 	Account         string
 	Team            string
-	Lane            string
+	Region          string
 	Mode            string
 	Endpoint        string
-	Boxes           []string
+	WorkerHosts     []string
 	DefaultBox      string
 	DefaultSession  string
 	DefaultTask     string
@@ -33,12 +33,12 @@ type MockFixtures struct {
 
 func defaultMockFixtures() MockFixtures {
 	return MockFixtures{
-		Account:         "dscape@acme.s46.dev",
-		Team:            "acme",
-		Lane:            "EU-OPO",
+		Account:         DefaultAccount,
+		Team:            DefaultTeam,
+		Region:          "EU-OPO",
 		Mode:            "cloud",
-		Boxes:           []string{"box-01", "box-02"},
-		DefaultBox:      "box-04.acme.s46.dev",
+		WorkerHosts:     []string{"worker-01", "worker-02"},
+		DefaultBox:      "worker-04.eu-opo.s46.dev",
 		DefaultSession:  "@dscape/auth-redirect-fix",
 		DefaultTask:     "Fix auth redirect handling",
 		DefaultSpend:    "€4.20",
@@ -141,11 +141,11 @@ func (c *MockClient) Team(ctx context.Context, name string, opts TeamOptions) (T
 		endpoint = fixtures.Endpoint
 	}
 	if endpoint == "" {
-		endpoint = fmt.Sprintf("https://%s.s46.dev", team)
+		endpoint = DefaultGatewayURL
 	}
-	lane := opts.Lane
-	if lane == "" {
-		lane = fixtures.Lane
+	region := opts.Region
+	if region == "" {
+		region = fixtures.Region
 	}
 	model := opts.DefaultModel
 	if model == "" {
@@ -154,8 +154,8 @@ func (c *MockClient) Team(ctx context.Context, name string, opts TeamOptions) (T
 	return Team{
 		Name:         team,
 		Endpoint:     endpoint,
-		Lane:         lane,
-		Boxes:        append([]string(nil), fixtures.Boxes...),
+		Region:       region,
+		WorkerHosts:  append([]string(nil), fixtures.WorkerHosts...),
 		DefaultModel: model,
 		Models:       c.modelList(),
 	}, nil
@@ -187,7 +187,7 @@ func (c *MockClient) Detach(ctx context.Context, req DetachRequest) (Session, er
 		State:    "queued",
 		Harness:  harness,
 		Location: "scheduler:job_mock",
-		Lane:     req.Team.Lane,
+		Region:   req.Team.Region,
 		Model:    req.Team.DefaultModel,
 		Age:      "0m",
 		Spent:    "€0.00",
@@ -272,8 +272,8 @@ func defaultMockSession(team Team) Session {
 	if team.Name == "" {
 		team.Name = defaults.Team
 	}
-	if team.Lane == "" {
-		team.Lane = defaults.Lane
+	if team.Region == "" {
+		team.Region = defaults.Region
 	}
 	if team.DefaultModel == "" {
 		team.DefaultModel = DefaultModel
@@ -283,7 +283,7 @@ func defaultMockSession(team Team) Session {
 		State:    "running",
 		Harness:  team.DefaultHarness(),
 		Location: defaults.DefaultBox,
-		Lane:     team.Lane,
+		Region:   team.Region,
 		Model:    team.DefaultModel,
 		Age:      "14h",
 		Spent:    defaults.DefaultSpend,
@@ -297,8 +297,8 @@ func (c *MockClient) fixtures() MockFixtures {
 		return defaults
 	}
 	fixtures := c.Fixtures
-	if len(fixtures.Boxes) == 0 {
-		fixtures.Boxes = defaults.Boxes
+	if len(fixtures.WorkerHosts) == 0 {
+		fixtures.WorkerHosts = defaults.WorkerHosts
 	}
 	if fixtures.DefaultBox == "" {
 		fixtures.DefaultBox = defaults.DefaultBox
@@ -337,5 +337,17 @@ func safeTokenPart(value string) string {
 
 func sanitizeTeam(value string) string {
 	value = strings.TrimSpace(strings.ToLower(value))
-	return regexp.MustCompile(`[^a-z0-9-]+`).ReplaceAllString(value, "")
+	if value == "" {
+		return ""
+	}
+	if !strings.HasPrefix(value, "@") || strings.Count(value, "/") != 1 {
+		return ""
+	}
+	parts := strings.Split(strings.TrimPrefix(value, "@"), "/")
+	org := regexp.MustCompile(`[^a-z0-9-]+`).ReplaceAllString(parts[0], "")
+	team := regexp.MustCompile(`[^a-z0-9-]+`).ReplaceAllString(parts[1], "")
+	if org == "" || team == "" {
+		return ""
+	}
+	return "@" + org + "/" + team
 }

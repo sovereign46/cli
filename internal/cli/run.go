@@ -15,7 +15,7 @@ func runCommand(runtime Runtime, opts *options) *cobra.Command {
 	var sessionID string
 	cmd := &cobra.Command{
 		Use:   "run <task>",
-		Short: "start a local s46 session",
+		Short: "run a task in a local s46 session",
 		Args:  minArgs("s46 run <task>", 1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := newApp(runtime, opts)
@@ -45,8 +45,8 @@ func runRun(ctx context.Context, app *app, task string, model string, sessionID 
 	}
 	return app.renderer.Lines(
 		fmt.Sprintf("[s46] session: %s", result.ID),
-		fmt.Sprintf("[s46] state:   %s locally", result.State),
-		fmt.Sprintf("[s46] harness: s46 (direct) · model: %s", result.Model),
+		fmt.Sprintf("[s46] state:   %s", result.State),
+		fmt.Sprintf("[s46] harness: s46 (local) · model: %s", result.Model),
 		fmt.Sprintf("[s46] task:    %s", result.Task),
 	)
 }

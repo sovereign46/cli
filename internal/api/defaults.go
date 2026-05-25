@@ -8,7 +8,7 @@ package api
 func DefaultSession(team Team) Session {
 	return Session{
 		Harness: team.DefaultHarness(),
-		Lane:    team.Lane,
+		Region:  team.Region,
 		Model:   team.DefaultModel,
 	}
 }

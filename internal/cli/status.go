@@ -24,7 +24,7 @@ type statusCheck struct {
 
 func statusChecks(ctx context.Context, app *app, teamName string, teamConfig config.TeamConfig) []statusCheck {
 	checks := []statusCheck{
-		{Name: "tenant", OK: tenantEndpointOK(app.runtime.Env, teamName, teamConfig.Endpoint), Message: teamConfig.Endpoint},
+		{Name: "gateway", OK: tenantEndpointOK(app.runtime.Env, teamName, teamConfig.Endpoint), Message: teamConfig.Endpoint},
 	}
 	harnessName := strs.FirstNonEmpty(teamConfig.DefaultHarness, harness.DefaultName)
 	teamConfig.DefaultHarness = harnessName
@@ -44,7 +44,7 @@ func statusChecks(ctx context.Context, app *app, teamName string, teamConfig con
 }
 
 func tenantEndpointOK(env map[string]string, teamName string, endpoint string) bool {
-	if endpoint == fmt.Sprintf("https://%s.s46.dev", teamName) {
+	if endpoint == api.DefaultGatewayURL {
 		return true
 	}
 	if endpoint == airplane.LocalGatewayURL {
@@ -94,7 +94,7 @@ type localServerStatus struct {
 func statusCommand(runtime Runtime, opts *options) *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
-		Short: "show active team, lane, harness, mode, and checks",
+		Short: "show active team, region, harness, mode, and checks",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := newApp(runtime, opts)
@@ -172,7 +172,7 @@ func renderStatusConcise(app *app, cfg config.Config, state config.State, team *
 	} else {
 		harnessName := strs.FirstNonEmpty(team.DefaultHarness, harness.DefaultName)
 		lines = append(lines,
-			fmt.Sprintf("[s46] team:    %s · %s · %s", cfg.ActiveTeam, team.Lane, cfg.ActiveMode()),
+			fmt.Sprintf("[s46] team:    %s · %s · %s", cfg.ActiveTeam, team.Region, cfg.ActiveMode()),
 			fmt.Sprintf("[s46] harness: %s · %s", harnessName, team.DefaultModel),
 			fmt.Sprintf("[s46] api:     %s", team.Endpoint),
 		)
@@ -202,7 +202,7 @@ func renderStatusVerbose(app *app, cfg config.Config, state config.State, team *
 	if team != nil {
 		lines = append(lines,
 			fmt.Sprintf("[s46] team:    %s", cfg.ActiveTeam),
-			fmt.Sprintf("[s46] lane:    %s", team.Lane),
+			fmt.Sprintf("[s46] region:    %s", team.Region),
 			fmt.Sprintf("[s46] mode:    %s", cfg.ActiveMode()),
 			fmt.Sprintf("[s46] harness: %s", strs.FirstNonEmpty(team.DefaultHarness, harness.DefaultName)),
 			fmt.Sprintf("[s46] model:   %s", team.DefaultModel),

@@ -10,21 +10,21 @@ Usage:
 
 Available Commands:
   airplane    manage local airplane mode
-  ask         ask the local S46 model for a command plan
+  ask         ask the local s46 model for a command plan
   connect     connect a team and configure a harness
-  detach      detach a session to an S46 worker job
+  detach      detach a session to an s46 worker job
   devices     list and revoke paired devices
-  disconnect  remove S46 configuration for a team and harness
+  disconnect  remove s46 configuration for a team and harness
   help        Help about any command
   login       authenticate with Sovereign46 using magic-link device auth
   logout      clear local credentials
   mode        view or set operating mode
   resume      resume a session remotely by default, or materialize it locally
-  run         start a local s46 session
+  run         run a task in a local s46 session
   session     session subcommands
   sessions    list local and remote sessions
   share       share a session as an encrypted static page
-  status      show active team, lane, harness, mode, and checks
+  status      show active team, region, harness, mode, and checks
   teams       list and switch connected teams
   token       print a bearer token for harness helpers
   update      check for updates using Homebrew-safe instructions

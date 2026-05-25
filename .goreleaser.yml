@@ -42,7 +42,7 @@ brews:
   - name: s46
     repository:
       owner: sovereign46
-      name: homebrew-tap
+      name: tap
     directory: Formula
     homepage: https://sovereign46.com
     description: Sovereign46 CLI control plane for coding-agent harnesses

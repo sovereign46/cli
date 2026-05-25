@@ -216,8 +216,8 @@ Temporary HOME: \$TMP_FOLDER/home
 Temporary binary: \$TMP_FOLDER/bin/s46
 API base: $api_base
 llama.cpp model dir: $S46_AIRPLANE_MODEL_DIR
-S46 logs: $S46_LOG_DIR
-S46 API repo: $api_repo_display
+s46 logs: $S46_LOG_DIR
+s46 API repo: $api_repo_display
 Seeded harness configs: $seeded_harnesses_display
 Share API: $share_api
 Share viewer: $share_viewer

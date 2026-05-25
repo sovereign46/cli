@@ -1,6 +1,6 @@
-[s46] auth:    dscape@acme.s46.dev
-[s46] team:    acme · EU-OPO · cloud
+[s46] auth:    dscape@s46.dev
+[s46] team:    @s46/engineering · EU-OPO · cloud
 [s46] harness: standard · s46/kimi-k2.6
-[s46] api:     https://acme.s46.dev
+[s46] api:     https://gateway.s46.dev
 [s46] checks:  3/3 ok
 [s46] sessions: 0

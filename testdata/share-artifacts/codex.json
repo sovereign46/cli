@@ -12,7 +12,7 @@
     "sharedBy": { "handle": "tester" },
     "harness": { "name": "codex" },
     "model": { "name": "gpt-5.4" },
-    "lane": { "id": "EU-OPO" },
+    "region": { "id": "EU-OPO" },
     "durationSeconds": 16,
     "usage": { "tokensIn": 0, "tokensOut": 0, "gpuSeconds": 0, "toolCalls": 0 }
   },

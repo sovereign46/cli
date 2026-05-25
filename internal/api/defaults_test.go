@@ -4,13 +4,13 @@ import "testing"
 
 func TestDefaultSessionUsesTeamFields(t *testing.T) {
 	t.Parallel()
-	team := Team{Name: "acme", Lane: "EU-OPO", DefaultModel: "s46/kimi-k2.6"}
+	team := Team{Name: "@s46/engineering", Region: "EU-OPO", DefaultModel: "s46/kimi-k2.6"}
 	session := DefaultSession(team)
 	if session.Harness != "claude-code" {
 		t.Errorf("Harness = %q, want claude-code", session.Harness)
 	}
-	if session.Lane != team.Lane {
-		t.Errorf("Lane = %q, want %q", session.Lane, team.Lane)
+	if session.Region != team.Region {
+		t.Errorf("Region = %q, want %q", session.Region, team.Region)
 	}
 	if session.Model != team.DefaultModel {
 		t.Errorf("Model = %q, want %q", session.Model, team.DefaultModel)
@@ -57,7 +57,7 @@ func TestLocalDevelopmentOrigin(t *testing.T) {
 		{"http://localhost:8080/path", "http://localhost:8080", true},
 		{"http://api.localhost:9000", "http://api.localhost:9000", true},
 		{"http://192.168.1.5:8080", "http://192.168.1.5:8080", true},
-		{"https://acme.s46.dev", "", false},
+		{"https://gateway.s46.dev", "", false},
 		{"", "", false},
 		{":not-a-url", "", false},
 		{"http://", "", false},

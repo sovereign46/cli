@@ -41,7 +41,7 @@ func SanitizeArtifact(artifact Artifact, redactor Redactor) Artifact {
 	artifact.Session.Harness.Name = redactor.String(artifact.Session.Harness.Name)
 	artifact.Session.Harness.Version = redactor.String(artifact.Session.Harness.Version)
 	artifact.Session.Model.Name = redactor.String(artifact.Session.Model.Name)
-	artifact.Session.Lane.ID = redactor.String(artifact.Session.Lane.ID)
+	artifact.Session.Region.ID = redactor.String(artifact.Session.Region.ID)
 	for i := range artifact.Steps {
 		artifact.Steps[i].Kind = redactor.String(artifact.Steps[i].Kind)
 		artifact.Steps[i].Body = redactor.StepText(artifact.Steps[i].Kind, artifact.Steps[i].Body)

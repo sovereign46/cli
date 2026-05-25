@@ -27,7 +27,7 @@ type askCommandResult struct {
 func askCommand(runtime Runtime, opts *options) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "ask <request>",
-		Short: "ask the local S46 model for a command plan",
+		Short: "ask the local s46 model for a command plan",
 		Example: strings.Join([]string{
 			`s46 ask "I just installed this; what should I do?"`,
 			`s46 ask "configure Codex for my team"`,
@@ -80,7 +80,7 @@ func ensureAskLocalRuntime(ctx context.Context, app *app) (airplane.Report, erro
 		return report, askLocalRuntimeError()
 	}
 	if err := app.renderer.Lines(
-		"[s46] ask uses the local S46 model.",
+		"[s46] ask uses the local s46 model.",
 		"[s46] local model setup is incomplete.",
 	); err != nil {
 		return report, err
@@ -103,7 +103,7 @@ func ensureAskLocalRuntime(ctx context.Context, app *app) (airplane.Report, erro
 }
 
 func askLocalRuntimeError() error {
-	return fmt.Errorf("ask uses the local S46 model\nlocal model setup is incomplete\nrun: s46 airplane setup")
+	return fmt.Errorf("ask uses the local s46 model\nlocal model setup is incomplete\nrun: s46 airplane setup")
 }
 
 func renderAskPlan(plan askpkg.Plan) []string {

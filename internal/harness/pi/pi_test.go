@@ -22,7 +22,7 @@ func TestPlanConnectPreservesProvidersAndAddsS46(t *testing.T) {
 	if err := os.WriteFile(modelsPath, []byte(`{"providers":{"ollama":{"baseUrl":"http://localhost:11434/v1"}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	team := api.Team{Name: "acme", Endpoint: "https://acme.s46.dev", Models: api.DefaultModelList(), DefaultModel: api.DefaultModel}
+	team := api.Team{Name: "@s46/engineering", Endpoint: "https://gateway.s46.dev", Models: api.DefaultModelList(), DefaultModel: api.DefaultModel}
 	plan, err := New().PlanConnect(context.Background(), harness.ConnectRequest{Env: env, Team: team, Model: api.DefaultModel})
 	if err != nil {
 		t.Fatal(err)
@@ -36,7 +36,7 @@ func TestPlanConnectPreservesProvidersAndAddsS46(t *testing.T) {
 		t.Fatalf("existing provider not preserved: %#v", providers)
 	}
 	s46 := providers["s46"].(map[string]any)
-	if s46["baseUrl"] != "https://acme.s46.dev/v1" || s46["api"] != "openai-completions" || s46["apiKey"] != "!s46 token --refresh" || s46["authHeader"] != true {
+	if s46["baseUrl"] != "https://gateway.s46.dev/v1" || s46["api"] != "openai-completions" || s46["apiKey"] != "!s46 token --refresh" || s46["authHeader"] != true {
 		t.Fatalf("unexpected s46 provider: %#v", s46)
 	}
 }
@@ -71,7 +71,7 @@ func TestPlanConnectLeavesPiSettingsAloneByDefault(t *testing.T) {
 	if err := os.WriteFile(settingsPath, []byte(`{"defaultProvider":"openai-codex","defaultModel":"gpt-5.5"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	team := api.Team{Name: "acme", Endpoint: "https://acme.s46.dev", Models: api.DefaultModelList(), DefaultModel: api.DefaultModel}
+	team := api.Team{Name: "@s46/engineering", Endpoint: "https://gateway.s46.dev", Models: api.DefaultModelList(), DefaultModel: api.DefaultModel}
 	plan, err := New().PlanConnect(context.Background(), harness.ConnectRequest{Env: env, Team: team, Model: api.DefaultModel})
 	if err != nil {
 		t.Fatal(err)
@@ -111,7 +111,7 @@ func TestPlanConnectCanSetPiDefaultModel(t *testing.T) {
 func TestStatusReportsMissingConfig(t *testing.T) {
 	home := t.TempDir()
 	env := map[string]string{"HOME": home}
-	checks := New().Status(context.Background(), harness.StatusRequest{Env: env, TeamName: "acme"})
+	checks := New().Status(context.Background(), harness.StatusRequest{Env: env, TeamName: "@s46/engineering"})
 	if len(checks) != 1 || checks[0].Name != "pi-config" || checks[0].OK {
 		t.Fatalf("expected missing-config failure, got %#v", checks)
 	}
@@ -120,7 +120,7 @@ func TestStatusReportsMissingConfig(t *testing.T) {
 func TestStatusReadsConfiguredFile(t *testing.T) {
 	home := t.TempDir()
 	env := map[string]string{"HOME": home}
-	team := api.Team{Name: "acme", Endpoint: "https://acme.s46.dev", Models: api.DefaultModelList(), DefaultModel: api.DefaultModel}
+	team := api.Team{Name: "@s46/engineering", Endpoint: "https://gateway.s46.dev", Models: api.DefaultModelList(), DefaultModel: api.DefaultModel}
 	plan, err := New().PlanConnect(context.Background(), harness.ConnectRequest{Env: env, Team: team, Model: api.DefaultModel})
 	if err != nil {
 		t.Fatal(err)
@@ -132,7 +132,7 @@ func TestStatusReadsConfiguredFile(t *testing.T) {
 	if err := os.WriteFile(modelsPath, plan.Files[0].Content, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	checks := New().Status(context.Background(), harness.StatusRequest{Env: env, TeamName: "acme", Endpoint: "https://acme.s46.dev", DefaultModel: api.DefaultModel})
+	checks := New().Status(context.Background(), harness.StatusRequest{Env: env, TeamName: "@s46/engineering", Endpoint: "https://gateway.s46.dev", DefaultModel: api.DefaultModel})
 	if len(checks) != 4 {
 		t.Fatalf("expected 4 checks, got %d: %#v", len(checks), checks)
 	}
@@ -154,7 +154,7 @@ func TestStatusFlagsWhenS46ProviderAbsent(t *testing.T) {
 	if err := os.WriteFile(modelsPath, []byte(`{"providers":{"ollama":{"baseUrl":"http://localhost:11434/v1"}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	checks := New().Status(context.Background(), harness.StatusRequest{Env: env, TeamName: "acme", Endpoint: "https://acme.s46.dev"})
+	checks := New().Status(context.Background(), harness.StatusRequest{Env: env, TeamName: "@s46/engineering", Endpoint: "https://gateway.s46.dev"})
 	for _, c := range checks {
 		if c.OK {
 			t.Errorf("check %s should fail when s46 provider missing: %#v", c.Name, c)

@@ -23,7 +23,7 @@ func TestHTTPClientWrapsTransportErrorAsCloudUnavailable(t *testing.T) {
 	}
 
 	client := NewHTTPClient(address)
-	_, err = client.Team(context.Background(), "acme", TeamOptions{})
+	_, err = client.Team(context.Background(), "@s46/engineering", TeamOptions{})
 	if err == nil {
 		t.Fatal("expected error against closed listener")
 	}
@@ -43,7 +43,7 @@ func TestHTTPClientDoesNotWrap2xxAsCloudUnavailable(t *testing.T) {
 	}))
 	defer server.Close()
 	client := NewHTTPClient(server.URL)
-	_, err := client.Team(context.Background(), "acme", TeamOptions{})
+	_, err := client.Team(context.Background(), "@s46/engineering", TeamOptions{})
 	if err == nil {
 		t.Fatal("expected 503 to surface as error")
 	}

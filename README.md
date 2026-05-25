@@ -2,7 +2,7 @@
 
 Sovereign46 CLI control plane for coding-agent harnesses.
 
-This repository implements the client-side command surface described on sovereign46.com. Backend calls, remote workers, model serving, and billing are mocked behind typed interfaces until the real Sovereign46 control plane exists.
+This repository implements the client-side command surface described on sovereign46.com. Cloud calls use the Sovereign46 API at `https://api.s46.dev`; production harness traffic uses `https://gateway.s46.dev` and org-scoped team slugs such as `@s46/engineering`.
 
 ## Development
 
@@ -17,7 +17,7 @@ go test ./...
 For local mock/test runs, swap the OS keychain for a file backend:
 
 ```sh
-S46_KEYRING_BACKEND=file go run ./cmd/s46 login --user dscape@acme.s46.dev --device-id dev-laptop
+S46_KEYRING_BACKEND=file go run ./cmd/s46 login --user dscape@s46.dev --device-id dev-laptop
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the sandboxed `make shell` flow. The server-facing HTTP contract is documented in [docs/api-contract.md](docs/api-contract.md).
@@ -30,8 +30,8 @@ s46 logout
 s46 whoami
 s46 token --refresh
 s46 devices [delete <device-id>]
-s46 connect <team> --harness=pi|claude-code|codex|standard
-s46 disconnect <team> [--harness=...]
+s46 connect @org/team --harness=pi|claude-code|codex|standard
+s46 disconnect @org/team [--harness=...]
 s46 teams list
 s46 teams use <team>
 s46 status [--verbose]
@@ -63,15 +63,15 @@ Global flags: `--config <path>`, `--json`, `--jsonl`, `--no-input`, `--verbose`,
 
 Secrets live in the OS keychain (`internal/keyring.Store`). The file keyring backend is test-only.
 
-Encrypted shares are uploaded to `S46_SHARE_API_URL` (default `https://gist.s46.dev`) and viewed at `S46_SHARE_VIEWER_URL` (default `https://share.s46.dev`). Writes are anonymous: the CLI keeps a generated anonymous install id in local state and solves a short proof-of-work challenge before uploads/updates. Revoke keys are stored only in local state so `s46 share revoke` can delete the blob later. `s46 sessions` lists supported local harness transcripts (Pi, Claude Code, and Codex) for the current project together with S46 state/API sessions, and `s46 share` with no argument shares the latest listed session. Use `s46 share --local --json` to build and validate the same local artifact without encrypting or uploading it. When the target matches a supported harness session id or JSONL path, `s46 share` asks that harness adapter to ingest the real local transcript, omitting private reasoning blocks and preserving user-visible messages plus tool calls/results.
+Encrypted shares are uploaded to `S46_SHARE_API_URL` (default `https://gist.s46.dev`) and viewed at `S46_SHARE_VIEWER_URL` (default `https://share.s46.dev`). Writes are anonymous: the CLI keeps a generated anonymous install id in local state and solves a short proof-of-work challenge before uploads/updates. Revoke keys are stored only in local state so `s46 share revoke` can delete the blob later. `s46 sessions` lists supported local harness transcripts (Pi, Claude Code, and Codex) for the current project together with s46 state/API sessions, and `s46 share` with no argument shares the latest listed session. Use `s46 share --local --json` to build and validate the same local artifact without encrypting or uploading it. When the target matches a supported harness session id or JSONL path, `s46 share` asks that harness adapter to ingest the real local transcript, omitting private reasoning blocks and preserving user-visible messages plus tool calls/results.
 
 `s46 connect` requires a valid login for cloud teams so the API can verify team access, then writes harness config to `~/.claude/settings.json`, `~/.codex/config.toml`, or `~/.pi/agent/models.json`. Existing files are merged and backed up with `.s46-backup-<timestamp>`. A connect failure that leaves files half-written is rolled back automatically.
 
 ## Airplane mode
 
-Airplane mode runs everything through a local `llama-server` (llama.cpp) + S46 gateway, with no cloud auth required.
+Airplane mode runs everything through a local `llama-server` (llama.cpp) + s46 gateway, with no cloud auth required.
 
-- `s46 airplane setup` installs llama.cpp, downloads or verifies the local GGUF model from the signed S46 registry at `models.s46.dev`, verifies the manifest signature and model checksum before any model probe or local gateway start, installs the verified gateway release from `sovereign46/api`, and starts `llama-server` with the recommended local coding settings.
+- `s46 airplane setup` installs llama.cpp, downloads or verifies the local GGUF model from the signed s46 registry at `models.s46.dev`, verifies the manifest signature and model checksum before any model probe or local gateway start, installs the verified gateway release from `sovereign46/api`, and starts `llama-server` with the recommended local coding settings.
 - `s46 airplane mode on` snapshots harness files, rewrites them for the local gateway at `http://127.0.0.1:8080`, and creates a `local` team if none exists. `off` restores the snapshot.
 - In airplane mode, `s46 token --refresh` returns a local token; cloud-only commands fail fast.
 - Output is prefixed `[s46✈]` (human) or undecorated (`--json`).

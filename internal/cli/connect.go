@@ -16,7 +16,7 @@ import (
 
 func connectCommand(runtime Runtime, opts *options) *cobra.Command {
 	var harnessName string
-	var lane string
+	var region string
 	var model string
 	var endpoint string
 	var mode string
@@ -33,7 +33,7 @@ func connectCommand(runtime Runtime, opts *options) *cobra.Command {
 			return app.withLock(cmd.Context(), func() error {
 				req := connectRequest{
 					Harness:  harnessName,
-					Lane:     lane,
+					Region:   region,
 					Model:    model,
 					Endpoint: endpoint,
 					Mode:     mode,
@@ -60,8 +60,8 @@ func connectCommand(runtime Runtime, opts *options) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&harnessName, "harness", "", "harness to configure: pi, claude-code, codex, standard")
-	cmd.Flags().StringVar(&lane, "lane", "", "sovereign lane")
-	cmd.Flags().StringVar(&model, "model", "", "default S46 model")
+	cmd.Flags().StringVar(&region, "region", "", "sovereign region")
+	cmd.Flags().StringVar(&model, "model", "", "default s46 model")
 	cmd.Flags().StringVar(&endpoint, "endpoint", "", "tenant endpoint")
 	cmd.Flags().StringVar(&mode, "mode", "", "operating mode")
 	cmd.Flags().StringVar(&scope, "scope", "user", "settings scope for supported harnesses: user or project")
@@ -69,13 +69,13 @@ func connectCommand(runtime Runtime, opts *options) *cobra.Command {
 }
 
 func connectFlagChanged(cmd *cobra.Command) bool {
-	return anyFlagChanged(cmd, "harness", "lane", "model", "endpoint", "mode", "scope")
+	return anyFlagChanged(cmd, "harness", "region", "model", "endpoint", "mode", "scope")
 }
 
 type connectRequest struct {
 	TeamName string
 	Harness  string
-	Lane     string
+	Region   string
 	Model    string
 	Endpoint string
 	Mode     string
@@ -174,7 +174,7 @@ func fillMissingTeamForConnect(cfg config.Config, req connectRequest) (connectRe
 func connectResult(team api.Team, harnessName, model, mode string, plan harness.Plan) map[string]any {
 	return map[string]any{
 		"team":       team.Name,
-		"lane":       team.Lane,
+		"region":     team.Region,
 		"mode":       mode,
 		"harness":    harnessName,
 		"model":      model,
@@ -247,16 +247,28 @@ func connectTeam(ctx context.Context, app *app, mode string, existing config.Tea
 	if mode == config.ModeAirplane {
 		return localAirplaneTeam(req.TeamName, existing, req), nil
 	}
+	if !isCanonicalCloudTeam(req.TeamName) {
+		return api.Team{}, fmt.Errorf("invalid team %q; expected @org/team", req.TeamName)
+	}
 	accessToken, err := app.requireAccessToken(ctx)
 	if err != nil {
 		return api.Team{}, err
 	}
 	return app.api.Team(ctx, req.TeamName, api.TeamOptions{
 		Endpoint:     strs.FirstNonEmpty(req.Endpoint, existing.Endpoint),
-		Lane:         strs.FirstNonEmpty(req.Lane, existing.Lane),
+		Region:       strs.FirstNonEmpty(req.Region, existing.Region),
 		DefaultModel: strs.FirstNonEmpty(req.Model, existing.DefaultModel, api.DefaultModel),
 		AccessToken:  accessToken,
 	})
+}
+
+func isCanonicalCloudTeam(name string) bool {
+	name = strings.TrimSpace(name)
+	if !strings.HasPrefix(name, "@") || strings.Count(name, "/") != 1 {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(name, "@"), "/")
+	return parts[0] != "" && parts[1] != ""
 }
 
 func renderConnectApplied(app *app, team api.Team, plan harness.Plan, applied harness.AppliedPlan, result map[string]any) error {
@@ -265,7 +277,7 @@ func renderConnectApplied(app *app, team api.Team, plan harness.Plan, applied ha
 	}
 	lines := []string{
 		fmt.Sprintf("[s46] %s", plan.Summary),
-		fmt.Sprintf("[s46] team:    %s · lane: %s · boxes: %s", team.Name, team.Lane, strings.Join(team.Boxes, ", ")),
+		fmt.Sprintf("[s46] team:    %s · region: %s · workers: %s", team.Name, team.Region, strings.Join(team.WorkerHosts, ", ")),
 	}
 	for _, file := range applied.Files {
 		lines = append(lines, fmt.Sprintf("[s46] wrote %s", file.Path))

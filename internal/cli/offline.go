@@ -147,7 +147,7 @@ func localBaseURL(raw string) string {
 
 func localAPIUnavailableSuggestion(env map[string]string, baseURL string) string {
 	lines := []string{
-		fmt.Sprintf("local S46 API is not running at %s.", baseURL),
+		fmt.Sprintf("local s46 API is not running at %s.", baseURL),
 		"Start the API server, or unset S46_API_BASE_URL/S46_DEV_BASE_URL to use the cloud API.",
 	}
 	if repo := strings.TrimSpace(env["S46_API_REPO"]); repo != "" {

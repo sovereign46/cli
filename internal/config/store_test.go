@@ -17,8 +17,8 @@ func TestStoreLoadSaveConfigAndState(t *testing.T) {
 	store := NewStore(env, "")
 
 	cfg := DefaultConfig()
-	cfg.ActiveTeam = "acme"
-	cfg.Teams["acme"] = TeamConfig{Endpoint: "https://acme.s46.dev", Lane: "EU-OPO", DefaultHarness: "claude-code", DefaultModel: api.DefaultModel}
+	cfg.ActiveTeam = "@s46/engineering"
+	cfg.Teams["@s46/engineering"] = TeamConfig{Endpoint: "https://gateway.s46.dev", Region: "EU-OPO", DefaultHarness: "claude-code", DefaultModel: api.DefaultModel}
 	if err := store.SaveConfig(cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -26,12 +26,12 @@ func TestStoreLoadSaveConfigAndState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loadedCfg.ActiveTeam != "acme" || loadedCfg.Teams["acme"].Endpoint != "https://acme.s46.dev" {
+	if loadedCfg.ActiveTeam != "@s46/engineering" || loadedCfg.Teams["@s46/engineering"].Endpoint != "https://gateway.s46.dev" {
 		t.Fatalf("unexpected config: %#v", loadedCfg)
 	}
 
 	state := DefaultState()
-	state.CurrentUser = "dscape@acme.s46.dev"
+	state.CurrentUser = "dscape@s46.dev"
 	state.Authenticated = true
 	state.Sessions["@dscape/test"] = api.Session{ID: "@dscape/test", State: "running"}
 	if err := store.SaveState(state); err != nil {
@@ -55,33 +55,33 @@ func TestDisplayPath(t *testing.T) {
 
 func TestConfigCloneDoesNotShareMutableState(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.ActiveTeam = "acme"
-	cfg.Teams["acme"] = TeamConfig{
-		Endpoint: "https://acme.s46.dev",
-		Boxes:    []string{"box-01"},
-		Models:   []string{"model-01"},
+	cfg.ActiveTeam = "@s46/engineering"
+	cfg.Teams["@s46/engineering"] = TeamConfig{
+		Endpoint:    "https://gateway.s46.dev",
+		WorkerHosts: []string{"worker-01"},
+		Models:      []string{"model-01"},
 		APISnapshot: api.Team{
-			Boxes:  []string{"api-box-01"},
-			Models: []string{"api-model-01"},
+			WorkerHosts: []string{"api-worker-01"},
+			Models:      []string{"api-model-01"},
 		},
 		HarnessSnapshot: &HarnessSnapshot{Files: []HarnessFileSnapshot{{Path: "settings.json"}}},
 	}
 
 	clone := cfg.Clone()
-	team := clone.Teams["acme"]
-	team.Boxes[0] = "box-02"
+	team := clone.Teams["@s46/engineering"]
+	team.WorkerHosts[0] = "worker-02"
 	team.Models[0] = "model-02"
-	team.APISnapshot.Boxes[0] = "api-box-02"
+	team.APISnapshot.WorkerHosts[0] = "api-worker-02"
 	team.APISnapshot.Models[0] = "api-model-02"
 	team.HarnessSnapshot.Files[0].Path = "other.json"
-	clone.Teams["acme"] = team
-	delete(clone.Teams, "acme")
+	clone.Teams["@s46/engineering"] = team
+	delete(clone.Teams, "@s46/engineering")
 
-	original := cfg.Teams["acme"]
-	if _, ok := cfg.Teams["acme"]; !ok {
+	original := cfg.Teams["@s46/engineering"]
+	if _, ok := cfg.Teams["@s46/engineering"]; !ok {
 		t.Fatalf("clone map shared with original")
 	}
-	if original.Boxes[0] != "box-01" || original.Models[0] != "model-01" || original.APISnapshot.Boxes[0] != "api-box-01" || original.APISnapshot.Models[0] != "api-model-01" || original.HarnessSnapshot.Files[0].Path != "settings.json" {
+	if original.WorkerHosts[0] != "worker-01" || original.Models[0] != "model-01" || original.APISnapshot.WorkerHosts[0] != "api-worker-01" || original.APISnapshot.Models[0] != "api-model-01" || original.HarnessSnapshot.Files[0].Path != "settings.json" {
 		t.Fatalf("clone shared nested mutable state: %#v", original)
 	}
 }

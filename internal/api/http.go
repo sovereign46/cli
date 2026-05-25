@@ -116,8 +116,8 @@ func (c *HTTPClient) Team(ctx context.Context, name string, opts TeamOptions) (T
 	if opts.Endpoint != "" {
 		query.Set("endpoint", opts.Endpoint)
 	}
-	if opts.Lane != "" {
-		query.Set("lane", opts.Lane)
+	if opts.Region != "" {
+		query.Set("region", opts.Region)
 	}
 	if opts.DefaultModel != "" {
 		query.Set("defaultModel", opts.DefaultModel)
@@ -129,8 +129,8 @@ func (c *HTTPClient) Team(ctx context.Context, name string, opts TeamOptions) (T
 	var team Team
 	err := c.do(ctx, http.MethodGet, endpoint, opts.AccessToken, nil, &team)
 	team.Endpoint = c.rewriteS46URL(team.Endpoint)
-	for i := range team.Boxes {
-		team.Boxes[i] = c.rewriteS46Location(team.Boxes[i])
+	for i := range team.WorkerHosts {
+		team.WorkerHosts[i] = c.rewriteS46Location(team.WorkerHosts[i])
 	}
 	return team, err
 }

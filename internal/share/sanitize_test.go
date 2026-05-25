@@ -15,7 +15,7 @@ func TestBuildArtifactSanitizesTaskAndHome(t *testing.T) {
 		Model:    "s46/qwen3-coder",
 		Location: "/Users/nuno/work/repo",
 		Task:     "fix this\nS46_TOKEN=super-secret\nAuthorization: Bearer abc.def.ghi\n/Users/nuno/work/repo/.env",
-	}, BuildOptions{TeamName: "acme", User: "nuno@example.com", Home: "/Users/nuno"})
+	}, BuildOptions{TeamName: "@s46/engineering", User: "nuno@example.com", Home: "/Users/nuno"})
 
 	encoded := artifact.Session.Task + "\n" + artifact.Steps[0].Body + "\n" + artifact.Session.Location
 	for _, leak := range []string{"super-secret", "abc.def.ghi", "/Users/nuno"} {

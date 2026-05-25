@@ -49,11 +49,11 @@ func (s Service) startGateway(assumeVerifiedModel bool) error {
 		return err
 	}
 	if s.gatewayResponding(ctx) {
-		return fmt.Errorf("local S46 gateway at %s is running but is not airplane-ready; run `s46 airplane setup` to restart it in airplane mode", s.gatewayURL())
+		return fmt.Errorf("local s46 gateway at %s is running but is not airplane-ready; run `s46 airplane setup` to restart it in airplane mode", s.gatewayURL())
 	}
 	command, ok := s.gatewayCommand()
 	if !ok {
-		return fmt.Errorf("local S46 gateway is not running and no start command was found; run setup to install it or set S46_API_BINARY/S46_API_REPO")
+		return fmt.Errorf("local s46 gateway is not running and no start command was found; run setup to install it or set S46_API_BINARY/S46_API_REPO")
 	}
 	cmd := exec.Command(command.Path, command.Args...)
 	cmd.Dir = command.Dir

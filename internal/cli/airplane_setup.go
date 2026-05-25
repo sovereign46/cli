@@ -102,8 +102,8 @@ func runAirplaneSetupWithOptions(ctx context.Context, app *app, options airplane
 	}
 	if checkOK(report, "llamacpp-installed") && checkOK(report, "model-downloaded") && checkOK(report, "llamacpp-running") && missingCheck(report, "llamacpp-model") {
 		if err := app.renderer.Lines(
-			"[s46] llama-server is running but not serving the verified S46 model.",
-			"[s46] Stop the existing llama-server and rerun `s46 airplane setup` so S46 can start the signed model.",
+			"[s46] llama-server is running but not serving the verified s46 model.",
+			"[s46] Stop the existing llama-server and rerun `s46 airplane setup` so s46 can start the signed model.",
 		); err != nil {
 			return report, err
 		}
@@ -141,14 +141,14 @@ func runAirplaneSetupWithOptions(ctx context.Context, app *app, options airplane
 	}
 	if checkOK(report, "llamacpp-model") && checkOK(report, "llamacpp-settings") && missingCheck(report, "local-gateway") {
 		if _, ok := service.GatewayStartDescription(); !ok && service.GatewayDownloadAvailable() {
-			if yes, err := confirmAirplaneSetup(app, options, fmt.Sprintf("[s46] Local S46 gateway is not installed.\n[s46] Install %s? [Y/n] ", service.GatewayInstallDescription()), true); err != nil {
+			if yes, err := confirmAirplaneSetup(app, options, fmt.Sprintf("[s46] Local s46 gateway is not installed.\n[s46] Install %s? [Y/n] ", service.GatewayInstallDescription()), true); err != nil {
 				return report, err
 			} else if yes {
-				if err := app.renderer.Lines("[s46] installing local S46 gateway..."); err != nil {
+				if err := app.renderer.Lines("[s46] installing local s46 gateway..."); err != nil {
 					return report, err
 				}
 				if err := service.InstallGateway(ctx); err != nil {
-					return report, fmt.Errorf("failed to install local S46 gateway: %w", err)
+					return report, fmt.Errorf("failed to install local s46 gateway: %w", err)
 				}
 				changed = true
 				report = service.CheckAssumingVerifiedModel(ctx)
@@ -157,20 +157,20 @@ func runAirplaneSetupWithOptions(ctx context.Context, app *app, options airplane
 	}
 	if checkOK(report, "llamacpp-model") && checkOK(report, "llamacpp-settings") && missingCheck(report, "local-gateway") {
 		if description, ok := service.GatewayStartDescription(); ok {
-			if yes, err := confirmAirplaneSetup(app, options, fmt.Sprintf("[s46] Local S46 gateway is available as %s.\n[s46] Start local gateway now? [Y/n] ", description), true); err != nil {
+			if yes, err := confirmAirplaneSetup(app, options, fmt.Sprintf("[s46] Local s46 gateway is available as %s.\n[s46] Start local gateway now? [Y/n] ", description), true); err != nil {
 				return report, err
 			} else if yes {
-				if err := app.renderer.Lines("[s46] starting local S46 gateway..."); err != nil {
+				if err := app.renderer.Lines("[s46] starting local s46 gateway..."); err != nil {
 					return report, err
 				}
 				if err := service.StartGatewayAssumingVerifiedModel(); err != nil {
-					return report, fmt.Errorf("failed to start local S46 gateway: %w", err)
+					return report, fmt.Errorf("failed to start local s46 gateway: %w", err)
 				}
 				changed = true
 				report = waitForAirplaneCheckAssumingVerifiedModel(ctx, service, "local-gateway", 30*time.Second)
 			}
 		} else if err := app.renderer.Lines(
-			"[s46] Local S46 gateway is not installed or running.",
+			"[s46] Local s46 gateway is not installed or running.",
 			"[s46] In development, set S46_API_REPO=/path/to/api or use make shell with ../s46-api present.",
 			"[s46] In production, connect to the network and rerun setup to install the verified gateway release.",
 			"[s46] Or set S46_API_BINARY=/path/to/s46-gateway.",
@@ -258,7 +258,7 @@ func renderManualModelDownloadInstructions(report airplane.Report, reason string
 		"[s46] " + reason,
 		fmt.Sprintf("[s46] Download metadata: %s", modelURL),
 		fmt.Sprintf("[s46] Automatic setup verifies the signed manifest and model checksum before writing or trusting: %s", report.ModelPath),
-		fmt.Sprintf("[s46] Or set S46_LOCAL_MODEL_PATH=/path/to/%s and rerun `s46 airplane setup`; the file must match the signed S46 manifest.", airplane.GGUFModelFile),
+		fmt.Sprintf("[s46] Or set S46_LOCAL_MODEL_PATH=/path/to/%s and rerun `s46 airplane setup`; the file must match the signed s46 manifest.", airplane.GGUFModelFile),
 	}
 }
 
@@ -284,7 +284,7 @@ func offerAirplaneGatewayRestart(ctx context.Context, app *app, service airplane
 		return report, false, err
 	}
 	if !canRestartAirplaneGateway(listener) {
-		if err := app.renderer.Lines("[s46] Setup will not stop an unknown or non-S46 process automatically."); err != nil {
+		if err := app.renderer.Lines("[s46] Setup will not stop an unknown or non-s46 process automatically."); err != nil {
 			return report, false, err
 		}
 		return report, false, nil
@@ -295,29 +295,29 @@ func offerAirplaneGatewayRestart(ctx context.Context, app *app, service airplane
 		}
 		return report, false, nil
 	}
-	if yes, err := confirmAirplaneSetup(app, options, "[s46] Restart the local S46 gateway in airplane mode now? [Y/n] ", true); err != nil {
+	if yes, err := confirmAirplaneSetup(app, options, "[s46] Restart the local s46 gateway in airplane mode now? [Y/n] ", true); err != nil {
 		return report, false, err
 	} else if !yes {
 		return report, false, nil
 	}
-	if err := app.renderer.Lines("[s46] stopping local S46 gateway..."); err != nil {
+	if err := app.renderer.Lines("[s46] stopping local s46 gateway..."); err != nil {
 		return report, false, err
 	}
 	if err := stopListeningProcess(app.runtime.Env, report.GatewayURL, listener.PID, 5*time.Second); err != nil {
-		return report, false, fmt.Errorf("failed to stop local S46 gateway: %w", err)
+		return report, false, fmt.Errorf("failed to stop local s46 gateway: %w", err)
 	}
-	if err := app.renderer.Lines("[s46] starting local S46 gateway..."); err != nil {
+	if err := app.renderer.Lines("[s46] starting local s46 gateway..."); err != nil {
 		return report, false, err
 	}
 	if err := service.StartGatewayAssumingVerifiedModel(); err != nil {
-		return report, false, fmt.Errorf("failed to start local S46 gateway: %w", err)
+		return report, false, fmt.Errorf("failed to start local s46 gateway: %w", err)
 	}
 	return waitForAirplaneCheckAssumingVerifiedModel(ctx, service, "local-gateway", 30*time.Second), true, nil
 }
 
 func renderAirplaneGatewayConflict(gatewayURL string, listener listeningProcessStatus) []string {
 	return []string{
-		fmt.Sprintf("[s46] Local S46 gateway is already running at %s, but it is not airplane-ready.", gatewayURL),
+		fmt.Sprintf("[s46] Local s46 gateway is already running at %s, but it is not airplane-ready.", gatewayURL),
 		"[s46] This usually means another s46-gateway process owns the port without the local llama.cpp worker configured.",
 		renderAirplaneGatewayProcess(listener),
 	}
@@ -789,7 +789,7 @@ func prepareAirplaneRuntime(ctx context.Context, app *app, service airplane.Serv
 	}
 	if !checkOK(report, "local-gateway") {
 		if err := startGatewayForReport(service, report); err != nil {
-			return fmt.Errorf("could not start local S46 gateway: %w", err)
+			return fmt.Errorf("could not start local s46 gateway: %w", err)
 		}
 		time.Sleep(500 * time.Millisecond)
 		report = service.CheckAssumingVerifiedModel(ctx)
@@ -818,10 +818,10 @@ func startAirplaneRuntime(ctx context.Context, app *app, service airplane.Servic
 		return fmt.Errorf("llama-server did not become ready; run `s46 airplane setup`")
 	}
 	if err := service.StartGatewayAssumingVerifiedModel(); err != nil {
-		return fmt.Errorf("could not start local S46 gateway: %w", err)
+		return fmt.Errorf("could not start local s46 gateway: %w", err)
 	}
 	if !service.SetupChecksSkipped() && !waitForGatewayReady(ctx, service, 30*time.Second) {
-		return fmt.Errorf("local S46 gateway did not become ready; check ~/.cache/s46/s46-gateway-airplane.log or rerun `s46 airplane setup`")
+		return fmt.Errorf("local s46 gateway did not become ready; check ~/.cache/s46/s46-gateway-airplane.log or rerun `s46 airplane setup`")
 	}
 	return nil
 }
@@ -943,8 +943,8 @@ func localAirplaneTeam(teamName string, existing config.TeamConfig, req connectR
 	return api.Team{
 		Name:         teamName,
 		Endpoint:     strs.FirstNonEmpty(req.Endpoint, airplane.LocalGatewayURL),
-		Lane:         strs.FirstNonEmpty(req.Lane, existing.Lane, "local"),
-		Boxes:        []string{"localhost"},
+		Region:       strs.FirstNonEmpty(req.Region, existing.Region, "local"),
+		WorkerHosts:  []string{"localhost"},
 		DefaultModel: strs.FirstNonEmpty(req.Model, airplane.LocalModelID),
 		Models:       []string{airplane.LocalModelID},
 	}
@@ -961,8 +961,8 @@ func cloudTeamSnapshot(teamName string, teamConfig config.TeamConfig) (api.Team,
 	if snapshot.Name == "" {
 		snapshot.Name = teamName
 	}
-	if snapshot.Lane == "" {
-		snapshot.Lane = teamConfig.Lane
+	if snapshot.Region == "" {
+		snapshot.Region = teamConfig.Region
 	}
 	if snapshot.DefaultModel == "" || snapshot.DefaultModel == airplane.LocalModelID {
 		snapshot.DefaultModel = api.DefaultModel
@@ -979,9 +979,9 @@ func restoreCloudTeamConfig(teamName string, teamConfig config.TeamConfig) (conf
 		return config.TeamConfig{}, false
 	}
 	teamConfig.Endpoint = snapshot.Endpoint
-	teamConfig.Lane = strs.FirstNonEmpty(snapshot.Lane, teamConfig.Lane)
+	teamConfig.Region = strs.FirstNonEmpty(snapshot.Region, teamConfig.Region)
 	teamConfig.DefaultModel = strs.FirstNonEmpty(snapshot.DefaultModel, api.DefaultModel)
-	teamConfig.Boxes = snapshot.Boxes
+	teamConfig.WorkerHosts = snapshot.WorkerHosts
 	teamConfig.Models = snapshot.Models
 	teamConfig.APISnapshot = snapshot
 	return teamConfig, true

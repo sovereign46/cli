@@ -83,10 +83,10 @@ func BuildArtifact(source Source, fallback api.Session, opts share.BuildOptions)
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	id := First(source.ID, fallback.ID, "S46 session")
+	id := First(source.ID, fallback.ID, "s46 session")
 	model := First(source.Model, fallback.Model, api.DefaultModel)
 	harnessName := First(source.Harness, fallback.Harness, "s46")
-	lane := First(fallback.Lane, "S46")
+	region := First(fallback.Region, "s46")
 	status := statusFor(fallback.State)
 	if status == "" {
 		status = "finished"
@@ -105,7 +105,7 @@ func BuildArtifact(source Source, fallback api.Session, opts share.BuildOptions)
 			SharedBy:        sharedBy(opts.User),
 			Harness:         share.HarnessInfo{Name: harnessName},
 			Model:           share.ModelInfo{Name: model},
-			Lane:            share.LaneInfo{ID: lane},
+			Region:          share.RegionInfo{ID: region},
 			DurationSeconds: source.DurationSeconds,
 			Usage:           source.Usage,
 		},
@@ -504,7 +504,7 @@ func titleFor(id string, task string) string {
 			return line
 		}
 	}
-	return First(id, "S46 session")
+	return First(id, "s46 session")
 }
 
 func statusFor(state string) string {

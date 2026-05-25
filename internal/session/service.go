@@ -74,7 +74,7 @@ type RunResult struct {
 	Location string `json:"location"`
 	Harness  string `json:"harness"`
 	Model    string `json:"model"`
-	Lane     string `json:"lane"`
+	Region   string `json:"region"`
 }
 
 type ListedSession struct {
@@ -179,7 +179,7 @@ func (s Service) localSessionEntries(ctx context.Context, ctxState workspaceCont
 				State:    "local",
 				Harness:  firstNonEmpty(local.Harness, ctxState.TeamConfig.DefaultHarness, harness.DefaultName),
 				Location: firstNonEmpty(local.CWD, "local"),
-				Lane:     firstNonEmpty(ctxState.Team.Lane, "local"),
+				Region:   firstNonEmpty(ctxState.Team.Region, "local"),
 				Model:    firstNonEmpty(local.Model, ctxState.Team.DefaultModel, ctxState.TeamConfig.DefaultModel, api.DefaultModel),
 				Age:      ageSince(updatedAt, now),
 				Spent:    formatCostUSD(local.CostUSD),
@@ -580,8 +580,8 @@ func (s Service) Run(ctx context.Context, task string, model string, sessionID s
 	if ctxState.Config.ActiveMode() == config.ModeAirplane {
 		location = "localhost"
 	}
-	result := RunResult{ID: sessionID, Task: task, State: "mocked", Location: location, Harness: "s46", Model: model, Lane: ctxState.Team.Lane}
-	ctxState.State.Sessions[sessionID] = api.Session{ID: sessionID, State: "mocked", Harness: "s46", Location: location, Lane: ctxState.Team.Lane, Model: model, Age: "0m", Spent: "€0.00", Task: task}
+	result := RunResult{ID: sessionID, Task: task, State: "local", Location: location, Harness: "s46", Model: model, Region: ctxState.Team.Region}
+	ctxState.State.Sessions[sessionID] = api.Session{ID: sessionID, State: "local", Harness: "s46", Location: location, Region: ctxState.Team.Region, Model: model, Age: "0m", Spent: "€0.00", Task: task}
 	if err := s.Config.SaveState(ctxState.State); err != nil {
 		return RunResult{}, err
 	}
@@ -612,8 +612,8 @@ func (s Service) relaxedContextState() (workspaceContext, bool, error) {
 	if stateErr != nil {
 		return workspaceContext{}, false, stateErr
 	}
-	teamConfig := config.TeamConfig{Lane: "local", DefaultModel: api.DefaultModel}
-	team := api.Team{Name: cfg.ActiveTeam, Lane: "local", DefaultModel: api.DefaultModel}
+	teamConfig := config.TeamConfig{Region: "local", DefaultModel: api.DefaultModel}
+	team := api.Team{Name: cfg.ActiveTeam, Region: "local", DefaultModel: api.DefaultModel}
 	return workspaceContext{Config: cfg, State: state, TeamName: cfg.ActiveTeam, TeamConfig: teamConfig, Team: team, Mode: cfg.ActiveMode()}, false, nil
 }
 
@@ -643,8 +643,8 @@ func mergeListedSession(preferred, fallback ListedSession) ListedSession {
 	if preferred.Location == "" {
 		preferred.Location = fallback.Location
 	}
-	if preferred.Lane == "" {
-		preferred.Lane = fallback.Lane
+	if preferred.Region == "" {
+		preferred.Region = fallback.Region
 	}
 	if preferred.Model == "" {
 		preferred.Model = fallback.Model

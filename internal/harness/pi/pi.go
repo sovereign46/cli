@@ -88,7 +88,7 @@ func (a Adapter) PlanConnect(ctx context.Context, req harness.ConnectRequest) (h
 		"add or replace providers.s46 in Pi models.json",
 		fmt.Sprintf("set baseUrl to %s/v1", req.Team.Endpoint),
 		"set apiKey to shell command '!s46 token --refresh'",
-		fmt.Sprintf("register %d S46 models", len(req.Team.Models)),
+		fmt.Sprintf("register %d s46 models", len(req.Team.Models)),
 	}
 	files := []harness.FilePlan{{
 		Path:        path,

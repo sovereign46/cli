@@ -24,7 +24,7 @@ func (a Adapter) PlanConnect(ctx context.Context, req harness.ConnectRequest) (h
 		Env:     req.Env,
 		Summary: "harness: s46 (direct runner; no third-party harness config)",
 		Operations: []string{
-			"store team, lane, endpoint, default model, and direct-runner harness in s46 config",
+			"store team, region, endpoint, default model, and direct-runner harness in s46 config",
 			"no external harness files will be written",
 		},
 		Files: nil,

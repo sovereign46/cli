@@ -14,7 +14,7 @@ func detachCommand(runtime Runtime, opts *options) *cobra.Command {
 	var harnessName string
 	cmd := &cobra.Command{
 		Use:   "detach <session>",
-		Short: "detach a session to an S46 worker job",
+		Short: "detach a session to an s46 worker job",
 		Args:  exactArgs("s46 detach <session>", 1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := newApp(runtime, opts)

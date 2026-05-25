@@ -7,6 +7,9 @@ import (
 
 const (
 	DefaultModel       = "s46/kimi-k2.6"
+	DefaultTeam        = "@s46/engineering"
+	DefaultAccount     = "dscape@s46.dev"
+	DefaultGatewayURL  = "https://gateway.s46.dev"
 	ResumeTargetLocal  = "local"
 	ResumeTargetRemote = "remote"
 )
@@ -97,7 +100,7 @@ type User struct {
 
 type TeamOptions struct {
 	Endpoint     string
-	Lane         string
+	Region       string
 	DefaultModel string
 	AccessToken  string
 }
@@ -105,8 +108,8 @@ type TeamOptions struct {
 type Team struct {
 	Name         string   `json:"name"`
 	Endpoint     string   `json:"endpoint"`
-	Lane         string   `json:"lane"`
-	Boxes        []string `json:"boxes"`
+	Region       string   `json:"region"`
+	WorkerHosts  []string `json:"workerHosts"`
 	DefaultModel string   `json:"defaultModel"`
 	Models       []string `json:"models"`
 }
@@ -116,7 +119,7 @@ type Session struct {
 	State    string `json:"state"`
 	Harness  string `json:"harness"`
 	Location string `json:"location"`
-	Lane     string `json:"lane"`
+	Region   string `json:"region"`
 	Model    string `json:"model"`
 	Age      string `json:"age"`
 	Spent    string `json:"spent"`

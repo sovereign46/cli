@@ -86,8 +86,8 @@ func TestApplyAtomicConfigAndSnapshotRollsBackHarnessAndConfig(t *testing.T) {
 	store := config.NewStore(env, "")
 	before := config.DefaultConfig()
 	before.Mode = config.ModeAirplane
-	before.ActiveTeam = "acme"
-	before.Teams["acme"] = config.TeamConfig{Endpoint: "http://127.0.0.1:8080"}
+	before.ActiveTeam = "@s46/engineering"
+	before.Teams["@s46/engineering"] = config.TeamConfig{Endpoint: "http://127.0.0.1:8080"}
 	if err := store.SaveConfig(before); err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +123,7 @@ func TestApplyAtomicConfigAndSnapshotRollsBackHarnessAndConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.ActiveMode() != config.ModeAirplane || got.ActiveTeam != "acme" {
+	if got.ActiveMode() != config.ModeAirplane || got.ActiveTeam != "@s46/engineering" {
 		t.Fatalf("config rollback failed: %#v", got)
 	}
 }
@@ -144,8 +144,8 @@ func TestApplyAtomicConfigAndHarnessRollsBackBoth(t *testing.T) {
 	}
 	// after: a team is configured (this is the change we'll try to land)
 	after := config.DefaultConfig()
-	after.ActiveTeam = "acme"
-	after.Teams["acme"] = config.TeamConfig{Endpoint: "https://acme.s46.dev", DefaultHarness: "failing"}
+	after.ActiveTeam = "@s46/engineering"
+	after.Teams["@s46/engineering"] = config.TeamConfig{Endpoint: "https://gateway.s46.dev", DefaultHarness: "failing"}
 
 	// Plan writes two files; adapter fails on the second.
 	targetA := filepath.Join(dir, "a.json")
@@ -179,8 +179,8 @@ func TestApplyAtomicConfigAndHarnessRollsBackBoth(t *testing.T) {
 	if got.ActiveTeam != "" {
 		t.Errorf("expected config restored to before (ActiveTeam=\"\"), got ActiveTeam=%q", got.ActiveTeam)
 	}
-	if _, ok := got.Teams["acme"]; ok {
-		t.Errorf("expected acme team removed from restored config")
+	if _, ok := got.Teams["@s46/engineering"]; ok {
+		t.Errorf("expected @s46/engineering team removed from restored config")
 	}
 
 	// targetA must be restored to its pre-apply content.

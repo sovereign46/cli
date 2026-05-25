@@ -133,7 +133,7 @@ func (a Adapter) PlanDisconnect(ctx context.Context, req harness.DisconnectReque
 		Summary: fmt.Sprintf("harness: claude-code (writes %s)", config.DisplayPath(path, req.Env)),
 		Operations: []string{
 			"remove s46 apiKeyHelper when present",
-			"remove S46 Anthropic environment overrides",
+			"remove s46 Anthropic environment overrides",
 		},
 		Files: []harness.FilePlan{{Path: path, DisplayPath: config.DisplayPath(path, req.Env), Kind: "json", OldContent: oldContent, Content: content, JSONValue: existing, Mode: 0o600}},
 	}, nil

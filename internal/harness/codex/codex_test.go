@@ -35,7 +35,7 @@ func TestPlanConnectRejectsModifiedManagedBlock(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	team := api.Team{Name: "acme", Endpoint: "https://acme.s46.dev", DefaultModel: api.DefaultModel}
+	team := api.Team{Name: "@s46/engineering", Endpoint: "https://gateway.s46.dev", DefaultModel: api.DefaultModel}
 	adapter := New()
 	plan, err := adapter.PlanConnect(context.Background(), harness.ConnectRequest{Env: env, Team: team, Model: api.DefaultModel})
 	if err != nil {
@@ -54,7 +54,7 @@ func TestPlanConnectRejectsModifiedManagedBlock(t *testing.T) {
 func TestStatusReportsMissingConfig(t *testing.T) {
 	home := t.TempDir()
 	env := map[string]string{"HOME": home}
-	checks := New().Status(context.Background(), harness.StatusRequest{Env: env, TeamName: "acme"})
+	checks := New().Status(context.Background(), harness.StatusRequest{Env: env, TeamName: "@s46/engineering"})
 	if len(checks) != 1 || checks[0].Name != "codex-config" || checks[0].OK {
 		t.Fatalf("expected missing-config failure, got %#v", checks)
 	}
@@ -63,7 +63,7 @@ func TestStatusReportsMissingConfig(t *testing.T) {
 func TestStatusReadsConfiguredFile(t *testing.T) {
 	home := t.TempDir()
 	env := map[string]string{"HOME": home}
-	team := api.Team{Name: "acme", Endpoint: "https://acme.s46.dev", DefaultModel: api.DefaultModel}
+	team := api.Team{Name: "@s46/engineering", Endpoint: "https://gateway.s46.dev", DefaultModel: api.DefaultModel}
 	plan, err := New().PlanConnect(context.Background(), harness.ConnectRequest{Env: env, Team: team, Model: api.DefaultModel})
 	if err != nil {
 		t.Fatal(err)
@@ -75,7 +75,7 @@ func TestStatusReadsConfiguredFile(t *testing.T) {
 	if err := os.WriteFile(configPath, plan.Files[0].Content, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	checks := New().Status(context.Background(), harness.StatusRequest{Env: env, TeamName: "acme", Endpoint: "https://acme.s46.dev", DefaultModel: api.DefaultModel})
+	checks := New().Status(context.Background(), harness.StatusRequest{Env: env, TeamName: "@s46/engineering", Endpoint: "https://gateway.s46.dev", DefaultModel: api.DefaultModel})
 	if len(checks) != 4 {
 		t.Fatalf("expected 4 checks, got %#v", checks)
 	}

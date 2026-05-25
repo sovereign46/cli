@@ -12,13 +12,13 @@
     "sharedBy": { "handle": "tester" },
     "harness": { "name": "claude-code" },
     "model": { "name": "s46/kimi-k2.6" },
-    "lane": { "id": "EU-OPO" },
+    "region": { "id": "EU-OPO" },
     "durationSeconds": 1,
     "usage": { "tokensIn": 1, "tokensOut": 1, "gpuSeconds": 0, "toolCalls": 0 }
   },
   "steps": [
     { "id": 1, "kind": "user", "t": 0, "dur": 0, "body": "fix the failing auth redirect test" },
-    { "id": 2, "kind": "think", "t": 1, "dur": 0, "body": "(s46 mock · s46/kimi-k2.6 · lane EU-OPO)\nI'll start by locating the failing test. In the real backend I would read the test file, trace the assertion to the auth redirect code, propose a fix, and re-run the suite.\n\nThis response is a placeholder produced by the local mock server." }
+    { "id": 2, "kind": "think", "t": 1, "dur": 0, "body": "(s46 mock · s46/kimi-k2.6 · region EU-OPO)\nI'll start by locating the failing test. In the real backend I would read the test file, trace the assertion to the auth redirect code, propose a fix, and re-run the suite.\n\nThis response is a placeholder produced by the local mock server." }
   ],
   "files": []
 }

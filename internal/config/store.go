@@ -23,10 +23,10 @@ type Config struct {
 
 type TeamConfig struct {
 	Endpoint       string   `json:"endpoint"`
-	Lane           string   `json:"lane"`
+	Region         string   `json:"region"`
 	DefaultHarness string   `json:"defaultHarness"`
 	DefaultModel   string   `json:"defaultModel"`
-	Boxes          []string `json:"boxes,omitempty"`
+	WorkerHosts    []string `json:"workerHosts,omitempty"`
 	Models         []string `json:"models,omitempty"`
 	APISnapshot    api.Team `json:"apiSnapshot"`
 	// HarnessSnapshot records the harness files as they were before
@@ -102,7 +102,7 @@ func (c Config) Clone() Config {
 
 func (tc TeamConfig) Clone() TeamConfig {
 	clone := tc
-	clone.Boxes = append([]string(nil), tc.Boxes...)
+	clone.WorkerHosts = append([]string(nil), tc.WorkerHosts...)
 	clone.Models = append([]string(nil), tc.Models...)
 	clone.APISnapshot = cloneAPITeam(tc.APISnapshot)
 	if tc.HarnessSnapshot != nil {
@@ -114,7 +114,7 @@ func (tc TeamConfig) Clone() TeamConfig {
 }
 
 func cloneAPITeam(team api.Team) api.Team {
-	team.Boxes = append([]string(nil), team.Boxes...)
+	team.WorkerHosts = append([]string(nil), team.WorkerHosts...)
 	team.Models = append([]string(nil), team.Models...)
 	return team
 }
@@ -184,10 +184,10 @@ func TeamConfigFromAPI(team api.Team, harness string, model string, _ string) Te
 	}
 	return TeamConfig{
 		Endpoint:       team.Endpoint,
-		Lane:           team.Lane,
+		Region:         team.Region,
 		DefaultHarness: harness,
 		DefaultModel:   model,
-		Boxes:          team.Boxes,
+		WorkerHosts:    team.WorkerHosts,
 		Models:         team.Models,
 		APISnapshot:    team,
 	}
@@ -197,8 +197,8 @@ func (tc TeamConfig) API(name string) api.Team {
 	return api.Team{
 		Name:         name,
 		Endpoint:     tc.Endpoint,
-		Lane:         tc.Lane,
-		Boxes:        tc.Boxes,
+		Region:       tc.Region,
+		WorkerHosts:  tc.WorkerHosts,
 		DefaultModel: tc.DefaultModel,
 		Models:       tc.Models,
 	}

@@ -39,7 +39,7 @@ Inside the shell, every `s46` command writes only inside the tempdir; copied har
 
 The real Pi, Claude Code, and Codex airplane-mode path is covered by an opt-in integration test. It builds a temporary `s46` binary, uses an isolated `HOME`, enables airplane mode, verifies managed configs point at localhost, turns airplane mode off and checks the original configs are restored byte-for-byte, then asks each harness to write a file in a temporary project and verifies `s46 sessions` plus `s46 share --local --json` for each transcript.
 
-It requires installed `pi`, `claude`, `codex`, `llama-server`, a verified local S46 model, and a startable local gateway:
+It requires installed `pi`, `claude`, `codex`, `llama-server`, a verified local s46 model, and a startable local gateway:
 
 ```sh
 make e2e-airplane-harnesses

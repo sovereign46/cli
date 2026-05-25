@@ -21,7 +21,7 @@ func TestPlanConnectMergesExistingSettings(t *testing.T) {
 	if err := os.WriteFile(settingsPath, []byte(`{"theme":"dark","env":{"KEEP":"yes"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	team := api.Team{Name: "acme", Endpoint: "https://acme.s46.dev", DefaultModel: api.DefaultModel}
+	team := api.Team{Name: "@s46/engineering", Endpoint: "https://gateway.s46.dev", DefaultModel: api.DefaultModel}
 	plan, err := New().PlanConnect(context.Background(), harness.ConnectRequest{Env: env, Team: team, Model: api.DefaultModel})
 	if err != nil {
 		t.Fatal(err)
@@ -34,7 +34,7 @@ func TestPlanConnectMergesExistingSettings(t *testing.T) {
 		t.Fatalf("unrelated setting not preserved: %#v", settings)
 	}
 	envMap := settings["env"].(map[string]any)
-	if envMap["KEEP"] != "yes" || envMap["ANTHROPIC_BASE_URL"] != "https://acme.s46.dev/anthropic" {
+	if envMap["KEEP"] != "yes" || envMap["ANTHROPIC_BASE_URL"] != "https://gateway.s46.dev/anthropic" {
 		t.Fatalf("unexpected env: %#v", envMap)
 	}
 }
@@ -52,14 +52,14 @@ func TestPlanDisconnectStripsS46OverridesAndKeepsRest(t *testing.T) {
   "model": "s46/kimi-k2.6",
   "env": {
     "KEEP": "yes",
-    "ANTHROPIC_BASE_URL": "https://acme.s46.dev/anthropic",
+    "ANTHROPIC_BASE_URL": "https://gateway.s46.dev/anthropic",
     "ANTHROPIC_MODEL": "s46/kimi-k2.6"
   }
 }`
 	if err := os.WriteFile(settingsPath, []byte(existing), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	team := api.Team{Name: "acme", Endpoint: "https://acme.s46.dev"}
+	team := api.Team{Name: "@s46/engineering", Endpoint: "https://gateway.s46.dev"}
 	plan, err := New().PlanDisconnect(context.Background(), harness.DisconnectRequest{Env: env, Team: team})
 	if err != nil {
 		t.Fatal(err)
@@ -89,7 +89,7 @@ func TestPlanDisconnectStripsS46OverridesAndKeepsRest(t *testing.T) {
 func TestStatusReportsMissingConfig(t *testing.T) {
 	home := t.TempDir()
 	env := map[string]string{"HOME": home}
-	checks := New().Status(context.Background(), harness.StatusRequest{Env: env, TeamName: "acme"})
+	checks := New().Status(context.Background(), harness.StatusRequest{Env: env, TeamName: "@s46/engineering"})
 	if len(checks) != 1 || checks[0].Name != "claude-config" || checks[0].OK {
 		t.Fatalf("expected missing-config failure, got %#v", checks)
 	}
@@ -107,7 +107,7 @@ func TestStatusReportsConfiguredAndDriftedSettings(t *testing.T) {
   "apiKeyHelper": "s46 token --refresh",
   "model": "s46/kimi-k2.6",
   "env": {
-    "ANTHROPIC_BASE_URL": "https://acme.s46.dev/anthropic",
+    "ANTHROPIC_BASE_URL": "https://gateway.s46.dev/anthropic",
     "ANTHROPIC_MODEL": "s46/kimi-k2.6",
     "ANTHROPIC_DEFAULT_SONNET_MODEL": "s46/kimi-k2.6"
   }
@@ -115,7 +115,7 @@ func TestStatusReportsConfiguredAndDriftedSettings(t *testing.T) {
 	if err := os.WriteFile(settingsPath, []byte(good), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	checks := New().Status(context.Background(), harness.StatusRequest{Env: env, TeamName: "acme", Endpoint: "https://acme.s46.dev", DefaultModel: "s46/kimi-k2.6"})
+	checks := New().Status(context.Background(), harness.StatusRequest{Env: env, TeamName: "@s46/engineering", Endpoint: "https://gateway.s46.dev", DefaultModel: "s46/kimi-k2.6"})
 	if len(checks) != 3 {
 		t.Fatalf("expected 3 checks, got %d", len(checks))
 	}
@@ -126,7 +126,7 @@ func TestStatusReportsConfiguredAndDriftedSettings(t *testing.T) {
 	}
 
 	// Now flip the endpoint and re-check: claude-base-url should fail.
-	checks = New().Status(context.Background(), harness.StatusRequest{Env: env, TeamName: "acme", Endpoint: "https://other.s46.dev", DefaultModel: "s46/kimi-k2.6"})
+	checks = New().Status(context.Background(), harness.StatusRequest{Env: env, TeamName: "@s46/engineering", Endpoint: "https://other.s46.dev", DefaultModel: "s46/kimi-k2.6"})
 	if okOf(checks, "claude-base-url") {
 		t.Errorf("expected claude-base-url to fail on mismatched endpoint: %#v", checks)
 	}

@@ -23,13 +23,13 @@ import (
 )
 
 func TestRunStoresSessionAndListReturnsLocalState(t *testing.T) {
-	service, store := newTestService(t, api.Team{Name: "s46", Endpoint: "http://127.0.0.1:8080", Lane: "EU-OPO", DefaultModel: api.DefaultModel}, config.ModeAirplane, nil)
+	service, store := newTestService(t, api.Team{Name: "s46", Endpoint: "http://127.0.0.1:8080", Region: "EU-OPO", DefaultModel: api.DefaultModel}, config.ModeAirplane, nil)
 
 	run, err := service.Run(context.Background(), "Fix /v1 sessions", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(run.ID, "@nunojob/fix-v1-sessions-") || run.Location != "localhost" || run.State != "mocked" {
+	if !strings.HasPrefix(run.ID, "@nunojob/fix-v1-sessions-") || run.Location != "localhost" || run.State != "local" {
 		t.Fatalf("run = %#v", run)
 	}
 
@@ -50,7 +50,7 @@ func TestRunStoresSessionAndListReturnsLocalState(t *testing.T) {
 }
 
 func TestDetachAndResumePersistSessionState(t *testing.T) {
-	service, store := newTestService(t, api.Team{Name: "s46", Endpoint: "https://s46.s46.dev", Lane: "EU-OPO", DefaultModel: api.DefaultModel}, config.ModeCloud, nil)
+	service, store := newTestService(t, api.Team{Name: "s46", Endpoint: "https://s46.s46.dev", Region: "EU-OPO", DefaultModel: api.DefaultModel}, config.ModeCloud, nil)
 
 	detached, err := service.Detach(context.Background(), "@nunojob/task", "")
 	if err != nil {
@@ -76,7 +76,7 @@ func TestDetachAndResumePersistSessionState(t *testing.T) {
 }
 
 func TestMockSharePersistsViewerURL(t *testing.T) {
-	service, store := newTestService(t, api.Team{Name: "s46", Endpoint: "http://127.0.0.1:8080", Lane: "EU-OPO", DefaultModel: api.DefaultModel}, config.ModeCloud, map[string]string{"S46_SHARE_BACKEND": "mock", "S46_MOCK_GIST_ID": "fixed-gist-123456"})
+	service, store := newTestService(t, api.Team{Name: "s46", Endpoint: "http://127.0.0.1:8080", Region: "EU-OPO", DefaultModel: api.DefaultModel}, config.ModeCloud, map[string]string{"S46_SHARE_BACKEND": "mock", "S46_MOCK_GIST_ID": "fixed-gist-123456"})
 
 	share, err := service.Share(context.Background(), "@nunojob/task", "30d")
 	if err != nil {
@@ -95,7 +95,7 @@ func TestMockSharePersistsViewerURL(t *testing.T) {
 }
 
 func TestMockShareUpdateReusesViewerKey(t *testing.T) {
-	service, _ := newTestService(t, api.Team{Name: "s46", Endpoint: "https://s46.s46.dev", Lane: "EU-OPO", DefaultModel: api.DefaultModel}, config.ModeCloud, map[string]string{"S46_SHARE_BACKEND": "mock", "S46_MOCK_GIST_ID": "fixed-gist-123456"})
+	service, _ := newTestService(t, api.Team{Name: "s46", Endpoint: "https://s46.s46.dev", Region: "EU-OPO", DefaultModel: api.DefaultModel}, config.ModeCloud, map[string]string{"S46_SHARE_BACKEND": "mock", "S46_MOCK_GIST_ID": "fixed-gist-123456"})
 
 	first, err := service.Share(context.Background(), "@nunojob/task", "30d")
 	if err != nil {
@@ -153,7 +153,7 @@ func TestGistShareCreateUpdateAndRevoke(t *testing.T) {
 	}))
 	defer server.Close()
 
-	service, store := newTestService(t, api.Team{Name: "s46", Endpoint: "https://s46.s46.dev", Lane: "EU-OPO", DefaultModel: api.DefaultModel}, config.ModeCloud, map[string]string{"S46_SHARE_API_URL": server.URL, "S46_SHARE_VIEWER_URL": "https://share.test"})
+	service, store := newTestService(t, api.Team{Name: "s46", Endpoint: "https://s46.s46.dev", Region: "EU-OPO", DefaultModel: api.DefaultModel}, config.ModeCloud, map[string]string{"S46_SHARE_API_URL": server.URL, "S46_SHARE_VIEWER_URL": "https://share.test"})
 	first, err := service.Share(context.Background(), "@nunojob/task", "7d")
 	if err != nil {
 		t.Fatal(err)
@@ -193,7 +193,7 @@ func TestGistShareCreateUpdateAndRevoke(t *testing.T) {
 
 func TestLocalShareArtifactBuildsPiJSONLWithoutPersistingShare(t *testing.T) {
 	const sessionID = "019e4ad2-ba3a-71f7-b34a-205e84be280e"
-	service, store := newTestService(t, api.Team{Name: "s46", Endpoint: airplane.LocalGatewayURL, Lane: "local", DefaultModel: airplane.LocalModelID}, config.ModeAirplane, nil)
+	service, store := newTestService(t, api.Team{Name: "s46", Endpoint: airplane.LocalGatewayURL, Region: "local", DefaultModel: airplane.LocalModelID}, config.ModeAirplane, nil)
 	writeSessionJSONL(t, filepath.Join(service.Config.Env["HOME"], ".pi", "agent", "sessions", "--Users-nuno-dev-app--", "2026-05-21T10-00-00-000Z_"+sessionID+".jsonl"), `
 {"type":"session","id":"019e4ad2-ba3a-71f7-b34a-205e84be280e","timestamp":"2026-05-21T10:00:00.000Z","cwd":"/Users/nuno/dev/app"}
 {"type":"message","timestamp":"2026-05-21T10:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"actual pi prompt"}],"timestamp":"2026-05-21T10:00:01.000Z"}}
@@ -248,7 +248,7 @@ func TestShareBuildsArtifactFromPiJSONL(t *testing.T) {
 	}))
 	defer server.Close()
 
-	service, _ := newTestService(t, api.Team{Name: "s46", Endpoint: "https://s46.s46.dev", Lane: "EU-OPO", DefaultModel: api.DefaultModel}, config.ModeCloud, map[string]string{"S46_SHARE_API_URL": server.URL, "S46_SHARE_VIEWER_URL": "https://share.test"})
+	service, _ := newTestService(t, api.Team{Name: "s46", Endpoint: "https://s46.s46.dev", Region: "EU-OPO", DefaultModel: api.DefaultModel}, config.ModeCloud, map[string]string{"S46_SHARE_API_URL": server.URL, "S46_SHARE_VIEWER_URL": "https://share.test"})
 	writeSessionJSONL(t, filepath.Join(service.Config.Env["HOME"], ".pi", "agent", "sessions", "--Users-nuno-dev-app--", "2026-05-21T10-00-00-000Z_"+sessionID+".jsonl"), `
 {"type":"session","id":"019e4ad2-ba3a-71f7-b34a-205e84be280e","timestamp":"2026-05-21T10:00:00.000Z","cwd":"/Users/nuno/dev/app"}
 {"type":"message","timestamp":"2026-05-21T10:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"actual pi prompt"}],"timestamp":"2026-05-21T10:00:01.000Z"}}
@@ -317,8 +317,8 @@ func TestAirplaneSessionCallsDoNotSendCloudBearer(t *testing.T) {
 		"XDG_DATA_HOME":   home + "/.data",
 	}
 	store := config.NewStore(env, "")
-	team := api.Team{Name: "acme", Endpoint: airplane.LocalGatewayURL, Lane: "local", DefaultModel: airplane.LocalModelID}
-	if err := store.SaveConfig(config.Config{Mode: config.ModeAirplane, ActiveTeam: "acme", Teams: map[string]config.TeamConfig{"acme": config.TeamConfigFromAPI(team, "standard", airplane.LocalModelID, config.ModeAirplane)}}); err != nil {
+	team := api.Team{Name: "@s46/engineering", Endpoint: airplane.LocalGatewayURL, Region: "local", DefaultModel: airplane.LocalModelID}
+	if err := store.SaveConfig(config.Config{Mode: config.ModeAirplane, ActiveTeam: "@s46/engineering", Teams: map[string]config.TeamConfig{"@s46/engineering": config.TeamConfigFromAPI(team, "standard", airplane.LocalModelID, config.ModeAirplane)}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.SaveState(config.State{Authenticated: true, CurrentUser: "nunojob@icloud.com"}); err != nil {
@@ -356,7 +356,7 @@ func TestListForbiddenExplainsMatchingTeamAndLocalAPI(t *testing.T) {
 		"S46_DEV_SHELL":    "1",
 	}
 	store := config.NewStore(env, "")
-	team := api.Team{Name: "s46", Endpoint: "http://127.0.0.1:8080", Lane: "EU-OPO", DefaultModel: api.DefaultModel}
+	team := api.Team{Name: "s46", Endpoint: "http://127.0.0.1:8080", Region: "EU-OPO", DefaultModel: api.DefaultModel}
 	if err := store.SaveConfig(config.Config{ActiveTeam: "s46", Teams: map[string]config.TeamConfig{"s46": config.TeamConfigFromAPI(team, "standard", api.DefaultModel, config.ModeCloud)}}); err != nil {
 		t.Fatal(err)
 	}
@@ -396,7 +396,7 @@ func TestListForbiddenSuggestsTeamsUseForMismatchedTeam(t *testing.T) {
 		"XDG_DATA_HOME":   home + "/.data",
 	}
 	store := config.NewStore(env, "")
-	team := api.Team{Name: "s46", Endpoint: "https://s46.s46.dev", Lane: "EU-OPO", DefaultModel: api.DefaultModel}
+	team := api.Team{Name: "s46", Endpoint: "https://s46.s46.dev", Region: "EU-OPO", DefaultModel: api.DefaultModel}
 	if err := store.SaveConfig(config.Config{ActiveTeam: "s46", Teams: map[string]config.TeamConfig{"s46": config.TeamConfigFromAPI(team, "standard", api.DefaultModel, config.ModeCloud)}}); err != nil {
 		t.Fatal(err)
 	}
@@ -413,7 +413,7 @@ func TestListForbiddenSuggestsTeamsUseForMismatchedTeam(t *testing.T) {
 	}
 	mock := api.NewMockClient()
 	mock.Fixtures.Account = "nunojob@icloud.com"
-	mock.Fixtures.Team = "acme"
+	mock.Fixtures.Team = "@s46/engineering"
 
 	authService := auth.Service{API: mock, Config: store, Keyring: keyringStore}
 	_, err = Service{API: forbiddenSessionsAPI{MockClient: mock}, Auth: authService, Config: store, Keyring: keyringStore}.List(context.Background())
@@ -421,7 +421,7 @@ func TestListForbiddenSuggestsTeamsUseForMismatchedTeam(t *testing.T) {
 		t.Fatal("expected forbidden error")
 	}
 	message := err.Error()
-	for _, want := range []string{"the API says this login belongs to team acme", "run `s46 teams use acme`"} {
+	for _, want := range []string{"the API says this login belongs to team @s46/engineering", "run `s46 teams use @s46/engineering`"} {
 		if !strings.Contains(message, want) {
 			t.Fatalf("error missing %q: %v", want, err)
 		}
@@ -490,7 +490,7 @@ func TestLandReturnsAPIErrorUnchanged(t *testing.T) {
 		"XDG_DATA_HOME":   home + "/.data",
 	}
 	store := config.NewStore(env, "")
-	team := api.Team{Name: "s46", Endpoint: "https://s46.s46.dev", Lane: "EU-OPO", DefaultModel: api.DefaultModel}
+	team := api.Team{Name: "s46", Endpoint: "https://s46.s46.dev", Region: "EU-OPO", DefaultModel: api.DefaultModel}
 	if err := store.SaveConfig(config.Config{ActiveTeam: "s46", Teams: map[string]config.TeamConfig{"s46": config.TeamConfigFromAPI(team, "standard", api.DefaultModel, config.ModeCloud)}}); err != nil {
 		t.Fatal(err)
 	}
