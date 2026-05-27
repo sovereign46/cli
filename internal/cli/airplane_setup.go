@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -15,6 +16,7 @@ import (
 	"github.com/sovereign46/cli/internal/airplane"
 	"github.com/sovereign46/cli/internal/api"
 	"github.com/sovereign46/cli/internal/config"
+	"github.com/sovereign46/cli/internal/contextx"
 	"github.com/sovereign46/cli/internal/harness"
 	"github.com/sovereign46/cli/internal/harness/pi"
 	"github.com/sovereign46/cli/internal/strs"
@@ -48,6 +50,9 @@ func runAirplaneSetupWithOptions(ctx context.Context, app *app, options airplane
 	}
 	service := airplane.Service{Env: app.runtime.Env, Stdin: app.runtime.Stdin, Stdout: app.runtime.Stdout, Stderr: app.runtime.Stderr, Progress: progress, LogPrefix: "[s46]"}
 	report := service.Check(ctx)
+	if err := ctx.Err(); err != nil {
+		return report, err
+	}
 	if app.options.machineReadable() {
 		return report, nil
 	}
@@ -75,6 +80,9 @@ func runAirplaneSetupWithOptions(ctx context.Context, app *app, options airplane
 			} else {
 				report = service.Check(ctx)
 			}
+			if err := ctx.Err(); err != nil {
+				return report, err
+			}
 		}
 	}
 	if checkOK(report, "llamacpp-installed") && missingCheck(report, "model-downloaded") {
@@ -93,11 +101,14 @@ func runAirplaneSetupWithOptions(ctx context.Context, app *app, options airplane
 			if err := app.renderer.Lines("[s46] starting llama-server..."); err != nil {
 				return report, err
 			}
-			if err := service.StartLlamacpp(); err != nil {
+			if err := service.StartLlamacpp(ctx); err != nil {
 				return report, fmt.Errorf("failed to start llama-server: %w", err)
 			}
 			changed = true
 			report = waitForAirplaneCheckAssumingVerifiedModel(ctx, service, "llamacpp-model", 30*time.Second)
+			if err := ctx.Err(); err != nil {
+				return report, err
+			}
 		}
 	}
 	if checkOK(report, "llamacpp-installed") && checkOK(report, "model-downloaded") && checkOK(report, "llamacpp-running") && missingCheck(report, "llamacpp-model") {
@@ -152,6 +163,9 @@ func runAirplaneSetupWithOptions(ctx context.Context, app *app, options airplane
 				}
 				changed = true
 				report = service.CheckAssumingVerifiedModel(ctx)
+				if err := ctx.Err(); err != nil {
+					return report, err
+				}
 			}
 		}
 	}
@@ -163,11 +177,14 @@ func runAirplaneSetupWithOptions(ctx context.Context, app *app, options airplane
 				if err := app.renderer.Lines("[s46] starting local s46 gateway..."); err != nil {
 					return report, err
 				}
-				if err := service.StartGatewayAssumingVerifiedModel(); err != nil {
+				if err := service.StartGatewayAssumingVerifiedModel(ctx); err != nil {
 					return report, fmt.Errorf("failed to start local s46 gateway: %w", err)
 				}
 				changed = true
 				report = waitForAirplaneCheckAssumingVerifiedModel(ctx, service, "local-gateway", 30*time.Second)
+				if err := ctx.Err(); err != nil {
+					return report, err
+				}
 			}
 		} else if err := app.renderer.Lines(
 			"[s46] Local s46 gateway is not installed or running.",
@@ -206,7 +223,11 @@ func offerAirplaneModelDownload(ctx context.Context, app *app, service airplane.
 	if err := service.PullModel(ctx); err != nil {
 		return report, false, fmt.Errorf("failed to download or verify %s: %w", airplane.BackendModel, err)
 	}
-	return service.Check(ctx), true, nil
+	report = service.Check(ctx)
+	if err := ctx.Err(); err != nil {
+		return report, false, err
+	}
+	return report, true, nil
 }
 
 func offerLlamacppRuntimeRestart(ctx context.Context, app *app, service airplane.Service, report airplane.Report, options airplaneSetupOptions) (airplane.Report, bool, error) {
@@ -236,13 +257,13 @@ func offerLlamacppRuntimeRestart(ctx context.Context, app *app, service airplane
 	if err := app.renderer.Lines("[s46] stopping llama-server..."); err != nil {
 		return report, false, err
 	}
-	if err := stopListeningProcess(app.runtime.Env, airplane.LlamacppURL(app.runtime.Env), strconv.Itoa(runtimeReport.PID), 5*time.Second); err != nil {
+	if err := stopListeningProcess(ctx, app.runtime.Env, airplane.LlamacppURL(app.runtime.Env), strconv.Itoa(runtimeReport.PID), 5*time.Second); err != nil {
 		return report, false, fmt.Errorf("failed to stop llama-server: %w", err)
 	}
 	if err := app.renderer.Lines("[s46] starting llama-server..."); err != nil {
 		return report, false, err
 	}
-	if err := service.StartLlamacpp(); err != nil {
+	if err := service.StartLlamacpp(ctx); err != nil {
 		return report, false, fmt.Errorf("failed to start llama-server: %w", err)
 	}
 	return waitForAirplaneCheckAssumingVerifiedModel(ctx, service, "llamacpp-settings", 30*time.Second), true, nil
@@ -268,6 +289,9 @@ func ensureLlamacppRuntimeSettings(ctx context.Context, app *app, service airpla
 		return nil
 	}
 	report := service.CheckAssumingVerifiedModel(ctx)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	report, _, err := offerLlamacppRuntimeRestart(ctx, app, service, report, airplaneSetupOptions{AllowPrompts: app.canPrompt()})
 	if err != nil {
 		return err
@@ -279,7 +303,10 @@ func ensureLlamacppRuntimeSettings(ctx context.Context, app *app, service airpla
 }
 
 func offerAirplaneGatewayRestart(ctx context.Context, app *app, service airplane.Service, report airplane.Report, options airplaneSetupOptions) (airplane.Report, bool, error) {
-	listener := gatewayListeningProcess(app.runtime.Env, report.GatewayURL)
+	listener, err := gatewayListeningProcess(ctx, app.runtime.Env, report.GatewayURL)
+	if err != nil {
+		return report, false, err
+	}
 	if err := app.renderer.Lines(renderAirplaneGatewayConflict(report.GatewayURL, listener)...); err != nil {
 		return report, false, err
 	}
@@ -303,13 +330,13 @@ func offerAirplaneGatewayRestart(ctx context.Context, app *app, service airplane
 	if err := app.renderer.Lines("[s46] stopping local s46 gateway..."); err != nil {
 		return report, false, err
 	}
-	if err := stopListeningProcess(app.runtime.Env, report.GatewayURL, listener.PID, 5*time.Second); err != nil {
+	if err := stopListeningProcess(ctx, app.runtime.Env, report.GatewayURL, listener.PID, 5*time.Second); err != nil {
 		return report, false, fmt.Errorf("failed to stop local s46 gateway: %w", err)
 	}
 	if err := app.renderer.Lines("[s46] starting local s46 gateway..."); err != nil {
 		return report, false, err
 	}
-	if err := service.StartGatewayAssumingVerifiedModel(); err != nil {
+	if err := service.StartGatewayAssumingVerifiedModel(ctx); err != nil {
 		return report, false, fmt.Errorf("failed to start local s46 gateway: %w", err)
 	}
 	return waitForAirplaneCheckAssumingVerifiedModel(ctx, service, "local-gateway", 30*time.Second), true, nil
@@ -343,12 +370,12 @@ func renderAirplaneGatewayProcess(listener listeningProcessStatus) string {
 	}
 }
 
-func gatewayListeningProcess(env map[string]string, gatewayURL string) listeningProcessStatus {
+func gatewayListeningProcess(ctx context.Context, env map[string]string, gatewayURL string) (listeningProcessStatus, error) {
 	port := localServerPort(gatewayURL)
 	if port == "" {
-		return listeningProcessStatus{Status: "unknown", Message: "gateway port unknown"}
+		return listeningProcessStatus{Status: "unknown", Message: "gateway port unknown"}, nil
 	}
-	return listeningProcess(env, port)
+	return listeningProcess(ctx, env, port)
 }
 
 func localServerPort(rawURL string) string {
@@ -375,7 +402,7 @@ func isS46GatewayProcess(command string) bool {
 	return filepath.Base(strings.TrimSpace(command)) == airplane.GatewayBinaryName
 }
 
-func stopListeningProcess(env map[string]string, gatewayURL string, pid string, timeout time.Duration) error {
+func stopListeningProcess(ctx context.Context, env map[string]string, gatewayURL string, pid string, timeout time.Duration) error {
 	port := localServerPort(gatewayURL)
 	if seamStopGateway(env, port) {
 		return nil
@@ -388,64 +415,92 @@ func stopListeningProcess(env map[string]string, gatewayURL string, pid string, 
 	if err != nil {
 		return err
 	}
-	if err := process.Signal(syscall.SIGTERM); err != nil && sameListeningPID(env, port, pid) {
+	if err := process.Signal(syscall.SIGTERM); err != nil {
+		samePID, sameErr := sameListeningPID(ctx, env, port, pid)
+		if sameErr != nil {
+			return sameErr
+		}
+		if samePID {
+			return err
+		}
+	}
+	if exited, err := waitForListenerToExit(ctx, env, port, pid, timeout); err != nil || exited {
 		return err
 	}
-	if waitForListenerToExit(env, port, pid, timeout) {
-		return nil
+	if err := process.Kill(); err != nil {
+		samePID, sameErr := sameListeningPID(ctx, env, port, pid)
+		if sameErr != nil {
+			return sameErr
+		}
+		if samePID {
+			return err
+		}
 	}
-	if err := process.Kill(); err != nil && sameListeningPID(env, port, pid) {
+	if exited, err := waitForListenerToExit(ctx, env, port, pid, 2*time.Second); err != nil || exited {
 		return err
-	}
-	if waitForListenerToExit(env, port, pid, 2*time.Second) {
-		return nil
 	}
 	return fmt.Errorf("process %s is still listening on port %s", pid, port)
 }
 
-func waitForListenerToExit(env map[string]string, port string, pid string, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
+func waitForListenerToExit(parentCtx context.Context, env map[string]string, port string, pid string, timeout time.Duration) (bool, error) {
+	ctx, cancel := contextx.WithMaxTimeout(parentCtx, timeout)
+	defer cancel()
 	for {
-		if !sameListeningPID(env, port, pid) {
-			return true
+		samePID, err := sameListeningPID(ctx, env, port, pid)
+		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) && parentCtx.Err() == nil {
+				return false, nil
+			}
+			return false, err
 		}
-		if time.Now().After(deadline) {
-			return false
+		if !samePID {
+			return true, nil
 		}
-		time.Sleep(200 * time.Millisecond)
+		if err := contextx.Sleep(ctx, 200*time.Millisecond); err != nil {
+			if errors.Is(err, context.DeadlineExceeded) && parentCtx.Err() == nil {
+				return false, nil
+			}
+			return false, err
+		}
 	}
 }
 
-func sameListeningPID(env map[string]string, port string, pid string) bool {
+func sameListeningPID(ctx context.Context, env map[string]string, port string, pid string) (bool, error) {
 	if port == "" {
-		return false
+		return false, nil
 	}
-	listener := listeningProcess(env, port)
-	return listener.Status == "listening" && listener.PID == pid
+	listener, err := listeningProcess(ctx, env, port)
+	if err != nil {
+		return false, err
+	}
+	return listener.Status == "listening" && listener.PID == pid, nil
 }
 
 func waitForAirplaneCheckAssumingVerifiedModel(ctx context.Context, service airplane.Service, name string, timeout time.Duration) airplane.Report {
-	deadline := time.Now().Add(timeout)
+	ctx, cancel := contextx.WithMaxTimeout(ctx, timeout)
+	defer cancel()
 	var report airplane.Report
 	for {
 		report = service.CheckAssumingVerifiedModel(ctx)
-		if checkOK(report, name) || time.Now().After(deadline) {
+		if checkOK(report, name) || ctx.Err() != nil {
 			return report
 		}
-		time.Sleep(500 * time.Millisecond)
+		if contextx.Sleep(ctx, 500*time.Millisecond) != nil {
+			return report
+		}
 	}
 }
 
 func waitForGatewayReady(ctx context.Context, service airplane.Service, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
+	ctx, cancel := contextx.WithMaxTimeout(ctx, timeout)
+	defer cancel()
 	for {
 		if service.GatewayReady(ctx) {
 			return true
 		}
-		if time.Now().After(deadline) {
+		if contextx.Sleep(ctx, 500*time.Millisecond) != nil {
 			return false
 		}
-		time.Sleep(500 * time.Millisecond)
 	}
 }
 
@@ -763,11 +818,13 @@ func prepareAirplaneRuntime(ctx context.Context, app *app, service airplane.Serv
 		if err := app.renderer.Lines("[s46] starting llama-server..."); err != nil {
 			return err
 		}
-		if err := service.StartLlamacpp(); err != nil {
+		if err := service.StartLlamacpp(ctx); err != nil {
 			return fmt.Errorf("could not start llama-server: %w", err)
 		}
-		time.Sleep(500 * time.Millisecond)
-		report = service.CheckAssumingVerifiedModel(ctx)
+		report = waitForAirplaneCheckAssumingVerifiedModel(ctx, service, "llamacpp-running", 30*time.Second)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 	}
 	if report.Ready {
 		return nil
@@ -787,18 +844,22 @@ func prepareAirplaneRuntime(ctx context.Context, app *app, service airplane.Serv
 		return err
 	}
 	if checkOK(report, "llamacpp-installed") && checkOK(report, "model-downloaded") && !checkOK(report, "llamacpp-running") {
-		if err := service.StartLlamacpp(); err != nil {
+		if err := service.StartLlamacpp(ctx); err != nil {
 			return fmt.Errorf("could not start llama-server: %w", err)
 		}
-		time.Sleep(500 * time.Millisecond)
-		report = service.CheckAssumingVerifiedModel(ctx)
+		report = waitForAirplaneCheckAssumingVerifiedModel(ctx, service, "llamacpp-running", 30*time.Second)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 	}
 	if !checkOK(report, "local-gateway") {
-		if err := startGatewayForReport(service, report); err != nil {
+		if err := startGatewayForReport(ctx, service, report); err != nil {
 			return fmt.Errorf("could not start local s46 gateway: %w", err)
 		}
-		time.Sleep(500 * time.Millisecond)
-		report = service.CheckAssumingVerifiedModel(ctx)
+		report = waitForAirplaneCheckAssumingVerifiedModel(ctx, service, "local-gateway", 30*time.Second)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 	}
 	if !report.Ready {
 		return fmt.Errorf("airplane setup is still incomplete")
@@ -806,27 +867,33 @@ func prepareAirplaneRuntime(ctx context.Context, app *app, service airplane.Serv
 	return nil
 }
 
-func startGatewayForReport(service airplane.Service, report airplane.Report) error {
+func startGatewayForReport(ctx context.Context, service airplane.Service, report airplane.Report) error {
 	if checkOK(report, "llamacpp-model") {
-		return service.StartGatewayAssumingVerifiedModel()
+		return service.StartGatewayAssumingVerifiedModel(ctx)
 	}
-	return service.StartGateway()
+	return service.StartGateway(ctx)
 }
 
 // startAirplaneRuntime ensures both llama.cpp and the gateway are running
 // and ready. Called after prepareAirplaneRuntime so a clean install
 // path lands here too.
 func startAirplaneRuntime(ctx context.Context, app *app, service airplane.Service) error {
-	if err := service.StartLlamacpp(); err != nil {
+	if err := service.StartLlamacpp(ctx); err != nil {
 		return fmt.Errorf("could not start llama-server: %w", err)
 	}
 	if !service.LlamacppRunning(ctx) && !service.SetupChecksSkipped() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		return fmt.Errorf("llama-server did not become ready; run `s46 airplane setup`")
 	}
-	if err := service.StartGatewayAssumingVerifiedModel(); err != nil {
+	if err := service.StartGatewayAssumingVerifiedModel(ctx); err != nil {
 		return fmt.Errorf("could not start local s46 gateway: %w", err)
 	}
 	if !service.SetupChecksSkipped() && !waitForGatewayReady(ctx, service, 30*time.Second) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		return fmt.Errorf("local s46 gateway did not become ready; check ~/.cache/s46/s46-gateway-airplane.log or rerun `s46 airplane setup`")
 	}
 	return nil

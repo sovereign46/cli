@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sovereign46/cli/internal/contextx"
 	"github.com/sovereign46/cli/internal/strs"
 )
 
@@ -164,7 +165,7 @@ func downloadMetadata(ctx context.Context, client *http.Client, policy trustPoli
 	}
 	response, err := httpClient(client, policy).Do(request)
 	if err != nil {
-		return nil, err
+		return nil, contextx.ExternalError(ctx, err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
@@ -509,10 +510,8 @@ func (p trustPolicy) validate(rawURL string) error {
 }
 
 func httpClient(client *http.Client, policy trustPolicy) *http.Client {
-	var configured http.Client
-	if client != nil {
-		configured = *client
-	} else {
+	configured := *contextx.WithoutHTTPTimeout(client)
+	if client == nil {
 		configured.Transport = defaultHTTPTransport()
 	}
 	configured.CheckRedirect = func(req *http.Request, via []*http.Request) error {

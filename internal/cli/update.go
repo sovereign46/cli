@@ -23,7 +23,7 @@ func updateCommand(runtime Runtime, opts *options) *cobra.Command {
 			if err := app.requireCloudFeature("update"); err != nil {
 				return err
 			}
-			check, err := updater.Updater{CurrentVersion: version.Get().Version, Env: runtime.Env}.Check(cmd.Context())
+			check, err := updater.Updater{CurrentVersion: version.Version, Env: runtime.Env}.Check(cmd.Context())
 			if opts.machineReadable() {
 				if errors.Is(err, updater.ErrCheckDisabled) || errors.Is(err, updater.ErrNoRelease) {
 					_, writeErr := app.writeStructured(check)

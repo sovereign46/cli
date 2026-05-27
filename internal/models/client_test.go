@@ -18,6 +18,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/sovereign46/cli/internal/contextx"
 )
 
 func TestBaseURLUsesHostedRegistryByDefault(t *testing.T) {
@@ -128,7 +130,7 @@ func TestInstallDownloadsArtifactWithParallelRanges(t *testing.T) {
 				break
 			}
 		}
-		time.Sleep(20 * time.Millisecond)
+		_ = contextx.Sleep(r.Context(), 20*time.Millisecond)
 		atomic.AddInt32(&activeRanges, -1)
 	})
 	defer server.Close()

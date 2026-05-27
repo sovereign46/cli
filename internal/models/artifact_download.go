@@ -15,6 +15,9 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+
+	"github.com/sovereign46/cli/internal/contextx"
 	"github.com/sovereign46/cli/internal/strs"
 )
 
@@ -56,11 +59,6 @@ type artifactChunkWriter struct {
 	progress  func(int64)
 }
 
-type concurrentDownloadError struct {
-	once sync.Once
-	err  error
-}
-
 func downloadArtifact(ctx context.Context, request InstallRequest, manifest verifiedManifest, policy trustPolicy) error {
 	if artifactDownloadParallelism(request.Env) > 0 {
 		ok, err := artifactRangeDownloadSupported(ctx, request, manifest.Manifest, policy)
@@ -82,7 +80,7 @@ func downloadArtifactSequential(ctx context.Context, request InstallRequest, man
 	httpRequest.Header.Set("Accept-Encoding", "identity")
 	response, err := httpClient(request.HTTPClient, policy).Do(httpRequest)
 	if err != nil {
-		return err
+		return contextx.ExternalError(ctx, err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
@@ -103,7 +101,7 @@ func downloadArtifactSequential(ctx context.Context, request InstallRequest, man
 		err = closeErr
 	}
 	if err != nil {
-		return err
+		return contextx.ExternalError(ctx, err)
 	}
 	if err := verifyArtifactDigest(written, hash.Sum(nil), manifest.Manifest); err != nil {
 		return err
@@ -129,7 +127,7 @@ func artifactRangeDownloadSupported(ctx context.Context, request InstallRequest,
 	defer client.CloseIdleConnections()
 	response, err := client.Do(httpRequest)
 	if err != nil {
-		return false, err
+		return false, contextx.ExternalError(ctx, err)
 	}
 	defer response.Body.Close()
 	switch response.StatusCode {
@@ -210,50 +208,38 @@ func downloadMissingArtifactChunks(ctx context.Context, request InstallRequest, 
 	chunkSize := store.state.ChunkSize
 	client := artifactRangeHTTPClient(request.HTTPClient, policy, workerCount)
 	defer client.CloseIdleConnections()
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	g, ctx := errgroup.WithContext(ctx)
 	jobs := make(chan int)
-	var wg sync.WaitGroup
-	var firstErr concurrentDownloadError
 	for i := 0; i < workerCount; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		g.Go(func() error {
 			for index := range jobs {
-				if ctx.Err() != nil {
-					return
+				if err := ctx.Err(); err != nil {
+					return err
 				}
 				if err := downloadArtifactChunk(ctx, client, manifest, file, index, chunkSize, progress.add); err != nil {
-					firstErr.set(err)
-					cancel()
-					return
+					return err
 				}
 				if err := store.markComplete(index); err != nil {
-					firstErr.set(err)
-					cancel()
-					return
+					return err
 				}
 			}
-		}()
+			return nil
+		})
 	}
 	for _, index := range missing {
 		select {
 		case <-ctx.Done():
+			ctxErr := ctx.Err()
 			close(jobs)
-			wg.Wait()
-			if firstErr.err != nil {
-				return firstErr.err
+			if err := g.Wait(); err != nil {
+				return err
 			}
-			return ctx.Err()
+			return ctxErr
 		case jobs <- index:
 		}
 	}
 	close(jobs)
-	wg.Wait()
-	if firstErr.err != nil {
-		return firstErr.err
-	}
-	if err := ctx.Err(); err != nil {
+	if err := g.Wait(); err != nil {
 		return err
 	}
 	return nil
@@ -315,7 +301,7 @@ func downloadArtifactChunk(ctx context.Context, client *http.Client, manifest Ma
 	httpRequest.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
 	response, err := client.Do(httpRequest)
 	if err != nil {
-		return err
+		return contextx.ExternalError(ctx, err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusPartialContent {
@@ -330,7 +316,7 @@ func downloadArtifactChunk(ctx context.Context, client *http.Client, manifest Ma
 	writer := &artifactChunkWriter{file: file, offset: start, remaining: length, progress: progress}
 	written, err := io.Copy(writer, response.Body)
 	if err != nil {
-		return err
+		return contextx.ExternalError(ctx, err)
 	}
 	if written != length {
 		return fmt.Errorf("model artifact range size mismatch: got %d, want %d", written, length)
@@ -576,13 +562,6 @@ func (w *artifactChunkWriter) Write(p []byte) (int, error) {
 		return n, fmt.Errorf("model artifact range exceeded expected size")
 	}
 	return n, nil
-}
-
-func (e *concurrentDownloadError) set(err error) {
-	if err == nil {
-		return
-	}
-	e.once.Do(func() { e.err = err })
 }
 
 func validateContentRange(header string, wantStart int64, wantEnd int64, wantTotal int64) error {

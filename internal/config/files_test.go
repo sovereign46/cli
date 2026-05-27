@@ -136,6 +136,22 @@ func TestLockNilUnlockIsSafe(t *testing.T) {
 	}
 }
 
+func TestLockRejectsAlreadyCanceledContext(t *testing.T) {
+	dir := t.TempDir()
+	env := map[string]string{"HOME": dir, "XDG_CACHE_HOME": filepath.Join(dir, ".cache")}
+	store := NewStore(env, "")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	lock, err := store.Lock(ctx)
+	if lock != nil {
+		t.Fatal("expected no lock")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context canceled", err)
+	}
+}
+
 func TestLockHonorsCancellationOfWaiter(t *testing.T) {
 	dir := t.TempDir()
 	env := map[string]string{"HOME": dir, "XDG_CACHE_HOME": filepath.Join(dir, ".cache")}
@@ -149,12 +165,16 @@ func TestLockHonorsCancellationOfWaiter(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
 	var waiterErr error
+	started := make(chan struct{})
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		close(started)
 		_, waiterErr = store.Lock(ctx)
 	}()
-	time.Sleep(40 * time.Millisecond)
+	<-started
+	// Let the waiter observe the held lock and enter the retry sleep before canceling.
+	time.Sleep(lockRetryInterval + lockRetryInterval/2)
 	cancel()
 	wg.Wait()
 	if waiterErr == nil {

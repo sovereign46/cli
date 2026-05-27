@@ -3,11 +3,14 @@
 package airplane
 
 import (
+	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestSeamsInactiveWithEmptyEnv pins that every test seam returns
@@ -112,24 +115,29 @@ func TestReleaseBinaryHasNoTestSeamStrings(t *testing.T) {
 
 	tmp := t.TempDir()
 	output := filepath.Join(tmp, "s46-release-test")
-	build := exec.Command(goBin, "build", "-tags", "release", "-o", output, "./cmd/s46")
+	buildCtx, cancelBuild := context.WithTimeout(context.Background(), 2*time.Minute)
+	build := exec.CommandContext(buildCtx, goBin, "build", "-tags", "release", "-o", output, "./cmd/s46")
 	build.Dir = repoRoot
 	if out, err := build.CombinedOutput(); err != nil {
+		cancelBuild()
 		t.Fatalf("go build -tags release failed: %v\n%s", err, out)
 	}
+	cancelBuild()
 
 	// Use `strings` if available; fall back to reading the file and
 	// scanning. The binary is binary-clean so a byte search works.
 	stringsBin, err := exec.LookPath("strings")
 	var stdout []byte
 	if err == nil {
-		stdout, err = exec.Command(stringsBin, output).Output()
+		scanCtx, cancelScan := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancelScan()
+		stdout, err = exec.CommandContext(scanCtx, stringsBin, output).Output()
 		if err != nil {
 			t.Fatalf("strings %s: %v", output, err)
 		}
 	} else {
 		// As a fallback, scan the raw bytes.
-		stdout, err = exec.Command("cat", output).Output()
+		stdout, err = os.ReadFile(output)
 		if err != nil {
 			t.Fatalf("read %s: %v", output, err)
 		}

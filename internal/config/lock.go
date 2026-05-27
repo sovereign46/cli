@@ -8,7 +8,11 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"github.com/sovereign46/cli/internal/contextx"
 )
+
+const lockRetryInterval = 50 * time.Millisecond
 
 type Lock struct {
 	file *os.File
@@ -19,6 +23,9 @@ type Lock struct {
 // two `s46` processes pointing at the same config — even with different
 // XDG_CACHE_HOME values — serialize against each other.
 func (s *Store) Lock(ctx context.Context) (*Lock, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	lockPath := s.ConfigPath + ".lock"
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
 		return nil, err
@@ -36,11 +43,9 @@ func (s *Store) Lock(ctx context.Context) (*Lock, error) {
 			_ = file.Close()
 			return nil, fmt.Errorf("cannot acquire s46 lock: %w", err)
 		}
-		select {
-		case <-ctx.Done():
+		if err := contextx.Sleep(ctx, lockRetryInterval); err != nil {
 			_ = file.Close()
-			return nil, fmt.Errorf("cannot acquire s46 lock: %w", ctx.Err())
-		case <-time.After(50 * time.Millisecond):
+			return nil, fmt.Errorf("cannot acquire s46 lock: %w", err)
 		}
 	}
 }

@@ -18,7 +18,10 @@ func versionCommand(runtime Runtime, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			info := version.Get()
+			info, err := version.Get(cmd.Context())
+			if err != nil {
+				return err
+			}
 			if ok, err := app.writeStructured(info); ok {
 				return err
 			}

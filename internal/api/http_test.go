@@ -87,8 +87,11 @@ func TestHTTPClientWireShape(t *testing.T) {
 		t.Fatal(err)
 	}
 	client := NewHTTPClient(server.URL)
-	if client.Client.Timeout != DefaultHTTPTimeout {
-		t.Fatalf("timeout = %s", client.Client.Timeout)
+	if client.Timeout != DefaultHTTPTimeout {
+		t.Fatalf("timeout = %s", client.Timeout)
+	}
+	if client.Client.Timeout != 0 {
+		t.Fatalf("http client timeout = %s", client.Client.Timeout)
 	}
 	device, err := client.StartDeviceLogin(context.Background(), DeviceLoginRequest{Email: "dscape@s46.dev", DeviceID: "dev-laptop", DeviceName: "Dev laptop"})
 	if err != nil {

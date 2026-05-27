@@ -9,6 +9,7 @@ import (
 
 	"github.com/sovereign46/cli/internal/airplane"
 	"github.com/sovereign46/cli/internal/api"
+	"github.com/sovereign46/cli/internal/contextx"
 	"github.com/sovereign46/cli/internal/strs"
 )
 
@@ -88,6 +89,9 @@ func (c offlineSuggestionClient) wrap(ctx context.Context, err error) error {
 	if err == nil {
 		return nil
 	}
+	if ctxErr := contextx.Done(ctx, err); ctxErr != nil {
+		return ctxErr
+	}
 	if errors.Is(err, api.ErrUnauthorized) || errors.Is(err, api.ErrAuthenticateFirst) {
 		return fmt.Errorf("your s46 session is invalid or expired; run `s46 login` to reauthenticate: %w", err)
 	}
@@ -107,7 +111,11 @@ func (c offlineSuggestionClient) wrap(ctx context.Context, err error) error {
 	if strs.Truthy(c.env["S46_OFFLINE"]) {
 		return err
 	}
-	return c.withUnderlying(offlineSuggestion(ctx, c.env), err)
+	suggestion := offlineSuggestion(ctx, c.env)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	return c.withUnderlying(suggestion, err)
 }
 
 func (c offlineSuggestionClient) withUnderlying(message string, err error) error {
@@ -190,18 +198,15 @@ func cloudUnavailable(err error) bool {
 }
 
 func offlineSuggestion(ctx context.Context, env map[string]string) string {
+	if ctx.Err() != nil {
+		return "cloud unavailable."
+	}
 	report := airplane.Service{Env: env, ModelProbeTimeout: 2 * time.Second}.Check(ctx)
-	if airplaneCheckOK(report, "model-downloaded") && airplaneCheckOK(report, "model-probe") {
+	if ctx.Err() != nil {
+		return "cloud unavailable."
+	}
+	if checkOK(report, "model-downloaded") && checkOK(report, "model-probe") {
 		return "cloud unavailable.\nlocal model is ready.\nRun: s46 airplane mode on"
 	}
 	return "cloud unavailable.\nno local model is installed.\nRun: s46 airplane setup"
-}
-
-func airplaneCheckOK(report airplane.Report, name string) bool {
-	for _, check := range report.Checks {
-		if check.Name == name {
-			return check.OK
-		}
-	}
-	return false
 }

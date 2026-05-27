@@ -22,7 +22,7 @@ import (
 var sessionsRelPath = filepath.Join(piDirName, piAgentDir, "sessions")
 
 func (a Adapter) ShareArtifact(ctx context.Context, req harness.ShareRequest) (share.Artifact, bool, error) {
-	path, ok, err := transcript.ResolveJSONL(config.HomeDir(req.Env), sessionsRelPath, req.Session.ID, transcript.FilenameAfterLastUnderscore, piHeaderID)
+	path, ok, err := transcript.ResolveJSONL(ctx, config.HomeDir(req.Env), sessionsRelPath, req.Session.ID, transcript.FilenameAfterLastUnderscore, piHeaderID)
 	if err != nil || !ok {
 		return share.Artifact{}, false, err
 	}

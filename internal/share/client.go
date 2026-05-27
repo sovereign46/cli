@@ -14,13 +14,16 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/sovereign46/cli/internal/contextx"
 )
 
 const (
-	DefaultAPIBaseURL = "https://gist.s46.dev"
-	DefaultViewerURL  = "https://share.s46.dev"
-	DefaultTTL        = "30d"
-	BlobContentType   = "application/vnd.s46.share+json"
+	DefaultAPIBaseURL  = "https://gist.s46.dev"
+	DefaultViewerURL   = "https://share.s46.dev"
+	DefaultTTL         = "30d"
+	BlobContentType    = "application/vnd.s46.share+json"
+	DefaultHTTPTimeout = 20 * time.Second
 
 	MaxPOWDifficulty = 26
 )
@@ -111,6 +114,10 @@ func (c Client) Delete(ctx context.Context, id string, revokeKey string) (Delete
 }
 
 func (c Client) doJSON(ctx context.Context, method string, path string, body any, out any, revokeKey string, proofOperation string) error {
+	httpClient, timeout := c.httpClient()
+	ctx, cancel := contextx.WithMaxTimeout(ctx, timeout)
+	defer cancel()
+
 	var payload []byte
 	var reader io.Reader
 	if body != nil {
@@ -142,9 +149,9 @@ func (c Client) doJSON(ctx context.Context, method string, path string, body any
 		req.Header.Set("X-S46-Revoke-Key", revokeKey)
 	}
 
-	resp, err := c.httpClient().Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
-		return err
+		return contextx.ExternalError(ctx, err)
 	}
 	defer resp.Body.Close()
 	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -194,6 +201,10 @@ func (c Client) proofHeaders(ctx context.Context, operation string, payload []by
 }
 
 func (c Client) requestChallenge(ctx context.Context, body ChallengeRequest) (ChallengeResponse, error) {
+	httpClient, timeout := c.httpClient()
+	ctx, cancel := contextx.WithMaxTimeout(ctx, timeout)
+	defer cancel()
+
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return ChallengeResponse{}, err
@@ -206,9 +217,9 @@ func (c Client) requestChallenge(ctx context.Context, body ChallengeRequest) (Ch
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-S46-Client-ID", body.ClientID)
 
-	resp, err := c.httpClient().Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
-		return ChallengeResponse{}, err
+		return ChallengeResponse{}, contextx.ExternalError(ctx, err)
 	}
 	defer resp.Body.Close()
 	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -233,11 +244,8 @@ func (c Client) baseURL() string {
 	return baseURL
 }
 
-func (c Client) httpClient() *http.Client {
-	if c.HTTPClient != nil {
-		return c.HTTPClient
-	}
-	return &http.Client{Timeout: 20 * time.Second}
+func (c Client) httpClient() (*http.Client, time.Duration) {
+	return contextx.HTTPClientTimeout(c.HTTPClient, DefaultHTTPTimeout)
 }
 
 func solveProof(ctx context.Context, nonce string, bodyHash string, difficulty int) (string, error) {

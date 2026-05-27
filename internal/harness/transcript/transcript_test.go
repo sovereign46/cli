@@ -50,7 +50,7 @@ func TestResolveJSONLPrefersExactAndNewestPrefixCandidate(t *testing.T) {
 	mustChtimes(t, filepath.Join(root, "new", "session_abcdef999999.jsonl"), time.Unix(30, 0))
 	mustChtimes(t, filepath.Join(root, "exact", "session_abcdef12.jsonl"), time.Unix(20, 0))
 
-	path, ok, err := ResolveJSONL(home, ".sessions", "abcdef12", FilenameAfterLastUnderscore, testHeaderID)
+	path, ok, err := ResolveJSONL(context.Background(), home, ".sessions", "abcdef12", FilenameAfterLastUnderscore, testHeaderID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +58,7 @@ func TestResolveJSONLPrefersExactAndNewestPrefixCandidate(t *testing.T) {
 		t.Fatalf("expected exact candidate, ok=%v path=%s", ok, path)
 	}
 
-	path, ok, err = ResolveJSONL(home, ".sessions", "abcdef99", FilenameAfterLastUnderscore, testHeaderID)
+	path, ok, err = ResolveJSONL(context.Background(), home, ".sessions", "abcdef99", FilenameAfterLastUnderscore, testHeaderID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestResolveJSONLFallsBackToHeaderAndExplicitPath(t *testing.T) {
 	headerPath := filepath.Join(root, "nested", "unknown-name.jsonl")
 	mustWriteFile(t, headerPath, `{"id":"feedbeefcafebabe"}`+"\n")
 
-	path, ok, err := ResolveJSONL(home, ".sessions", "feedbeef", FilenameAfterLastUnderscore, testHeaderID)
+	path, ok, err := ResolveJSONL(context.Background(), home, ".sessions", "feedbeef", FilenameAfterLastUnderscore, testHeaderID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestResolveJSONLFallsBackToHeaderAndExplicitPath(t *testing.T) {
 		t.Fatalf("expected header fallback, ok=%v path=%s", ok, path)
 	}
 
-	path, ok, err = ResolveJSONL(home, ".sessions", "~/.sessions/nested/unknown-name.jsonl", FilenameAfterLastUnderscore, testHeaderID)
+	path, ok, err = ResolveJSONL(context.Background(), home, ".sessions", "~/.sessions/nested/unknown-name.jsonl", FilenameAfterLastUnderscore, testHeaderID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ func TestResolveJSONLFallsBackToHeaderAndExplicitPath(t *testing.T) {
 		t.Fatalf("expected explicit path, ok=%v path=%s", ok, path)
 	}
 
-	if _, _, err := ResolveJSONL(home, ".sessions", "~/missing.jsonl", FilenameAfterLastUnderscore, testHeaderID); err == nil {
+	if _, _, err := ResolveJSONL(context.Background(), home, ".sessions", "~/missing.jsonl", FilenameAfterLastUnderscore, testHeaderID); err == nil {
 		t.Fatal("expected path-like missing ref to error")
 	}
 }

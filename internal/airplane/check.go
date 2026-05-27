@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sovereign46/cli/internal/contextx"
 	"github.com/sovereign46/cli/internal/models"
 	"github.com/sovereign46/cli/internal/strs"
 )
@@ -58,7 +59,7 @@ func (s Service) check(ctx context.Context, assumeVerifiedModel bool) Report {
 	osOK := runtime.GOOS == "darwin" || runtime.GOOS == "linux"
 	report.add(Check{Name: "os/arch", OK: osOK, Required: true, Message: runtime.GOOS + "/" + runtime.GOARCH})
 
-	memory := s.memoryBytes()
+	memory := s.memoryBytes(ctx)
 	report.MemoryGB = gb(memory)
 	if memory <= 0 {
 		report.add(Check{Name: "memory", OK: false, Required: true, Message: "could not determine system memory"})
@@ -97,7 +98,7 @@ func (s Service) check(ctx context.Context, assumeVerifiedModel bool) Report {
 	modelProbe := false
 	modelProbeMessage := skippedVerifiedRuntimeMessage(llamacppModelOK, llamacppSettingsOK)
 	if verifiedRuntimeReady {
-		modelProbeCtx, cancel := context.WithTimeout(ctx, s.modelProbeTimeout())
+		modelProbeCtx, cancel := contextx.WithMaxTimeout(ctx, s.modelProbeTimeout())
 		modelProbe, modelProbeMessage = s.modelProbeWithNotice(modelProbeCtx)
 		cancel()
 	}
@@ -144,7 +145,7 @@ func (s Service) skippedReport() Report {
 }
 
 func (s Service) runBoolCheck(ctx context.Context, timeout time.Duration, check func(context.Context) bool) bool {
-	checkCtx, cancel := context.WithTimeout(ctx, timeout)
+	checkCtx, cancel := contextx.WithMaxTimeout(ctx, timeout)
 	defer cancel()
 	return check(checkCtx)
 }
@@ -269,7 +270,7 @@ func (s Service) modelProbe(ctx context.Context) (bool, string) {
 		return false, "probe request failed: " + err.Error()
 	}
 	request.Header.Set("Content-Type", "application/json")
-	response, err := s.httpClient(s.modelProbeTimeout()).Do(request)
+	response, err := contextx.WithoutHTTPTimeout(s.httpClient()).Do(request)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return false, fmt.Sprintf("probe timed out after %s while loading %s", formatDuration(s.modelProbeTimeout()), s.backendModel())
@@ -326,11 +327,13 @@ func (s Service) gatewayResponding(ctx context.Context) bool {
 	if responding, ok := s.seamGatewayResponding(); ok {
 		return responding
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(s.gatewayURL(), "/")+"/v1/models", nil)
+	probeCtx, cancel := contextx.WithMaxTimeout(ctx, s.checkTimeout())
+	defer cancel()
+	request, err := http.NewRequestWithContext(probeCtx, http.MethodGet, strings.TrimRight(s.gatewayURL(), "/")+"/v1/models", nil)
 	if err != nil {
 		return false
 	}
-	response, err := s.httpClient().Do(request)
+	response, err := contextx.WithoutHTTPTimeout(s.httpClient()).Do(request)
 	if err != nil {
 		return false
 	}

@@ -128,15 +128,11 @@ func homeDir(env map[string]string) string {
 	return ""
 }
 
-func (s Service) httpClient(timeout ...time.Duration) *http.Client {
+func (s Service) httpClient() *http.Client {
 	if s.Client != nil {
 		return s.Client
 	}
-	clientTimeout := checkTimeout
-	if len(timeout) > 0 && timeout[0] > 0 {
-		clientTimeout = timeout[0]
-	}
-	return &http.Client{Timeout: clientTimeout}
+	return &http.Client{}
 }
 
 func (s Service) logPrefix() string {

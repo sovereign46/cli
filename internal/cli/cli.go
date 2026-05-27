@@ -14,6 +14,7 @@ import (
 	"github.com/sovereign46/cli/internal/airplane"
 	"github.com/sovereign46/cli/internal/api"
 	"github.com/sovereign46/cli/internal/config"
+	"github.com/sovereign46/cli/internal/contextx"
 	"github.com/sovereign46/cli/internal/harness"
 	"github.com/sovereign46/cli/internal/harness/claude"
 	"github.com/sovereign46/cli/internal/harness/codex"
@@ -191,11 +192,15 @@ func checkForStartupUpdate(ctx context.Context, runtime Runtime, opts *options, 
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	ctx, cancel := context.WithTimeout(ctx, startupUpdateCheckTimeout)
+	parentCtx := ctx
+	ctx, cancel := contextx.WithMaxTimeout(parentCtx, startupUpdateCheckTimeout)
 	defer cancel()
 	prefix := OutputPrefix(env, opts.configPath)
-	check, err := updater.Updater{CurrentVersion: version.Get().Version, Env: env}.Check(ctx)
+	check, err := updater.Updater{CurrentVersion: version.Version, Env: env}.Check(ctx)
 	if err != nil {
+		if ctxErr := contextx.Done(parentCtx, err); ctxErr != nil {
+			return ctxErr
+		}
 		if opts.verbose && !errors.Is(err, updater.ErrCheckDisabled) && !errors.Is(err, updater.ErrNoRelease) {
 			_, _ = fmt.Fprintf(stderr, "%s update check failed: %v\n", prefix, err)
 		}

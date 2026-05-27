@@ -2,9 +2,11 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"os/exec"
 	"testing"
+	"time"
 )
 
 func TestAirplaneHarnessE2EScriptSmoke(t *testing.T) {
@@ -21,7 +23,9 @@ func TestAirplaneHarnessE2E(t *testing.T) {
 	if os.Getenv("S46_E2E_AIRPLANE") != "1" {
 		t.Skip("set S46_E2E_AIRPLANE=1 to run the real airplane harness E2E")
 	}
-	cmd := exec.Command("bash", "./e2e-airplane-harnesses")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "bash", "./e2e-airplane-harnesses")
 	cmd.Env = os.Environ()
 	var output bytes.Buffer
 	cmd.Stdout = &output

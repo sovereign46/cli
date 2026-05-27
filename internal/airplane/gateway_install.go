@@ -18,6 +18,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/sovereign46/cli/internal/contextx"
 	"github.com/sovereign46/cli/internal/strs"
 )
 
@@ -54,7 +55,13 @@ func (s Service) InstallGateway(ctx context.Context) error {
 		if errors.Is(err, errGatewayVerification) || !gatewaySourceFallbackEnabled() {
 			return err
 		}
+		if ctxErr := contextx.Done(ctx, err); ctxErr != nil {
+			return ctxErr
+		}
 		if sourceErr := s.installGatewayFromSource(ctx); sourceErr != nil {
+			if ctxErr := contextx.Done(ctx, sourceErr); ctxErr != nil {
+				return ctxErr
+			}
 			return fmt.Errorf("%w; source clone fallback failed: %v", err, sourceErr)
 		}
 	}
@@ -66,23 +73,25 @@ func (s Service) installGatewayRelease(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, download.URL, nil)
+	requestCtx, cancel := contextx.WithMaxTimeout(ctx, gatewayDownloadTimeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, download.URL, nil)
 	if err != nil {
 		return err
 	}
 	s.setGitHubHeaders(request)
-	response, err := s.httpClient(gatewayDownloadTimeout).Do(request)
+	response, err := contextx.WithoutHTTPTimeout(s.httpClient()).Do(request)
 	if err != nil {
-		return err
+		return contextx.ExternalError(requestCtx, err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return fmt.Errorf("download gateway release failed: %s", response.Status)
 	}
-	return s.installGatewayVerifiedArchive(response.Body, download)
+	return s.installGatewayVerifiedArchive(requestCtx, response.Body, download)
 }
 
-func (s Service) installGatewayVerifiedArchive(body io.Reader, download gatewayDownload) error {
+func (s Service) installGatewayVerifiedArchive(ctx context.Context, body io.Reader, download gatewayDownload) error {
 	name := strs.FirstNonEmpty(download.Name, "gateway archive")
 	if download.SHA256 == "" {
 		return fmt.Errorf("%w: gateway archive %s has no sha256 checksum", errGatewayVerification, name)
@@ -90,7 +99,7 @@ func (s Service) installGatewayVerifiedArchive(body io.Reader, download gatewayD
 	var archive bytes.Buffer
 	hash := sha256.New()
 	if _, err := io.Copy(io.MultiWriter(&archive, hash), body); err != nil {
-		return err
+		return contextx.ExternalError(ctx, err)
 	}
 	got := hex.EncodeToString(hash.Sum(nil))
 	if !strings.EqualFold(got, download.SHA256) {
@@ -112,7 +121,7 @@ func (s Service) installGatewayFromSource(ctx context.Context) error {
 	if err := os.MkdirAll(filepath.Dir(sourceDir), 0o755); err != nil {
 		return err
 	}
-	installCtx, cancel := context.WithTimeout(ctx, gatewaySourceInstallTime)
+	installCtx, cancel := contextx.WithMaxTimeout(ctx, gatewaySourceInstallTime)
 	defer cancel()
 	if err := s.cloneGatewaySource(installCtx, gitPath, sourceDir); err != nil {
 		return err
@@ -201,14 +210,16 @@ func (s Service) gatewayDownload(ctx context.Context) (gatewayDownload, error) {
 		}
 		return gatewayDownload{Name: gatewayDownloadName(downloadURL), URL: downloadURL, SHA256: checksum}, nil
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, s.gatewayLatestReleaseURL(), nil)
+	requestCtx, cancel := contextx.WithMaxTimeout(ctx, gatewayDownloadTimeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, s.gatewayLatestReleaseURL(), nil)
 	if err != nil {
 		return gatewayDownload{}, err
 	}
 	s.setGitHubHeaders(request)
-	response, err := s.httpClient(gatewayDownloadTimeout).Do(request)
+	response, err := contextx.WithoutHTTPTimeout(s.httpClient()).Do(request)
 	if err != nil {
-		return gatewayDownload{}, err
+		return gatewayDownload{}, contextx.ExternalError(requestCtx, err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusNotFound {
@@ -274,14 +285,16 @@ func gatewaySHA256FromDigest(digest string) (string, error) {
 }
 
 func (s Service) downloadGatewayChecksum(ctx context.Context, checksumURL string) ([]byte, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, checksumURL, nil)
+	requestCtx, cancel := contextx.WithMaxTimeout(ctx, gatewayDownloadTimeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, checksumURL, nil)
 	if err != nil {
 		return nil, err
 	}
 	s.setGitHubHeaders(request)
-	response, err := s.httpClient(gatewayDownloadTimeout).Do(request)
+	response, err := contextx.WithoutHTTPTimeout(s.httpClient()).Do(request)
 	if err != nil {
-		return nil, err
+		return nil, contextx.ExternalError(requestCtx, err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
@@ -289,7 +302,7 @@ func (s Service) downloadGatewayChecksum(ctx context.Context, checksumURL string
 	}
 	content, err := io.ReadAll(io.LimitReader(response.Body, gatewayChecksumMaxBytes+1))
 	if err != nil {
-		return nil, err
+		return nil, contextx.ExternalError(requestCtx, err)
 	}
 	if len(content) > gatewayChecksumMaxBytes {
 		return nil, fmt.Errorf("gateway checksum is larger than %d bytes", gatewayChecksumMaxBytes)

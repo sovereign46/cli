@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/sovereign46/cli/internal/contextx"
 	"github.com/sovereign46/cli/internal/models"
 	"github.com/sovereign46/cli/internal/strs"
 )
@@ -63,11 +64,10 @@ func (s Service) PullModel(ctx context.Context) error {
 	})
 }
 
-func (s Service) StartLlamacpp() error {
+func (s Service) StartLlamacpp(ctx context.Context) error {
 	if s.setupChecksSkipped() {
 		return nil
 	}
-	ctx := context.Background()
 	if err := s.requireVerifiedModel(ctx); err != nil {
 		return err
 	}
@@ -75,6 +75,9 @@ func (s Service) StartLlamacpp() error {
 		if ok, message := s.llamacppServingVerifiedModel(ctx); ok {
 			return nil
 		} else {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			return fmt.Errorf("llama-server is running but %s", message)
 		}
 	}
@@ -85,6 +88,9 @@ func (s Service) StartLlamacpp() error {
 	if !ok {
 		return fmt.Errorf("llama-server is not installed")
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	cmd := exec.Command(path, AirplaneLlamacppArgs(s.Env, s.modelPath())...)
 	cmd.Env = s.processEnv()
 	return s.startDetached(cmd, "llamacpp.log")
@@ -93,6 +99,9 @@ func (s Service) StartLlamacpp() error {
 func (s Service) requireVerifiedModel(ctx context.Context) error {
 	if s.modelDownloaded(ctx) {
 		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	return fmt.Errorf("model is not verified by a signed s46 manifest: %s", s.modelPath())
 }
@@ -106,9 +115,15 @@ func (s Service) requireVerifiedLlamacppRuntime(ctx context.Context) error {
 
 func (s Service) requireLlamacppRuntime(ctx context.Context) error {
 	if !s.llamacppRunning(ctx) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		return fmt.Errorf("llama-server is not responding")
 	}
 	if ok, message := s.llamacppServingVerifiedModel(ctx); !ok {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		return fmt.Errorf("%s", message)
 	}
 	return nil
@@ -133,7 +148,14 @@ func (s Service) LlamacppRunning(ctx context.Context) bool {
 }
 
 func (s Service) LlamacppRuntime(ctx context.Context) LlamacppRuntime {
-	runtimeReport := LlamacppRuntime{Running: s.llamacppRunning(ctx), Server: "not-running", ModelPath: s.modelPath()}
+	advertisedModels := s.advertisedLlamacppModels(ctx)
+	running := advertisedModels != nil
+	if !running {
+		if seamRunning, ok := s.seamLlamacppRunning(); ok {
+			running = seamRunning
+		}
+	}
+	runtimeReport := LlamacppRuntime{Running: running, Server: "not-running", ModelPath: s.modelPath(), AdvertisedModels: advertisedModels}
 	if process, ok := s.llamacppServeProcess(ctx); ok {
 		runtimeReport.PID = process.PID
 		runtimeReport.Command = process.Command
@@ -142,9 +164,6 @@ func (s Service) LlamacppRuntime(ctx context.Context) LlamacppRuntime {
 		runtimeReport.Server = "unknown"
 	}
 	runtimeReport.Settings = LlamacppRuntimeSettings(s.Env, runtimeReport.Command)
-	if runtimeReport.Running {
-		runtimeReport.AdvertisedModels = s.advertisedLlamacppModels(ctx)
-	}
 	return runtimeReport
 }
 
@@ -176,7 +195,7 @@ func (s Service) runHomebrewInstall(ctx context.Context, formula string) error {
 	cmd := exec.CommandContext(ctx, "brew", "install", formula)
 	cmd.Stdout = s.Stdout
 	cmd.Stderr = s.Stderr
-	return cmd.Run()
+	return contextx.ExternalError(ctx, cmd.Run())
 }
 
 func (s Service) llamacppPath() (string, bool) {
@@ -191,7 +210,7 @@ func (s Service) llamacppServeProcess(ctx context.Context) (llamacppProcess, boo
 	if process, found, ok := s.seamLlamacppServeProcess(); ok {
 		return process, found
 	}
-	output, err := exec.CommandContext(ctx, "ps", "-axo", "pid=,ppid=,args=").Output()
+	output, err := contextx.CommandOutput(ctx, "ps", "-axo", "pid=,ppid=,args=")
 	if err != nil {
 		return llamacppProcess{}, false
 	}
@@ -296,7 +315,7 @@ func processEnvForPID(ctx context.Context, pid int) (map[string]string, bool) {
 			return parseEnvFields(strings.ReplaceAll(string(raw), "\x00", "\n")), true
 		}
 	}
-	output, err := exec.CommandContext(ctx, "ps", "eww", "-p", strconv.Itoa(pid), "-o", "command=").Output()
+	output, err := contextx.CommandOutput(ctx, "ps", "eww", "-p", strconv.Itoa(pid), "-o", "command=")
 	if err != nil || len(bytes.TrimSpace(output)) == 0 {
 		return nil, false
 	}
@@ -378,11 +397,13 @@ func (s Service) llamacppRunning(ctx context.Context) bool {
 	if running, ok := s.seamLlamacppRunning(); ok {
 		return running
 	}
+	ctx, cancel := contextx.WithMaxTimeout(ctx, s.checkTimeout())
+	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(LlamacppURL(s.Env), "/")+"/v1/models", nil)
 	if err != nil {
 		return false
 	}
-	response, err := s.httpClient().Do(request)
+	response, err := contextx.WithoutHTTPTimeout(s.httpClient()).Do(request)
 	if err != nil {
 		return false
 	}

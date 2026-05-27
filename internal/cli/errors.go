@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -22,7 +24,7 @@ type ErrorResponse struct {
 }
 
 func RenderExecutionError(root *cobra.Command, runtime Runtime, err error) error {
-	if err == nil {
+	if err == nil || errors.Is(err, context.Canceled) {
 		return nil
 	}
 	if runtime.Env == nil {
