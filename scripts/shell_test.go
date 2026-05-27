@@ -2,11 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestShellSeedsHarnessConfigsIntoSandbox(t *testing.T) {
@@ -51,7 +53,9 @@ printf ok > "$S46_HOST_HOME/seed-ok"
 	gomodcache := goEnv(t, "GOMODCACHE")
 	gocache := goEnv(t, "GOCACHE")
 	gopath := goEnv(t, "GOPATH")
-	cmd := exec.Command("./shell")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "./shell")
 	cmd.Env = append(os.Environ(),
 		"HOME="+hostHome,
 		"SHELL="+fakeShell,
@@ -97,7 +101,9 @@ func writeShellSeedFile(t *testing.T, home, rel, content string, mode os.FileMod
 
 func goEnv(t *testing.T, key string) string {
 	t.Helper()
-	cmd := exec.Command("go", "env", key)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "go", "env", key)
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("go env %s: %v", key, err)

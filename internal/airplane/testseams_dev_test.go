@@ -3,11 +3,14 @@
 package airplane
 
 import (
+	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestSeamsInactiveWithEmptyEnv pins that every test seam returns
@@ -112,7 +115,9 @@ func TestReleaseBinaryHasNoTestSeamStrings(t *testing.T) {
 
 	tmp := t.TempDir()
 	output := filepath.Join(tmp, "s46-release-test")
-	build := exec.Command(goBin, "build", "-tags", "release", "-o", output, "./cmd/s46")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	build := exec.CommandContext(ctx, goBin, "build", "-tags", "release", "-o", output, "./cmd/s46")
 	build.Dir = repoRoot
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("go build -tags release failed: %v\n%s", err, out)
@@ -123,13 +128,13 @@ func TestReleaseBinaryHasNoTestSeamStrings(t *testing.T) {
 	stringsBin, err := exec.LookPath("strings")
 	var stdout []byte
 	if err == nil {
-		stdout, err = exec.Command(stringsBin, output).Output()
+		stdout, err = exec.CommandContext(ctx, stringsBin, output).Output()
 		if err != nil {
 			t.Fatalf("strings %s: %v", output, err)
 		}
 	} else {
 		// As a fallback, scan the raw bytes.
-		stdout, err = exec.Command("cat", output).Output()
+		stdout, err = os.ReadFile(output)
 		if err != nil {
 			t.Fatalf("read %s: %v", output, err)
 		}

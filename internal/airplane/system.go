@@ -1,6 +1,7 @@
 package airplane
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -9,8 +10,10 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 
+	"github.com/sovereign46/cli/internal/contextx"
 	"github.com/sovereign46/cli/internal/strs"
 )
 
@@ -24,13 +27,41 @@ func (s Service) HomebrewAvailable() bool {
 	return err == nil
 }
 
-func (s Service) memoryBytes() int64 {
+var memoryBytesCache struct {
+	sync.Mutex
+	ready bool
+	value int64
+}
+
+func (s Service) memoryBytes(ctx context.Context) int64 {
 	if bytes, ok := s.seamMemoryBytes(); ok {
 		return bytes
 	}
+	memoryBytesCache.Lock()
+	if memoryBytesCache.ready {
+		bytes := memoryBytesCache.value
+		memoryBytesCache.Unlock()
+		return bytes
+	}
+	memoryBytesCache.Unlock()
+
+	bytes := systemMemoryBytes(ctx)
+	if ctx.Err() == nil {
+		memoryBytesCache.Lock()
+		if !memoryBytesCache.ready {
+			memoryBytesCache.value = bytes
+			memoryBytesCache.ready = true
+		}
+		bytes = memoryBytesCache.value
+		memoryBytesCache.Unlock()
+	}
+	return bytes
+}
+
+func systemMemoryBytes(ctx context.Context) int64 {
 	switch runtime.GOOS {
 	case "darwin":
-		out, err := exec.Command("sysctl", "-n", "hw.memsize").Output()
+		out, err := contextx.CommandOutput(ctx, "sysctl", "-n", "hw.memsize")
 		if err != nil {
 			return 0
 		}

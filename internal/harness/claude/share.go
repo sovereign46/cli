@@ -22,7 +22,7 @@ import (
 var projectsRelPath = filepath.Join(".claude", "projects")
 
 func (a Adapter) ShareArtifact(ctx context.Context, req harness.ShareRequest) (share.Artifact, bool, error) {
-	path, ok, err := transcript.ResolveJSONL(config.HomeDir(req.Env), projectsRelPath, req.Session.ID, transcript.FilenameWithoutExtension, claudeHeaderID)
+	path, ok, err := transcript.ResolveJSONL(ctx, config.HomeDir(req.Env), projectsRelPath, req.Session.ID, transcript.FilenameWithoutExtension, claudeHeaderID)
 	if err != nil || !ok {
 		return share.Artifact{}, false, err
 	}

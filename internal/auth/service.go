@@ -12,6 +12,7 @@ import (
 
 	"github.com/sovereign46/cli/internal/api"
 	"github.com/sovereign46/cli/internal/config"
+	"github.com/sovereign46/cli/internal/contextx"
 	"github.com/sovereign46/cli/internal/keyring"
 	"github.com/sovereign46/cli/internal/strs"
 )
@@ -228,12 +229,8 @@ func (s Service) pollDeviceLogin(ctx context.Context, device api.DeviceLogin) (a
 			}
 			return api.TokenSet{}, err
 		}
-		timer := time.NewTimer(interval)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return api.TokenSet{}, ctx.Err()
-		case <-timer.C:
+		if err := contextx.Sleep(ctx, interval); err != nil {
+			return api.TokenSet{}, err
 		}
 	}
 }

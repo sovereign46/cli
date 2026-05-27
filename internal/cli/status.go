@@ -2,16 +2,19 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"os/exec"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/sovereign46/cli/internal/airplane"
 	"github.com/sovereign46/cli/internal/api"
 	"github.com/sovereign46/cli/internal/config"
+	"github.com/sovereign46/cli/internal/contextx"
 	"github.com/sovereign46/cli/internal/harness"
 	"github.com/sovereign46/cli/internal/strs"
 )
@@ -127,8 +130,19 @@ func statusCommand(runtime Runtime, opts *options) *cobra.Command {
 			var localServers []localServerStatus
 			var llamacppRuntime airplane.LlamacppRuntime
 			if showLocalRuntime {
-				localServers = statusLocalServers(app.runtime.Env, team)
-				llamacppRuntime = airplane.Service{Env: app.runtime.Env}.LlamacppRuntime(cmd.Context())
+				g, ctx := errgroup.WithContext(cmd.Context())
+				g.Go(func() error {
+					var err error
+					localServers, err = statusLocalServers(ctx, app.runtime.Env, team)
+					return err
+				})
+				g.Go(func() error {
+					llamacppRuntime = airplane.Service{Env: app.runtime.Env}.LlamacppRuntime(ctx)
+					return ctx.Err()
+				})
+				if err := g.Wait(); err != nil {
+					return err
+				}
 			}
 			result := map[string]any{
 				"authenticated": state.Authenticated,
@@ -285,20 +299,36 @@ func statusChecksFailed(checks []statusCheck) bool {
 	return false
 }
 
-func statusLocalServers(env map[string]string, team *config.TeamConfig) []localServerStatus {
-	servers := []localServerStatus{}
+func statusLocalServers(ctx context.Context, env map[string]string, team *config.TeamConfig) ([]localServerStatus, error) {
+	tasks := []localServerStatus{}
 	llamacppURL := airplane.LlamacppURL(env)
 	if isLocalURL(llamacppURL) {
-		servers = append(servers, describeLocalServer(env, "llamacpp", llamacppURL))
+		tasks = append(tasks, localServerStatus{Name: "llamacpp", URL: llamacppURL})
 	}
 	if apiURL := statusLocalAPIURL(env, team); apiURL != "" {
 		name := "api"
 		if env["S46_AIRPLANE_GATEWAY_URL"] != "" || teamEndpoint(team) == airplane.LocalGatewayURL {
 			name = "gateway"
 		}
-		servers = append(servers, describeLocalServer(env, name, apiURL))
+		tasks = append(tasks, localServerStatus{Name: name, URL: apiURL})
 	}
-	return servers
+	servers := make([]localServerStatus, len(tasks))
+	g, ctx := errgroup.WithContext(ctx)
+	for i, task := range tasks {
+		i, task := i, task
+		g.Go(func() error {
+			server, err := describeLocalServer(ctx, env, task.Name, task.URL)
+			if err != nil {
+				return err
+			}
+			servers[i] = server
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+	return servers, nil
 }
 
 func statusLocalAPIURL(env map[string]string, team *config.TeamConfig) string {
@@ -331,12 +361,12 @@ func localAPIOrigin(rawURL string) string {
 	return origin
 }
 
-func describeLocalServer(env map[string]string, name string, rawURL string) localServerStatus {
+func describeLocalServer(ctx context.Context, env map[string]string, name string, rawURL string) (localServerStatus, error) {
 	status := localServerStatus{Name: name, URL: rawURL, Status: "unknown"}
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
 		status.Message = "invalid URL: " + err.Error()
-		return status
+		return status, nil
 	}
 	status.Host = parsed.Hostname()
 	status.Port = parsed.Port()
@@ -345,14 +375,17 @@ func describeLocalServer(env map[string]string, name string, rawURL string) loca
 	}
 	if status.Port == "" {
 		status.Message = "port unknown"
-		return status
+		return status, nil
 	}
-	process := listeningProcess(env, status.Port)
+	process, err := listeningProcess(ctx, env, status.Port)
+	if err != nil {
+		return status, err
+	}
 	status.Status = process.Status
 	status.PID = process.PID
 	status.Process = process.Command
 	status.Message = process.Message
-	return status
+	return status, nil
 }
 
 func renderLocalServerStatus(status localServerStatus) string {
@@ -407,19 +440,30 @@ type listeningProcessStatus struct {
 	Message string
 }
 
-func listeningProcess(env map[string]string, port string) listeningProcessStatus {
+func listeningProcess(ctx context.Context, env map[string]string, port string) (listeningProcessStatus, error) {
+	if err := ctx.Err(); err != nil {
+		return listeningProcessStatus{}, err
+	}
 	if override, ok := seamListeningProcess(env, port); ok {
-		return parseListeningProcessOverride(override)
+		return parseListeningProcessOverride(override), nil
 	}
-	lsof, err := exec.LookPath("lsof")
+	output, err := runLsofOutput(ctx, "-nP", "-iTCP:"+port, "-sTCP:LISTEN", "-Fp", "-Fc")
+	if errors.Is(err, exec.ErrNotFound) {
+		return listeningProcessStatus{Status: "unknown", Message: "process unknown (lsof not found)"}, nil
+	}
+	if errors.Is(err, errLsofTimedOut) {
+		return listeningProcessStatus{Status: "unknown", Message: "process lookup timed out"}, nil
+	}
 	if err != nil {
-		return listeningProcessStatus{Status: "unknown", Message: "process unknown (lsof not found)"}
+		if ctxErr := contextx.Done(ctx, err); ctxErr != nil {
+			return listeningProcessStatus{}, ctxErr
+		}
+		return listeningProcessStatus{Status: "not_listening"}, nil
 	}
-	output, err := exec.Command(lsof, "-nP", "-iTCP:"+port, "-sTCP:LISTEN", "-Fp", "-Fc").Output()
-	if err != nil || len(output) == 0 {
-		return listeningProcessStatus{Status: "not_listening"}
+	if len(output) == 0 {
+		return listeningProcessStatus{Status: "not_listening"}, nil
 	}
-	return parseLsofProcess(output)
+	return parseLsofProcess(output), nil
 }
 
 func parseListeningProcessOverride(value string) listeningProcessStatus {

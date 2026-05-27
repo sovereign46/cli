@@ -130,11 +130,11 @@ func TestAirplaneLlamacppArgsIncludeRuntimeLimits(t *testing.T) {
 	}
 }
 
-func TestHTTPClientUsesRequestedTimeout(t *testing.T) {
-	service := Service{}
-	client := service.httpClient(5 * time.Minute)
-	if client.Timeout != 5*time.Minute {
-		t.Fatalf("expected requested timeout, got %s", client.Timeout)
+func TestHTTPClientUsesConfiguredClient(t *testing.T) {
+	configured := &http.Client{Timeout: 5 * time.Minute}
+	service := Service{Client: configured}
+	if client := service.httpClient(); client != configured {
+		t.Fatalf("expected configured client")
 	}
 }
 
@@ -261,7 +261,7 @@ func TestStartGatewayRequiresVerifiedRuntime(t *testing.T) {
 		"S46_TEST_LLAMACPP_RUNNING":        "1",
 		"S46_TEST_LLAMACPP_VERIFIED_MODEL": "0",
 		"S46_TEST_START_GATEWAY_OK":        "1",
-	}}.StartGateway()
+	}}.StartGateway(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "not serving verified model") {
 		t.Fatalf("expected verified-runtime error, got %v", err)
 	}
@@ -276,10 +276,10 @@ func TestStartGatewayAssumingVerifiedModelSkipsArtifactVerification(t *testing.T
 		"S46_TEST_START_GATEWAY_OK":        "1",
 	}
 
-	if err := (Service{Env: env}).StartGateway(); err == nil || !strings.Contains(err.Error(), "model is not verified") {
+	if err := (Service{Env: env}).StartGateway(context.Background()); err == nil || !strings.Contains(err.Error(), "model is not verified") {
 		t.Fatalf("expected strict gateway start to require artifact verification, got %v", err)
 	}
-	if err := (Service{Env: env}).StartGatewayAssumingVerifiedModel(); err != nil {
+	if err := (Service{Env: env}).StartGatewayAssumingVerifiedModel(context.Background()); err != nil {
 		t.Fatalf("expected assumed-verified gateway start to skip artifact verification: %v", err)
 	}
 }
@@ -291,7 +291,7 @@ func TestStartLlamacppRequiresVerifiedModel(t *testing.T) {
 		"S46_TEST_MODEL_DOWNLOADED":      "0",
 		"S46_TEST_LLAMACPP_RUNNING":      "0",
 		"S46_TEST_LLAMACPP_PROCESS_KIND": "none",
-	}}.StartLlamacpp()
+	}}.StartLlamacpp(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "model is not verified") {
 		t.Fatalf("expected verified-model error, got %v", err)
 	}

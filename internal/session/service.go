@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -16,6 +15,7 @@ import (
 
 	"github.com/sovereign46/cli/internal/api"
 	"github.com/sovereign46/cli/internal/config"
+	"github.com/sovereign46/cli/internal/contextx"
 	"github.com/sovereign46/cli/internal/harness"
 	"github.com/sovereign46/cli/internal/keyring"
 	sharepkg "github.com/sovereign46/cli/internal/share"
@@ -778,12 +778,7 @@ func currentWorkDir(env map[string]string) string {
 }
 
 func gitRoot(ctx context.Context, wd string) string {
-	cmd := exec.CommandContext(ctx, "git", "-C", wd, "rev-parse", "--show-toplevel")
-	raw, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(raw))
+	return gitOutput(ctx, "-C", wd, "rev-parse", "--show-toplevel")
 }
 
 func sessionInProject(projectRoot string, sessionCWD string, env map[string]string) bool {
@@ -913,8 +908,7 @@ func enrichLandWithGit(ctx context.Context, result api.LandResult) api.LandResul
 }
 
 func gitOutput(ctx context.Context, args ...string) string {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	raw, err := cmd.Output()
+	raw, err := contextx.CommandOutput(ctx, "git", args...)
 	if err != nil {
 		return ""
 	}

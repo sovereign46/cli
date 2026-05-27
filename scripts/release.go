@@ -10,13 +10,16 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -36,17 +39,23 @@ var (
 )
 
 func main() {
-	if err := release(os.Args[1:]); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := release(ctx, os.Args[1:]); err != nil {
+		stop()
+		if errors.Is(err, context.Canceled) {
+			os.Exit(130)
+		}
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func release(args []string) error {
+func release(ctx context.Context, args []string) error {
 	if len(args) == 1 {
 		switch args[0] {
 		case contextCommand, "context":
-			return printChangelogContext()
+			return printChangelogContext(ctx)
 		case "-h", "--help", "help":
 			fmt.Println(usage())
 			return nil
@@ -60,7 +69,7 @@ func release(args []string) error {
 	fmt.Print("\n=== Release Script ===\n\n")
 
 	fmt.Println("Checking for uncommitted changes...")
-	status, err := runOutput("git", "status", "--porcelain")
+	status, err := runOutput(ctx, "git", "status", "--porcelain")
 	if err != nil {
 		return err
 	}
@@ -87,7 +96,7 @@ func release(args []string) error {
 	if err := updateVersionFiles(version); err != nil {
 		return err
 	}
-	if err := run("gofmt", "-w", versionGoFile); err != nil {
+	if err := run(ctx, "gofmt", "-w", versionGoFile); err != nil {
 		return err
 	}
 	fmt.Println()
@@ -99,19 +108,19 @@ func release(args []string) error {
 	fmt.Println()
 
 	fmt.Println("Running tests...")
-	if err := run("go", "test", "./..."); err != nil {
+	if err := run(ctx, "go", "test", "./..."); err != nil {
 		return err
 	}
 	fmt.Println()
 
 	fmt.Println("Committing and tagging...")
-	if err := stageChangedFiles(); err != nil {
+	if err := stageChangedFiles(ctx); err != nil {
 		return err
 	}
-	if err := run("git", "commit", "-m", fmt.Sprintf("Release v%s", version)); err != nil {
+	if err := run(ctx, "git", "commit", "-m", fmt.Sprintf("Release v%s", version)); err != nil {
 		return err
 	}
-	if err := run("git", "tag", "v"+version); err != nil {
+	if err := run(ctx, "git", "tag", "v"+version); err != nil {
 		return err
 	}
 	fmt.Println()
@@ -123,19 +132,19 @@ func release(args []string) error {
 	fmt.Println()
 
 	fmt.Println("Committing changelog updates...")
-	if err := stageChangedFiles(); err != nil {
+	if err := stageChangedFiles(ctx); err != nil {
 		return err
 	}
-	if err := run("git", "commit", "-m", "Add [Unreleased] section for next cycle"); err != nil {
+	if err := run(ctx, "git", "commit", "-m", "Add [Unreleased] section for next cycle"); err != nil {
 		return err
 	}
 	fmt.Println()
 
 	fmt.Println("Pushing to remote...")
-	if err := run("git", "push", "origin", "main"); err != nil {
+	if err := run(ctx, "git", "push", "origin", "main"); err != nil {
 		return err
 	}
-	if err := run("git", "push", "origin", "v"+version); err != nil {
+	if err := run(ctx, "git", "push", "origin", "v"+version); err != nil {
 		return err
 	}
 	fmt.Println()
@@ -152,7 +161,7 @@ func usage() string {
 	}, "\n")
 }
 
-func printChangelogContext() error {
+func printChangelogContext(ctx context.Context) error {
 	currentVersion, err := readVersion()
 	if err != nil {
 		return err
@@ -175,7 +184,7 @@ func printChangelogContext() error {
 	fmt.Println("4. Run `go run ./scripts/release.go <major|minor|patch|x.y.z>` only after the tree is clean.")
 	fmt.Println()
 	fmt.Printf("Current VERSION: %s\n", currentVersion)
-	if head, err := captureOutput("git", "rev-parse", "--short", "HEAD"); err == nil {
+	if head, err := captureOutput(ctx, "git", "rev-parse", "--short", "HEAD"); err == nil {
 		fmt.Printf("HEAD before bump: %s\n", strings.TrimSpace(head))
 	}
 	if latestChangelogVersion == "" {
@@ -192,27 +201,27 @@ func printChangelogContext() error {
 
 	if latestChangelogVersion != "" {
 		tag := "v" + latestChangelogVersion
-		if gitRefExists(tag) {
-			if err := printRangeContext("Changes since latest changelog release tag", tag+"..HEAD"); err != nil {
+		if gitRefExists(ctx, tag) {
+			if err := printRangeContext(ctx, "Changes since latest changelog release tag", tag+"..HEAD"); err != nil {
 				return err
 			}
 		} else {
 			fmt.Printf("## Changes since latest changelog release tag\n\n")
 			fmt.Printf("Tag `%s` does not exist locally, so release-tag diff context is unavailable.\n\n", tag)
 		}
-	} else if root, ok := firstCommit(); ok {
-		if err := printRangeContext("Changes after repository root commit", root+"..HEAD"); err != nil {
+	} else if root, ok := firstCommit(ctx); ok {
+		if err := printRangeContext(ctx, "Changes after repository root commit", root+"..HEAD"); err != nil {
 			return err
 		}
 	}
 
-	if commit, ok := lastChangelogCommit(); ok {
-		if err := printRangeContext("Changes since the last CHANGELOG.md edit", commit+"..HEAD"); err != nil {
+	if commit, ok := lastChangelogCommit(ctx); ok {
+		if err := printRangeContext(ctx, "Changes since the last CHANGELOG.md edit", commit+"..HEAD"); err != nil {
 			return err
 		}
 	}
 
-	status, err := captureOutput("git", "status", "--short")
+	status, err := captureOutput(ctx, "git", "status", "--short")
 	if err != nil {
 		return err
 	}
@@ -220,7 +229,7 @@ func printChangelogContext() error {
 		fmt.Println("## Working tree changes")
 		fmt.Println()
 		printCommandOutput("git status --short", status)
-		diffstat, err := captureOutput("git", "diff", "--stat")
+		diffstat, err := captureOutput(ctx, "git", "diff", "--stat")
 		if err != nil {
 			return err
 		}
@@ -231,21 +240,21 @@ func printChangelogContext() error {
 	return nil
 }
 
-func printRangeContext(title string, rangeSpec string) error {
+func printRangeContext(ctx context.Context, title string, rangeSpec string) error {
 	fmt.Printf("## %s\n\n", title)
-	log, err := captureOutput("git", "log", "--oneline", rangeSpec)
+	log, err := captureOutput(ctx, "git", "log", "--oneline", rangeSpec)
 	if err != nil {
 		return err
 	}
 	printCommandOutput(commandString("git", "log", "--oneline", rangeSpec), log)
 
-	nameStatus, err := captureOutput("git", "diff", "--name-status", rangeSpec)
+	nameStatus, err := captureOutput(ctx, "git", "diff", "--name-status", rangeSpec)
 	if err != nil {
 		return err
 	}
 	printCommandOutput(commandString("git", "diff", "--name-status", rangeSpec), nameStatus)
 
-	diffstat, err := captureOutput("git", "diff", "--stat", rangeSpec)
+	diffstat, err := captureOutput(ctx, "git", "diff", "--stat", rangeSpec)
 	if err != nil {
 		return err
 	}
@@ -423,13 +432,13 @@ func latestChangelogReleaseVersion() (string, error) {
 	return match[1], nil
 }
 
-func gitRefExists(ref string) bool {
-	cmd := exec.Command("git", "rev-parse", "--verify", "--quiet", ref+"^{commit}")
-	return cmd.Run() == nil
+func gitRefExists(ctx context.Context, ref string) bool {
+	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+	return cmd.Run() == nil && ctx.Err() == nil
 }
 
-func firstCommit() (string, bool) {
-	output, err := captureOutput("git", "rev-list", "--max-parents=0", "HEAD")
+func firstCommit(ctx context.Context) (string, bool) {
+	output, err := captureOutput(ctx, "git", "rev-list", "--max-parents=0", "HEAD")
 	if err != nil {
 		return "", false
 	}
@@ -440,8 +449,8 @@ func firstCommit() (string, bool) {
 	return commits[0], true
 }
 
-func lastChangelogCommit() (string, bool) {
-	output, err := captureOutput("git", "log", "-n", "1", "--format=%H", "--", changelogFile)
+func lastChangelogCommit(ctx context.Context) (string, bool) {
+	output, err := captureOutput(ctx, "git", "log", "-n", "1", "--format=%H", "--", changelogFile)
 	if err != nil {
 		return "", false
 	}
@@ -449,8 +458,8 @@ func lastChangelogCommit() (string, bool) {
 	return commit, commit != ""
 }
 
-func stageChangedFiles() error {
-	output, err := runOutput("git", "ls-files", "-m", "-o", "-d", "--exclude-standard")
+func stageChangedFiles(ctx context.Context) error {
+	output, err := runOutput(ctx, "git", "ls-files", "-m", "-o", "-d", "--exclude-standard")
 	if err != nil {
 		return err
 	}
@@ -459,7 +468,7 @@ func stageChangedFiles() error {
 		return nil
 	}
 	args := append([]string{"add", "--"}, paths...)
-	return run("git", args...)
+	return run(ctx, "git", args...)
 }
 
 func splitLines(output string) []string {
@@ -485,30 +494,36 @@ func isBumpType(value string) bool {
 	}
 }
 
-func run(name string, args ...string) error {
+func run(ctx context.Context, name string, args ...string) error {
 	fmt.Printf("$ %s\n", commandString(name, args...))
-	cmd := exec.Command(name, args...)
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		return fmt.Errorf("command failed: %s: %w", commandString(name, args...), err)
 	}
 	return nil
 }
 
-func runOutput(name string, args ...string) (string, error) {
+func runOutput(ctx context.Context, name string, args ...string) (string, error) {
 	fmt.Printf("$ %s\n", commandString(name, args...))
-	return captureOutput(name, args...)
+	return captureOutput(ctx, name, args...)
 }
 
-func captureOutput(name string, args ...string) (string, error) {
-	cmd := exec.Command(name, args...)
+func captureOutput(ctx context.Context, name string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", ctxErr
+		}
 		reason := strings.TrimSpace(stderr.String())
 		if reason == "" {
 			reason = err.Error()

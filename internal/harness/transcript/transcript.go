@@ -121,7 +121,7 @@ func BuildArtifact(source Source, fallback api.Session, opts share.BuildOptions)
 	return share.SanitizeArtifact(artifact, share.Redactor{Home: opts.Home})
 }
 
-func ResolveJSONL(home string, rootRel string, sessionRef string, idFromFilename func(string) (string, bool), headerID func(string) (string, error)) (string, bool, error) {
+func ResolveJSONL(ctx context.Context, home string, rootRel string, sessionRef string, idFromFilename func(string) (string, bool), headerID func(string) (string, error)) (string, bool, error) {
 	ref := strings.TrimSpace(sessionRef)
 	if ref == "" || strings.HasPrefix(ref, "@") {
 		return "", false, nil
@@ -130,7 +130,7 @@ func ResolveJSONL(home string, rootRel string, sessionRef string, idFromFilename
 		return path, ok, err
 	}
 	root := filepath.Join(home, rootRel)
-	candidates, err := FindJSONLCandidates(root, ref, idFromFilename, headerID)
+	candidates, err := FindJSONLCandidates(ctx, root, ref, idFromFilename, headerID)
 	if err != nil {
 		return "", false, err
 	}
@@ -201,7 +201,10 @@ func ResolveExplicitPath(home string, ref string) (string, bool, error) {
 	return "", false, nil
 }
 
-func FindJSONLCandidates(root string, ref string, idFromFilename func(string) (string, bool), headerID func(string) (string, error)) ([]Candidate, error) {
+func FindJSONLCandidates(ctx context.Context, root string, ref string, idFromFilename func(string) (string, bool), headerID func(string) (string, error)) ([]Candidate, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if _, err := os.Stat(root); err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -209,9 +212,16 @@ func FindJSONLCandidates(root string, ref string, idFromFilename func(string) (s
 		return nil, err
 	}
 	var candidates []Candidate
-	var fallbackPaths []string
+	type fallbackCandidate struct {
+		path    string
+		modTime time.Time
+	}
+	var fallbackCandidates []fallbackCandidate
 	if err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if entry.IsDir() {
@@ -220,15 +230,22 @@ func FindJSONLCandidates(root string, ref string, idFromFilename func(string) (s
 		if filepath.Ext(path) != ".jsonl" {
 			return nil
 		}
+		id, ok := idFromFilename(filepath.Base(path))
+		if ok {
+			if SessionIDMatches(id, ref) {
+				info, err := entry.Info()
+				if err != nil {
+					return err
+				}
+				candidates = append(candidates, Candidate{Path: path, ModTime: info.ModTime(), Exact: id == ref})
+			}
+			return nil
+		}
 		info, err := entry.Info()
 		if err != nil {
 			return err
 		}
-		if id, ok := idFromFilename(filepath.Base(path)); ok && SessionIDMatches(id, ref) {
-			candidates = append(candidates, Candidate{Path: path, ModTime: info.ModTime(), Exact: id == ref})
-			return nil
-		}
-		fallbackPaths = append(fallbackPaths, path)
+		fallbackCandidates = append(fallbackCandidates, fallbackCandidate{path: path, modTime: info.ModTime()})
 		return nil
 	}); err != nil {
 		return nil, err
@@ -236,16 +253,15 @@ func FindJSONLCandidates(root string, ref string, idFromFilename func(string) (s
 	if len(candidates) > 0 {
 		return candidates, nil
 	}
-	for _, path := range fallbackPaths {
-		id, err := headerID(path)
+	for _, fallback := range fallbackCandidates {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		id, err := headerID(fallback.path)
 		if err != nil || !SessionIDMatches(id, ref) {
 			continue
 		}
-		info, statErr := os.Stat(path)
-		if statErr != nil {
-			return nil, statErr
-		}
-		candidates = append(candidates, Candidate{Path: path, ModTime: info.ModTime(), Exact: id == ref})
+		candidates = append(candidates, Candidate{Path: fallback.path, ModTime: fallback.modTime, Exact: id == ref})
 	}
 	return candidates, nil
 }

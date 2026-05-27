@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,8 +14,10 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/sovereign46/cli/internal/airplane"
+	"github.com/sovereign46/cli/internal/contextx"
 	"github.com/sovereign46/cli/internal/strs"
 )
 
@@ -40,7 +41,10 @@ func airplaneLogsCommand(runtime Runtime, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			files = resolveAirplaneLogFiles(app.runtime.Env, files)
+			files, err = resolveAirplaneLogFiles(cmd.Context(), app.runtime.Env, files)
+			if err != nil {
+				return err
+			}
 			if opts.json {
 				if follow {
 					return fmt.Errorf("--follow streams logs; use --jsonl with --follow")
@@ -80,68 +84,101 @@ func selectedAirplaneLogFiles(files []airplane.LogFile, selected string) ([]airp
 // resolveAirplaneLogFiles fills in actual file paths for log entries
 // that don't exist at their default location, by inspecting running
 // processes and dev-shell tempdirs.
-func resolveAirplaneLogFiles(env map[string]string, files []airplane.LogFile) []airplane.LogFile {
-	resolved := make([]airplane.LogFile, 0, len(files))
-	for _, file := range files {
+func resolveAirplaneLogFiles(ctx context.Context, env map[string]string, files []airplane.LogFile) ([]airplane.LogFile, error) {
+	resolved := make([]airplane.LogFile, len(files))
+	g, ctx := errgroup.WithContext(ctx)
+	for i, file := range files {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		i, file := i, file
 		if fileExists(file.Path) {
-			resolved = append(resolved, file)
+			resolved[i] = file
 			continue
 		}
-		if discovered := discoverAirplaneLogPath(env, file); discovered != "" {
-			file.Path = discovered
-		}
-		resolved = append(resolved, file)
+		g.Go(func() error {
+			discovered, err := discoverAirplaneLogPath(ctx, env, file)
+			if err != nil {
+				return err
+			}
+			if discovered != "" {
+				file.Path = discovered
+			}
+			resolved[i] = file
+			return nil
+		})
 	}
-	return resolved
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+	return resolved, nil
 }
 
-func discoverAirplaneLogPath(env map[string]string, file airplane.LogFile) string {
+func discoverAirplaneLogPath(ctx context.Context, env map[string]string, file airplane.LogFile) (string, error) {
 	if override, ok := seamAirplaneLogPath(env, file.Name); ok && fileExists(override) {
-		return override
+		return override, nil
 	}
 	filename := filepath.Base(file.Path)
 	candidates := []string{}
 	if port := airplaneLogPort(env, file.Name); port != "" {
-		for _, pid := range listeningProcessIDs(port) {
-			candidates = append(candidates, processOpenLogPaths(pid, filename)...)
+		pids, err := listeningProcessIDs(ctx, port)
+		if err != nil {
+			return "", err
 		}
+		paths, err := processOpenLogPaths(ctx, pids, filename)
+		if err != nil {
+			return "", err
+		}
+		candidates = append(candidates, paths...)
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
 	candidates = append(candidates, devShellLogCandidates(filename)...)
-	return newestExistingFile(candidates)
+	return newestExistingFile(candidates), nil
 }
 
 func airplaneLogPort(env map[string]string, name string) string {
 	switch name {
 	case "llamacpp":
-		return portFromURL(airplane.LlamacppURL(env))
+		return localServerPort(airplane.LlamacppURL(env))
 	case "gateway":
-		return portFromURL(strs.FirstNonEmpty(strs.EnvValue(env, "S46_AIRPLANE_GATEWAY_URL"), airplane.LocalGatewayURL))
+		return localServerPort(strs.FirstNonEmpty(strs.EnvValue(env, "S46_AIRPLANE_GATEWAY_URL"), airplane.LocalGatewayURL))
 	default:
 		return ""
 	}
 }
 
-func portFromURL(rawURL string) string {
-	parsed, err := url.Parse(rawURL)
+var errLsofTimedOut = errors.New("lsof timed out")
+
+func listeningProcessIDs(ctx context.Context, port string) ([]string, error) {
+	output, err := runLsofOutput(ctx, "-nP", "-iTCP:"+port, "-sTCP:LISTEN", "-Fp")
 	if err != nil {
-		return ""
+		if ctxErr := contextx.Done(ctx, err); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, nil
 	}
-	if port := parsed.Port(); port != "" {
-		return port
-	}
-	return defaultPort(parsed.Scheme)
+	return parseLsofProcessIDs(output), nil
 }
 
-func listeningProcessIDs(port string) []string {
-	lsof, err := exec.LookPath("lsof")
-	if err != nil {
-		return nil
+func runLsofOutput(ctx context.Context, args ...string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	output, err := exec.Command(lsof, "-nP", "-iTCP:"+port, "-sTCP:LISTEN", "-Fp").Output()
+	commandCtx, cancel := contextx.WithMaxTimeout(ctx, contextx.DefaultCommandTimeout)
+	defer cancel()
+	output, err := exec.CommandContext(commandCtx, "lsof", args...).Output()
 	if err != nil {
-		return nil
+		if commandCtx.Err() != nil {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return nil, errLsofTimedOut
+		}
+		return nil, err
 	}
-	return parseLsofProcessIDs(output)
+	return output, nil
 }
 
 func parseLsofProcessIDs(output []byte) []string {
@@ -161,16 +198,18 @@ func parseLsofProcessIDs(output []byte) []string {
 	return ids
 }
 
-func processOpenLogPaths(pid string, filename string) []string {
-	lsof, err := exec.LookPath("lsof")
-	if err != nil {
-		return nil
+func processOpenLogPaths(ctx context.Context, pids []string, filename string) ([]string, error) {
+	if len(pids) == 0 {
+		return nil, nil
 	}
-	output, err := exec.Command(lsof, "-nP", "-p", pid, "-a", "-d", "1,2", "-Fn").Output()
+	output, err := runLsofOutput(ctx, "-nP", "-p", strings.Join(pids, ","), "-a", "-d", "1,2", "-Fn")
 	if err != nil {
-		return nil
+		if ctxErr := contextx.Done(ctx, err); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, nil
 	}
-	return parseLsofOpenLogPaths(output, filename)
+	return parseLsofOpenLogPaths(output, filename), nil
 }
 
 func parseLsofOpenLogPaths(output []byte, filename string) []string {
@@ -314,7 +353,9 @@ func followAirplaneLogsJSONL(ctx context.Context, app *app, files []airplane.Log
 				return err
 			}
 		}
-		time.Sleep(200 * time.Millisecond)
+		if err := contextx.Sleep(ctx, 200*time.Millisecond); err != nil {
+			return err
+		}
 	}
 }
 
@@ -359,7 +400,10 @@ func followAirplaneLogs(ctx context.Context, app *app, files []airplane.LogFile,
 	command := exec.CommandContext(ctx, "tail", args...)
 	command.Stdout = app.runtime.Stdout
 	command.Stderr = app.runtime.Stderr
-	return command.Run()
+	if err := command.Run(); err != nil {
+		return contextx.ExternalError(ctx, err)
+	}
+	return nil
 }
 
 func tailTextFile(path string, lines int) []string {

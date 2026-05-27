@@ -16,6 +16,7 @@ import (
 
 	"github.com/sovereign46/cli/internal/airplane"
 	askpkg "github.com/sovereign46/cli/internal/ask"
+	"github.com/sovereign46/cli/internal/contextx"
 )
 
 type askCommandResult struct {
@@ -73,6 +74,9 @@ func runAsk(ctx context.Context, app *app, prompt string) error {
 
 func ensureAskLocalRuntime(ctx context.Context, app *app) (airplane.Report, error) {
 	report := airplane.Service{Env: app.runtime.Env}.Check(ctx)
+	if err := ctx.Err(); err != nil {
+		return report, err
+	}
 	if report.Ready {
 		return report, nil
 	}
@@ -275,7 +279,10 @@ func runAskShellCommand(ctx context.Context, app *app, command string) error {
 	if cwd := strings.TrimSpace(app.runtime.Env["PWD"]); filepath.IsAbs(cwd) {
 		cmd.Dir = cwd
 	}
-	return cmd.Run()
+	if err := cmd.Run(); err != nil {
+		return contextx.ExternalError(ctx, err)
+	}
+	return nil
 }
 
 func askCommandEnv(env map[string]string) []string {

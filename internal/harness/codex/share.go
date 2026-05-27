@@ -22,7 +22,7 @@ import (
 var sessionsRelPath = filepath.Join(codexDirName, "sessions")
 
 func (a Adapter) ShareArtifact(ctx context.Context, req harness.ShareRequest) (share.Artifact, bool, error) {
-	path, ok, err := transcript.ResolveJSONL(config.HomeDir(req.Env), sessionsRelPath, req.Session.ID, codexFilenameID, codexHeaderID)
+	path, ok, err := transcript.ResolveJSONL(ctx, config.HomeDir(req.Env), sessionsRelPath, req.Session.ID, codexFilenameID, codexHeaderID)
 	if err != nil || !ok {
 		return share.Artifact{}, false, err
 	}

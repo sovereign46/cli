@@ -1,6 +1,7 @@
 package version
 
 import (
+	"context"
 	"runtime/debug"
 	"testing"
 )
@@ -61,7 +62,10 @@ func TestGetReturnsLdflagsWhenSet(t *testing.T) {
 	Version, Commit, Date = "9.9.9", "deadbeef", "2026-05-20T10:00:00Z"
 	defer func() { Version, Commit, Date = originalVersion, originalCommit, originalDate }()
 
-	info := Get()
+	info, err := Get(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if info.Version != "9.9.9" || info.Commit != "deadbeef" || info.Date != "2026-05-20T10:00:00Z" {
 		t.Fatalf("Get() = %#v", info)
 	}
@@ -77,7 +81,10 @@ func TestGetFillsFromBuildInfoWhenLdflagsMissing(t *testing.T) {
 
 	// We can't force a specific BuildInfo, but we can at least confirm
 	// Get() doesn't panic and returns a populated Info.
-	info := Get()
+	info, err := Get(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if info.Version == "" || info.GoVersion == "" {
 		t.Errorf("Get() returned empty fields: %#v", info)
 	}
