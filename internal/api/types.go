@@ -6,7 +6,7 @@ import (
 )
 
 const (
-	DefaultModel       = "s46/kimi-k2.6"
+	DefaultModel       = "s46/devstral-small-2-24b"
 	DefaultTeam        = "@s46/engineering"
 	DefaultAccount     = "dscape@s46.dev"
 	DefaultGatewayURL  = "https://gateway.s46.dev"
@@ -15,13 +15,7 @@ const (
 )
 
 func DefaultModelList() []string {
-	return []string{
-		"s46/kimi-k2.6",
-		"s46/gemma-3",
-		"s46/deepseek-coder-v3",
-		"s46/qwen3-coder",
-		"s46/mistral-large",
-	}
+	return []string{DefaultModel}
 }
 
 // DeviceAuthAPI covers magic-link / device-auth flows.

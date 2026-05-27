@@ -1,2 +1,2 @@
-ID                         STATE    HARNESS   MODEL          AGE  SPENT    TASK
-@dscape/auth-redirect-fix  running  standard  s46/kimi-k2.6  14h  €4.20  Fix auth redirect handling
+ID                         STATE    HARNESS   MODEL                     AGE  SPENT    TASK
+@dscape/auth-redirect-fix  running  standard  s46/devstral-small-2-24b  14h  €4.20  Fix auth redirect handling

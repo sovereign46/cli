@@ -1871,7 +1871,7 @@ func TestConnectCodexAndPi(t *testing.T) {
 	if s46["baseUrl"] != "https://gateway.s46.dev/v1" || s46["api"] != "openai-completions" || s46["apiKey"] != "!s46 token --refresh" || s46["authHeader"] != true {
 		t.Fatalf("unexpected pi provider: %#v", s46)
 	}
-	if got := len(s46["models"].([]any)); got != 5 {
+	if got := len(s46["models"].([]any)); got != 1 {
 		t.Fatalf("models len = %d", got)
 	}
 }
@@ -1918,14 +1918,14 @@ func TestTeamsListShowsConnectedTeamsAndActiveTeam(t *testing.T) {
 	env := testEnv(t)
 	requireOK(t, run(t, env, "login", "--email", "dscape@s46.dev"))
 	requireOK(t, run(t, env, "connect", "@s46/engineering", "--harness=standard"))
-	requireOK(t, run(t, env, "connect", "@s46/research", "--harness=standard", "--model=s46/qwen3-coder"))
+	requireOK(t, run(t, env, "connect", "@s46/research", "--harness=standard", "--model=s46/devstral-small-2-24b"))
 
 	out := requireOK(t, run(t, env, "teams", "list"))
 	for _, want := range []string{
 		"[s46] connected teams:",
-		"ACTIVE  TEAM              REGION  HARNESS   MODEL            ENDPOINT",
-		"        @s46/engineering  EU-OPO  standard  s46/kimi-k2.6    https://gateway.s46.dev",
-		"*       @s46/research     EU-OPO  standard  s46/qwen3-coder  https://gateway.s46.dev",
+		"ACTIVE  TEAM              REGION  HARNESS   MODEL                     ENDPOINT",
+		"        @s46/engineering  EU-OPO  standard  s46/devstral-small-2-24b  https://gateway.s46.dev",
+		"*       @s46/research     EU-OPO  standard  s46/devstral-small-2-24b  https://gateway.s46.dev",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("teams list missing %q:\n%s", want, out)
@@ -1944,7 +1944,7 @@ func TestTeamsListShowsConnectedTeamsAndActiveTeam(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload.ActiveTeam != "@s46/research" || len(payload.Teams) != 2 || !payload.Teams[1].Active || payload.Teams[1].Model != "s46/qwen3-coder" {
+	if payload.ActiveTeam != "@s46/research" || len(payload.Teams) != 2 || !payload.Teams[1].Active || payload.Teams[1].Model != "s46/devstral-small-2-24b" {
 		t.Fatalf("unexpected teams json: %s", raw)
 	}
 }

@@ -19,7 +19,12 @@ import (
 	"github.com/sovereign46/cli/internal/strs"
 )
 
-const metadataMaxBytes = 1 << 20
+const (
+	metadataMaxBytes           = 1 << 20
+	defaultHTTPDialTimeout     = 10 * time.Second
+	defaultHTTPHeaderTimeout   = 30 * time.Second
+	defaultHTTPIdleConnTimeout = 90 * time.Second
+)
 
 // InstallRequest configures a model install or verification. Production
 // callers rely on built-in trusted keys. Cross-package tests in non-release
@@ -507,6 +512,8 @@ func httpClient(client *http.Client, policy trustPolicy) *http.Client {
 	var configured http.Client
 	if client != nil {
 		configured = *client
+	} else {
+		configured.Transport = defaultHTTPTransport()
 	}
 	configured.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 10 {
@@ -515,6 +522,20 @@ func httpClient(client *http.Client, policy trustPolicy) *http.Client {
 		return policy.validate(req.URL.String())
 	}
 	return &configured
+}
+
+func defaultHTTPTransport() *http.Transport {
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return &http.Transport{}
+	}
+	transport := base.Clone()
+	transport.DialContext = (&net.Dialer{Timeout: defaultHTTPDialTimeout, KeepAlive: 30 * time.Second}).DialContext
+	transport.TLSHandshakeTimeout = defaultHTTPDialTimeout
+	transport.ResponseHeaderTimeout = defaultHTTPHeaderTimeout
+	transport.ExpectContinueTimeout = 1 * time.Second
+	transport.IdleConnTimeout = defaultHTTPIdleConnTimeout
+	return transport
 }
 
 func isLoopbackHost(host string) bool {

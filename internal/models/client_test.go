@@ -33,6 +33,21 @@ func TestBaseURLUsesEnvOverride(t *testing.T) {
 	}
 }
 
+func TestDefaultHTTPClientHasBoundedHeaderTimeout(t *testing.T) {
+	policy, err := newTrustPolicy(DefaultBaseURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := httpClient(nil, policy)
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport type = %T", client.Transport)
+	}
+	if transport.ResponseHeaderTimeout <= 0 || transport.TLSHandshakeTimeout <= 0 {
+		t.Fatalf("timeouts not configured: header=%s tls=%s", transport.ResponseHeaderTimeout, transport.TLSHandshakeTimeout)
+	}
+}
+
 func TestInstallDownloadsSignedModelAndWritesReceipt(t *testing.T) {
 	fixture := newModelFixture(t, []byte("small signed model"))
 	server := fixture.server(t, nil)

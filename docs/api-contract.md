@@ -90,8 +90,8 @@ Response:
   "endpoint": "https://gateway.s46.dev",
   "region": "EU-OPO",
   "workerHosts": [],
-  "defaultModel": "s46/kimi-k2.6",
-  "models": ["s46/kimi-k2.6"]
+  "defaultModel": "s46/devstral-small-2-24b",
+  "models": ["s46/devstral-small-2-24b"]
 }
 ```
 
