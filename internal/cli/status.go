@@ -130,7 +130,8 @@ func statusCommand(runtime Runtime, opts *options) *cobra.Command {
 			var localServers []localServerStatus
 			var llamacppRuntime airplane.LlamacppRuntime
 			if showLocalRuntime {
-				g, ctx := errgroup.WithContext(cmd.Context())
+				parentCtx := cmd.Context()
+				g, ctx := errgroup.WithContext(parentCtx)
 				g.Go(func() error {
 					var err error
 					localServers, err = statusLocalServers(ctx, app.runtime.Env, team)
@@ -138,9 +139,13 @@ func statusCommand(runtime Runtime, opts *options) *cobra.Command {
 				})
 				g.Go(func() error {
 					llamacppRuntime = airplane.Service{Env: app.runtime.Env}.LlamacppRuntime(ctx)
-					return ctx.Err()
+					// Keep sibling errors authoritative; parent cancellation is checked after Wait.
+					return nil
 				})
 				if err := g.Wait(); err != nil {
+					return err
+				}
+				if err := parentCtx.Err(); err != nil {
 					return err
 				}
 			}
