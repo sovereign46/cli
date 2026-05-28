@@ -13,7 +13,7 @@ func renderManualModelDownloadInstructions(report airplane.Report, reason string
 	return []string{
 		"[s46] " + reason,
 		fmt.Sprintf("[s46] Download metadata: %s", modelURL),
-		fmt.Sprintf("[s46] Automatic setup verifies the s46-attest manifest attestation, trust root, advisory index, and model checksum before writing or trusting: %s", report.ModelPath),
+		fmt.Sprintf("[s46] Automatic setup verifies the s46-attest manifest attestation, trust root, signed passed audit, advisory index, and model checksum before writing or trusting: %s", report.ModelPath),
 		"[s46] Audit evidence and trust metadata: https://models.s46.dev/audit/v1/ and https://models.s46.dev/trust/v1/root.json",
 		fmt.Sprintf("[s46] Or set S46_LOCAL_MODEL_PATH=/path/to/%s and rerun `s46 airplane setup`; the file must match the signed s46 manifest.", airplane.GGUFModelFile),
 	}

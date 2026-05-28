@@ -199,7 +199,7 @@ func offerAirplaneModelDownload(ctx context.Context, app *app, service airplane.
 		return report, false, app.renderer.Lines(renderManualModelDownloadInstructions(report, "Model download skipped.")...)
 	}
 
-	if err := app.renderer.Lines("[s46] verifying s46-attest model attestation, trust root, advisory index, and local artifact...", "[s46] evidence: https://models.s46.dev/audit/v1/"); err != nil {
+	if err := app.renderer.Lines("[s46] verifying s46-attest model attestation, trust root, signed audit, advisory index, and local artifact...", "[s46] evidence: https://models.s46.dev/audit/v1/"); err != nil {
 		return report, false, err
 	}
 	if err := service.PullModel(ctx); err != nil {

@@ -281,6 +281,40 @@ func TestInstallRejectsUntrustedArtifactHost(t *testing.T) {
 	}
 }
 
+func TestInstallRejectsModelWithoutPassedAudit(t *testing.T) {
+	fixture := newModelFixture(t, []byte("model"))
+	missingAuditIndex := []byte(`{"schema":1,"runs":[]}`)
+	server := fixture.server(t, map[string][]byte{
+		"/audit/v1/index.json":     missingAuditIndex,
+		"/audit/v1/index.json.sig": fixture.signCanonicalJSONBody(t, "index.json", missingAuditIndex),
+	})
+	defer server.Close()
+	fixture.manifest.URL = server.URL + "/artifacts/model.gguf"
+	fixture.sign(t)
+
+	err := Install(context.Background(), InstallRequest{Env: fixture.env(server.URL), ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, TargetPath: filepath.Join(t.TempDir(), "model.gguf"), HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys()})
+	if err == nil || !strings.Contains(err.Error(), "no passed audit") {
+		t.Fatalf("expected missing audit failure, got %v", err)
+	}
+}
+
+func TestInstallRejectsModelAuditThatDidNotPass(t *testing.T) {
+	fixture := newModelFixture(t, []byte("model"))
+	failedAuditIndex := []byte(fmt.Sprintf(`{"schema":1,"runs":[{"runId":"test-run","modelId":"%s","version":"%s","status":"failed","artifactDigest":"sha256:%s","runUrl":"/audit/v1/runs/test-run/"}]}`, fixture.manifest.ModelID, fixture.manifest.Version, fixture.manifest.SHA256))
+	server := fixture.server(t, map[string][]byte{
+		"/audit/v1/index.json":     failedAuditIndex,
+		"/audit/v1/index.json.sig": fixture.signCanonicalJSONBody(t, "index.json", failedAuditIndex),
+	})
+	defer server.Close()
+	fixture.manifest.URL = server.URL + "/artifacts/model.gguf"
+	fixture.sign(t)
+
+	err := Install(context.Background(), InstallRequest{Env: fixture.env(server.URL), ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, TargetPath: filepath.Join(t.TempDir(), "model.gguf"), HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys()})
+	if err == nil || !strings.Contains(err.Error(), "audit has not passed") {
+		t.Fatalf("expected failed audit rejection, got %v", err)
+	}
+}
+
 func TestInstallRequiresAllowanceForYankedAdvisoryIndex(t *testing.T) {
 	fixture := newModelFixture(t, []byte("model"))
 	index := fmt.Sprintf(`{"schema":1,"advisories":[],"yanks":[{"model":{"modelId":"%s","version":"v1"},"subjectType":"bundle-digest","bundleDigest":"sha256:%s","artifactDigest":"sha256:%s","releaseSignatureSubjectDigest":"sha256:%s","reason":"test yank","url":"/advisories/v1/yanks/S46-2026-0001.json","signatureUrl":"/advisories/v1/yanks/S46-2026-0001.json.sig"}]}`, fixture.manifest.ModelID, strings.Repeat("1", 64), fixture.manifest.SHA256, strings.Repeat("2", 64))
@@ -306,11 +340,9 @@ func TestInstallRequiresAllowanceForYankedAdvisoryIndex(t *testing.T) {
 
 func TestInstallResolutionIncludesSignedRunURLAndDefaultPath(t *testing.T) {
 	fixture := newModelFixture(t, []byte("model"))
-	auditIndex := fmt.Sprintf(`{"schema":1,"runs":[{"runId":"test-run","modelId":"%s","version":"v1","bundleDigest":"sha256:%s","runUrl":"/audit/v1/runs/test-run/"}]}`, fixture.manifest.ModelID, strings.Repeat("3", 64))
-	server := fixture.server(t, map[string][]byte{"/audit/v1/index.json": []byte(auditIndex)})
+	server := fixture.server(t, nil)
 	defer server.Close()
 	fixture.manifest.URL = server.URL + "/artifacts/model.gguf"
-	fixture.manifest.Version = "v1"
 	fixture.sign(t)
 
 	var resolution InstallResolution
@@ -384,14 +416,53 @@ func TestVerifyInstalledDetectsTampering(t *testing.T) {
 	}
 }
 
+func TestVerifyInstalledRequiresAuditedReceipt(t *testing.T) {
+	fixture := newModelFixture(t, []byte("model"))
+	server := fixture.server(t, nil)
+	defer server.Close()
+	fixture.manifest.URL = server.URL + "/artifacts/model.gguf"
+	fixture.sign(t)
+	target := filepath.Join(t.TempDir(), "model.gguf")
+	env := fixture.env(server.URL)
+	request := InstallRequest{Env: env, ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, TargetPath: target, HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys()}
+	if err := Install(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(receiptPath(target))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var receipt Receipt
+	if err := json.Unmarshal(raw, &receipt); err != nil {
+		t.Fatal(err)
+	}
+	receipt.Audit = AuditRun{}
+	body, err := json.MarshalIndent(receipt, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body = append(body, '\n')
+	if err := os.WriteFile(receiptPath(target), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ok, err := VerifyInstalled(context.Background(), request)
+	if err != nil || ok {
+		t.Fatalf("receipt without passed audit should not verify: ok=%v err=%v", ok, err)
+	}
+}
+
 type modelFixture struct {
-	publicKey     ed25519.PublicKey
-	privateKey    ed25519.PrivateKey
-	manifest      Manifest
-	body          []byte
-	attestation   []byte
-	trustRootJSON []byte
-	artifact      []byte
+	publicKey        ed25519.PublicKey
+	privateKey       ed25519.PrivateKey
+	logKey           attest.KeyPair
+	witnesses        []attest.KeyPair
+	manifest         Manifest
+	body             []byte
+	attestation      []byte
+	trustRootJSON    []byte
+	auditIndex       []byte
+	auditAttestation []byte
+	artifact         []byte
 }
 
 func newModelFixture(t *testing.T, artifact []byte) *modelFixture {
@@ -400,15 +471,20 @@ func newModelFixture(t *testing.T, artifact []byte) *modelFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	logKey := mustAttestKeyPair(t)
+	witnesses := []attest.KeyPair{mustAttestKeyPair(t), mustAttestKeyPair(t), mustAttestKeyPair(t)}
 	sum := sha256.Sum256(artifact)
 	return &modelFixture{
 		publicKey:  publicKey,
 		privateKey: privateKey,
+		logKey:     logKey,
+		witnesses:  witnesses,
 		artifact:   artifact,
 		manifest: Manifest{
 			Schema:       SchemaVersion,
 			ModelID:      "s46/test-model",
 			BackendModel: "test-backend",
+			Version:      "v1",
 			Filename:     "model.gguf",
 			Size:         int64(len(artifact)),
 			SHA256:       hex.EncodeToString(sum[:]),
@@ -429,26 +505,80 @@ func (f *modelFixture) sign(t *testing.T) {
 	}
 	body = append(body, '\n')
 	f.body = body
-	subject, err := attest.SubjectFromBytes("manifest.json", body)
-	if err != nil {
-		t.Fatal(err)
+	f.attestation = f.signBody(t, "manifest.json", body)
+	trustedWitnesses := make([]attest.TrustedKey, 0, len(f.witnesses))
+	for i, witness := range f.witnesses {
+		trustedWitnesses = append(trustedWitnesses, attest.TrustedKey{KeyID: fmt.Sprintf("witness-%d", i+1), PublicKey: witness.PublicKey})
 	}
-	bundle, err := attest.Sign(context.Background(), attest.SignOptions{Subjects: []attest.Subject{subject}, PrivateKey: encodeBase64(f.privateKey), KeyID: "test-key", PredicateKind: attest.PredicateKindRelease})
-	if err != nil {
-		t.Fatal(err)
-	}
-	f.attestation, err = attest.MarshalBundle(bundle)
-	if err != nil {
-		t.Fatal(err)
-	}
-	root, err := attest.NewTrustRoot(attest.TrustRootOptions{SigningKeys: []attest.TrustedKey{{KeyID: "test-key", PublicKey: encodeBase64(f.publicKey)}}})
-	if err != nil {
-		t.Fatal(err)
+	root := attest.TrustRoot{
+		Schema: attest.SchemaVersion,
+		SigningKeys: []attest.TrustedKey{{
+			KeyID:     "test-key",
+			PublicKey: encodeBase64(f.publicKey),
+		}},
+		Sigsum: attest.SigsumTrustRoot{
+			Logs:      []attest.TrustedKey{{KeyID: "log-1", PublicKey: f.logKey.PublicKey}},
+			Witnesses: trustedWitnesses,
+			Quorum:    len(trustedWitnesses),
+		},
+		TransparencyStatus: attest.TransparencyStatus{State: attest.TransparencyOperational},
 	}
 	f.trustRootJSON, err = attest.MarshalTrustRoot(root)
 	if err != nil {
 		t.Fatal(err)
 	}
+	f.auditIndex = []byte(fmt.Sprintf(`{"schema":1,"runs":[{"runId":"test-run","modelId":"%s","version":"%s","status":"passed","artifactDigest":"sha256:%s","runUrl":"/audit/v1/runs/test-run/"}]}`, f.manifest.ModelID, f.manifest.Version, f.manifest.SHA256))
+	f.auditAttestation = f.signCanonicalJSONBody(t, "index.json", f.auditIndex)
+}
+
+func mustAttestKeyPair(t *testing.T) attest.KeyPair {
+	t.Helper()
+	pair, err := attest.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pair
+}
+
+func (f *modelFixture) signBody(t *testing.T, name string, body []byte) []byte {
+	t.Helper()
+	subject, err := attest.SubjectFromBytes(name, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	witnessPrivateKeys := make([]string, 0, len(f.witnesses))
+	for _, witness := range f.witnesses {
+		witnessPrivateKeys = append(witnessPrivateKeys, witness.PrivateKey)
+	}
+	bundle, err := attest.Sign(context.Background(), attest.SignOptions{
+		Subjects:      []attest.Subject{subject},
+		PrivateKey:    encodeBase64(f.privateKey),
+		KeyID:         "test-key",
+		PredicateKind: attest.PredicateKindRelease,
+		Sigsum: &attest.SigsumSignOptions{
+			LogPrivateKey:          f.logKey.PrivateKey,
+			WitnessPrivateKeys:     witnessPrivateKeys,
+			WitnessTimestamp:       time.Now().UTC(),
+			DeterministicTreeNonce: name,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attestation, err := attest.MarshalBundle(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return attestation
+}
+
+func (f *modelFixture) signCanonicalJSONBody(t *testing.T, name string, body []byte) []byte {
+	t.Helper()
+	_, canonicalBody, err := canonicalJSONDigest(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return f.signBody(t, name, canonicalBody)
 }
 
 func (f *modelFixture) server(t *testing.T, overrides map[string][]byte) *httptest.Server {
@@ -471,6 +601,10 @@ func (f *modelFixture) server(t *testing.T, overrides map[string][]byte) *httpte
 			_, _ = w.Write(f.trustRootJSON)
 		case "/advisories/v1/index.json":
 			_, _ = w.Write([]byte(`{"schema":1,"advisories":[]}`))
+		case "/audit/v1/index.json":
+			_, _ = w.Write(f.auditIndex)
+		case "/audit/v1/index.json.sig":
+			_, _ = w.Write(f.auditAttestation)
 		case "/artifacts/model.gguf":
 			_, _ = w.Write(f.artifact)
 		default:
@@ -503,6 +637,10 @@ func (f *modelFixture) rangeHandler(onArtifact func(*http.Request)) http.Handler
 			_, _ = w.Write(f.trustRootJSON)
 		case "/advisories/v1/index.json":
 			_, _ = w.Write([]byte(`{"schema":1,"advisories":[]}`))
+		case "/audit/v1/index.json":
+			_, _ = w.Write(f.auditIndex)
+		case "/audit/v1/index.json.sig":
+			_, _ = w.Write(f.auditAttestation)
 		case "/artifacts/model.gguf":
 			if onArtifact != nil {
 				onArtifact(r)

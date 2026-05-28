@@ -21,6 +21,10 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Fixed airplane llama-server startup to honor `S46_LOCAL_MODEL` when setting the backend model alias.
 
+### Security
+
+- Required production+strict model attestation verification plus a signed passed audit run before installing, verifying, or loading local model artifacts.
+
 ## [0.2.1] - 2026-05-23
 
 ### Fixed

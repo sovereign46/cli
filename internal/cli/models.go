@@ -57,7 +57,7 @@ func runModelsVerify(ctx context.Context, app *app, modelID string, options mode
 
 	if !app.options.machineReadable() {
 		if err := app.renderer.Lines(
-			"[s46] verifying s46-attest model attestation, trust root, advisory index, and artifact...",
+			"[s46] verifying s46-attest model attestation, trust root, signed audit, advisory index, and artifact...",
 			fmt.Sprintf("[s46] model: %s", modelID),
 		); err != nil {
 			return err

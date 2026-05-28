@@ -103,7 +103,7 @@ func (s Service) requireVerifiedModel(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return fmt.Errorf("model is not verified by a s46-attest manifest attestation: %s", s.modelPath())
+	return fmt.Errorf("model is not verified by a s46-attest manifest attestation and passed audit: %s", s.modelPath())
 }
 
 func (s Service) requireVerifiedLlamacppRuntime(ctx context.Context) error {

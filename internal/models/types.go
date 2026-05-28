@@ -29,14 +29,6 @@ type Manifest struct {
 	ReleaseSignatureSubjectDigest string          `json:"releaseSignatureSubjectDigest,omitempty"`
 }
 
-type Signature struct {
-	Schema        int    `json:"schema"`
-	KeyID         string `json:"keyId"`
-	Algorithm     string `json:"algorithm"`
-	SignedPayload string `json:"signedPayload,omitempty"`
-	Signature     string `json:"signature"`
-}
-
 type AdvisoryIndex struct {
 	Schema     int                    `json:"schema"`
 	Advisories []AdvisoryIndexSummary `json:"advisories"`
@@ -90,11 +82,16 @@ type AuditIndex struct {
 }
 
 type AuditRun struct {
-	RunID        string `json:"runId"`
-	ModelID      string `json:"modelId"`
-	Version      string `json:"version"`
-	BundleDigest string `json:"bundleDigest"`
-	RunURL       string `json:"runUrl"`
+	RunID                         string `json:"runId"`
+	ModelID                       string `json:"modelId"`
+	Version                       string `json:"version"`
+	Status                        string `json:"status,omitempty"`
+	Result                        string `json:"result,omitempty"`
+	Passed                        *bool  `json:"passed,omitempty"`
+	BundleDigest                  string `json:"bundleDigest"`
+	ArtifactDigest                string `json:"artifactDigest,omitempty"`
+	ReleaseSignatureSubjectDigest string `json:"releaseSignatureSubjectDigest,omitempty"`
+	RunURL                        string `json:"runUrl"`
 }
 
 type ModelWarning struct {
@@ -113,6 +110,7 @@ type Receipt struct {
 	SHA256      string          `json:"sha256"`
 	Manifest    string          `json:"manifest"`
 	Attestation json.RawMessage `json:"attestation,omitempty"`
-	Signature   Signature       `json:"signature,omitempty"`
+	TrustRoot   string          `json:"trustRoot,omitempty"`
+	Audit       AuditRun        `json:"audit"`
 	InstalledAt string          `json:"installedAt"`
 }
