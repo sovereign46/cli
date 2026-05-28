@@ -59,7 +59,7 @@ func EncryptJSONWithKey(plaintext []byte, keyFragment string) (EncryptedBlob, er
 		return EncryptedBlob{}, fmt.Errorf("decode share encryption key: %w", err)
 	}
 	if len(key) != KeyBytes {
-		return EncryptedBlob{}, fmt.Errorf("decrypt key has %d bytes, want %d", len(key), KeyBytes)
+		return EncryptedBlob{}, fmt.Errorf("encrypt key has %d bytes, want %d", len(key), KeyBytes)
 	}
 	return encryptJSONWithRawKey(plaintext, key)
 }
