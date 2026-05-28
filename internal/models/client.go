@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	attest "github.com/sovereign46/attest"
 	"github.com/sovereign46/cli/internal/config"
 	"github.com/sovereign46/cli/internal/contextx"
 	"github.com/sovereign46/cli/internal/strs"
@@ -40,7 +41,32 @@ type InstallRequest struct {
 	HTTPClient      *http.Client
 	ManifestBaseURL string
 	Progress        InstallProgressFunc
+	AllowWarnings   bool
+	OnResolve       func(InstallResolution)
 	trustedKeys     map[string]ed25519.PublicKey
+}
+
+type InstallResolution struct {
+	Manifest    Manifest       `json:"manifest"`
+	TargetPath  string         `json:"targetPath"`
+	RegistryURL string         `json:"registryUrl"`
+	EvidenceURL string         `json:"evidenceUrl"`
+	Warnings    []ModelWarning `json:"warnings,omitempty"`
+}
+
+type WarningsError struct {
+	Warnings []ModelWarning
+}
+
+func (e WarningsError) Error() string {
+	if len(e.Warnings) == 0 {
+		return "model has warnings"
+	}
+	messages := make([]string, 0, len(e.Warnings))
+	for _, warning := range e.Warnings {
+		messages = append(messages, warning.Message)
+	}
+	return "model has warnings; pass --yes or confirm interactively: " + strings.Join(messages, "; ")
 }
 
 type InstallProgressFunc func(InstallProgress)
@@ -64,13 +90,14 @@ type InstallProgress struct {
 }
 
 type verifiedManifest struct {
-	Manifest  Manifest
-	Body      []byte
-	Signature Signature
+	Manifest        Manifest
+	Body            []byte
+	Attestation     attest.Bundle
+	AttestationBody []byte
 }
 
 func Install(ctx context.Context, request InstallRequest) error {
-	if err := validateInstallRequest(request); err != nil {
+	if err := validateModelRequest(request); err != nil {
 		return err
 	}
 	manifest, err := fetchVerifiedManifest(ctx, request)
@@ -80,8 +107,19 @@ func Install(ctx context.Context, request InstallRequest) error {
 	if err := validateManifest(manifest.Manifest, request); err != nil {
 		return err
 	}
-	if err := checkAdvisories(ctx, request, manifest.Manifest); err != nil {
+	if strings.TrimSpace(request.TargetPath) == "" {
+		request.TargetPath = DefaultTargetPath(request.Env, manifest.Manifest)
+	}
+	warnings, err := advisoryWarnings(ctx, request, manifest.Manifest)
+	if err != nil {
 		return err
+	}
+	evidenceURL := evidenceURLForManifest(ctx, request, manifest.Manifest)
+	if request.OnResolve != nil {
+		request.OnResolve(InstallResolution{Manifest: manifest.Manifest, TargetPath: request.TargetPath, RegistryURL: BaseURL(request.Env), EvidenceURL: evidenceURL, Warnings: warnings})
+	}
+	if len(warnings) > 0 && !request.AllowWarnings {
+		return WarningsError{Warnings: warnings}
 	}
 	if ok, err := verifyInstalledReceiptForManifest(request, manifest.Manifest, true); err != nil {
 		return err
@@ -110,16 +148,68 @@ func BaseURL(env map[string]string) string {
 }
 
 func validateInstallRequest(request InstallRequest) error {
+	if err := validateModelRequest(request); err != nil {
+		return err
+	}
+	if strings.TrimSpace(request.TargetPath) == "" {
+		return fmt.Errorf("target path is required")
+	}
+	return nil
+}
+
+func validateModelRequest(request InstallRequest) error {
 	if strings.TrimSpace(request.ModelID) == "" {
 		return fmt.Errorf("model id is required")
 	}
 	if strings.Contains(request.ModelID, "..") || strings.HasPrefix(request.ModelID, "/") || strings.HasSuffix(request.ModelID, "/") {
 		return fmt.Errorf("invalid model id %q", request.ModelID)
 	}
-	if strings.TrimSpace(request.TargetPath) == "" {
-		return fmt.Errorf("target path is required")
-	}
 	return nil
+}
+
+func DefaultTargetPath(env map[string]string, manifest Manifest) string {
+	base := strings.TrimSpace(strs.EnvValue(env, "S46_MODELS_DIR"))
+	if base == "" {
+		if value := strings.TrimSpace(strs.EnvValue(env, "XDG_DATA_HOME")); value != "" {
+			base = filepath.Join(value, "s46", "models")
+		} else if home := strings.TrimSpace(strs.EnvValue(env, "HOME")); home != "" {
+			base = filepath.Join(home, ".local", "share", "s46", "models")
+		} else {
+			base = filepath.Join(os.TempDir(), "s46", "models")
+		}
+	}
+	filename := strings.TrimSpace(manifest.Filename)
+	if filename == "" {
+		filename = slugPath(manifest.ModelID) + ".gguf"
+	}
+	version := strings.TrimSpace(manifest.Version)
+	if version == "" {
+		version = "latest"
+	}
+	return filepath.Join(base, slugPath(manifest.ModelID), slugPath(version), filename)
+}
+
+func slugPath(value string) string {
+	value = strings.Trim(strings.ToLower(value), "/")
+	var b strings.Builder
+	lastDash := false
+	for _, r := range value {
+		ok := (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '.' || r == '_' || r == '-'
+		if ok {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	out := strings.Trim(b.String(), "-._")
+	if out == "" {
+		return "model"
+	}
+	return out
 }
 
 func fetchVerifiedManifest(ctx context.Context, request InstallRequest) (verifiedManifest, error) {
@@ -135,20 +225,21 @@ func fetchVerifiedManifest(ctx context.Context, request InstallRequest) (verifie
 	}
 	sigBody, err := downloadMetadata(ctx, request.HTTPClient, policy, manifestURL+".sig")
 	if err != nil {
-		return verifiedManifest{}, fmt.Errorf("download model manifest signature: %w", err)
+		return verifiedManifest{}, fmt.Errorf("download model manifest attestation: %w", err)
 	}
-	var signature Signature
-	if err := json.Unmarshal(sigBody, &signature); err != nil {
-		return verifiedManifest{}, fmt.Errorf("decode model manifest signature: %w", err)
-	}
-	if err := verifySignature(body, signature, request); err != nil {
+	trustRoot, err := fetchTrustRoot(ctx, request, policy, baseURL)
+	if err != nil {
 		return verifiedManifest{}, err
+	}
+	attestation, err := verifyAttestationBytes(ctx, body, filepath.Base(manifestURL), sigBody, trustRoot, request)
+	if err != nil {
+		return verifiedManifest{}, fmt.Errorf("verify model manifest attestation: %w", err)
 	}
 	var manifest Manifest
 	if err := json.Unmarshal(body, &manifest); err != nil {
 		return verifiedManifest{}, fmt.Errorf("decode model manifest: %w", err)
 	}
-	return verifiedManifest{Manifest: manifest, Body: body, Signature: signature}, nil
+	return verifiedManifest{Manifest: manifest, Body: body, Attestation: attestation, AttestationBody: sigBody}, nil
 }
 
 func modelManifestURL(baseURL string, modelID string) string {
@@ -216,46 +307,29 @@ func verifySignature(body []byte, signature Signature, request InstallRequest) e
 	return nil
 }
 
-func checkAdvisories(ctx context.Context, request InstallRequest, manifest Manifest) error {
-	baseURL := strs.FirstNonEmpty(request.ManifestBaseURL, BaseURL(request.Env))
-	policy, err := newTrustPolicy(baseURL, request.Env)
+func fetchTrustRoot(ctx context.Context, request InstallRequest, policy trustPolicy, baseURL string) (attest.TrustRoot, error) {
+	rootURL, err := trustRootURL(baseURL)
 	if err != nil {
-		return err
+		return attest.TrustRoot{}, err
 	}
-	indexURL, err := advisoryIndexURL(baseURL)
+	body, err := downloadMetadata(ctx, request.HTTPClient, policy, rootURL)
 	if err != nil {
-		return err
-	}
-	body, err := downloadMetadata(ctx, request.HTTPClient, policy, indexURL)
-	if err != nil {
-		return fmt.Errorf("download advisory index: %w", err)
-	}
-	if sigBody, err := downloadMetadata(ctx, request.HTTPClient, policy, indexURL+".sig"); err == nil {
-		if err := verifyAdvisoryIndexSignature(body, sigBody, request); err != nil {
-			return err
+		if metadataNotFound(err) && attestMode(request.Env) != attest.ModeProduction {
+			return localPinnedTrustRoot(request)
 		}
-	} else if !metadataNotFound(err) {
-		return fmt.Errorf("download advisory index signature: %w", err)
+		return attest.TrustRoot{}, fmt.Errorf("download trust root: %w", err)
 	}
-	var index AdvisoryIndex
-	if err := json.Unmarshal(body, &index); err != nil {
-		return fmt.Errorf("decode advisory index: %w", err)
+	root, err := attest.ParseTrustRoot(body)
+	if err != nil {
+		return attest.TrustRoot{}, fmt.Errorf("decode trust root: %w", err)
 	}
-	if index.Schema != SchemaVersion {
-		return fmt.Errorf("unsupported advisory index schema %d", index.Schema)
+	if err := validateTrustRootPinned(root, request); err != nil {
+		return attest.TrustRoot{}, err
 	}
-	if manifest.Yanked || len(manifest.YankURLs) > 0 {
-		return fmt.Errorf("model release %s is yanked", manifest.ModelID)
-	}
-	for _, yank := range index.Yanks {
-		if advisoryYankMatchesManifest(yank, manifest) {
-			return fmt.Errorf("model release %s is yanked: %s", manifest.ModelID, yank.Reason)
-		}
-	}
-	return nil
+	return root, nil
 }
 
-func advisoryIndexURL(baseURL string) (string, error) {
+func trustRootURL(baseURL string) (string, error) {
 	parsed, err := url.Parse(strings.TrimSpace(baseURL))
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return "", fmt.Errorf("invalid model registry URL %q", baseURL)
@@ -264,27 +338,286 @@ func advisoryIndexURL(baseURL string) (string, error) {
 	if strings.HasSuffix(basePath, "/models/v1") {
 		basePath = strings.TrimSuffix(basePath, "/models/v1")
 	}
-	parsed.Path = pathJoinURL(basePath, "advisories", "v1", "index.json")
+	parsed.Path = pathJoinURL(basePath, "trust", "v1", "root.json")
 	parsed.RawQuery = ""
 	parsed.Fragment = ""
 	return parsed.String(), nil
+}
+
+func verifyAttestationBytes(ctx context.Context, body []byte, subjectName string, bundleBody []byte, trustRoot attest.TrustRoot, request InstallRequest) (attest.Bundle, error) {
+	bundle, err := attest.ParseBundle(bundleBody)
+	if err != nil {
+		return attest.Bundle{}, err
+	}
+	subject, err := attest.SubjectFromBytes(subjectName, body)
+	if err != nil {
+		return attest.Bundle{}, err
+	}
+	result, err := attest.Verify(ctx, attest.VerifyRequest{Bundle: bundle, Subjects: []attest.Subject{subject}, TrustRoot: trustRoot, ExpectedPredicateKind: attest.PredicateKindRelease, Mode: attestMode(request.Env), Strict: attestStrict(request.Env), Now: time.Now().UTC()})
+	if err != nil {
+		return attest.Bundle{}, err
+	}
+	if err := ensureSigningKeyPinned(trustRoot, result.SigningKeyID, request); err != nil {
+		return attest.Bundle{}, err
+	}
+	return bundle, nil
+}
+
+func localPinnedTrustRoot(request InstallRequest) (attest.TrustRoot, error) {
+	keys, err := trustedKeys(request.Env)
+	if err != nil {
+		return attest.TrustRoot{}, err
+	}
+	for keyID, publicKey := range request.trustedKeys {
+		keys[keyID] = publicKey
+	}
+	trusted := make([]attest.TrustedKey, 0, len(keys))
+	for keyID, publicKey := range keys {
+		trusted = append(trusted, attest.TrustedKey{KeyID: keyID, PublicKey: encodeBase64(publicKey)})
+	}
+	return attest.NewTrustRoot(attest.TrustRootOptions{SigningKeys: trusted, TransparencyStatus: attest.TransparencyStatus{State: attest.TransparencyOperational}})
+}
+
+func validateTrustRootPinned(root attest.TrustRoot, request InstallRequest) error {
+	for _, key := range root.SigningKeys {
+		if err := ensureSigningKeyPinned(root, key.KeyID, request); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("trust root contains no pinned Sovereign46 signing key")
+}
+
+func ensureSigningKeyPinned(root attest.TrustRoot, keyID string, request InstallRequest) error {
+	keys, err := trustedKeys(request.Env)
+	if err != nil {
+		return err
+	}
+	for id, publicKey := range request.trustedKeys {
+		keys[id] = publicKey
+	}
+	pinned, ok := keys[keyID]
+	if !ok {
+		return fmt.Errorf("attestation signed by unpinned key %q", keyID)
+	}
+	for _, key := range root.SigningKeys {
+		if key.KeyID != keyID {
+			continue
+		}
+		decoded, err := decodeBase64(key.PublicKey)
+		if err != nil {
+			return err
+		}
+		if string(decoded) == string(pinned) {
+			return nil
+		}
+		return fmt.Errorf("trust root key %q does not match pinned key", keyID)
+	}
+	return fmt.Errorf("trust root does not contain signing key %q", keyID)
+}
+
+func attestMode(env map[string]string) attest.Mode {
+	if envFlag(env, "S46_ATTEST_PRODUCTION") || envFlag(env, "S46_MODELS_ATTEST_PRODUCTION") {
+		return attest.ModeProduction
+	}
+	if attestStrict(env) {
+		return attest.ModeStrict
+	}
+	return attest.ModeDefault
+}
+
+func attestStrict(env map[string]string) bool {
+	return envFlag(env, "S46_ATTEST_STRICT") || envFlag(env, "S46_MODELS_ATTEST_STRICT")
+}
+
+func envFlag(env map[string]string, name string) bool {
+	switch strings.ToLower(strings.TrimSpace(strs.EnvValue(env, name))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func advisoryWarnings(ctx context.Context, request InstallRequest, manifest Manifest) ([]ModelWarning, error) {
+	baseURL := strs.FirstNonEmpty(request.ManifestBaseURL, BaseURL(request.Env))
+	policy, err := newTrustPolicy(baseURL, request.Env)
+	if err != nil {
+		return nil, err
+	}
+	indexURL, err := advisoryIndexURL(baseURL)
+	if err != nil {
+		return nil, err
+	}
+	body, err := downloadMetadata(ctx, request.HTTPClient, policy, indexURL)
+	if err != nil {
+		return nil, fmt.Errorf("download advisory index: %w", err)
+	}
+	if sigBody, err := downloadMetadata(ctx, request.HTTPClient, policy, indexURL+".sig"); err == nil {
+		if trustRoot, rootErr := fetchTrustRoot(ctx, request, policy, baseURL); rootErr == nil {
+			if attestErr := verifyCanonicalJSONAttestation(ctx, body, "index.json", sigBody, trustRoot, request); attestErr == nil {
+				goto advisoryVerified
+			}
+		}
+		if err := verifyAdvisoryIndexSignature(body, sigBody, request); err != nil {
+			return nil, err
+		}
+	} else if !metadataNotFound(err) {
+		return nil, fmt.Errorf("download advisory index signature: %w", err)
+	}
+advisoryVerified:
+	var index AdvisoryIndex
+	if err := json.Unmarshal(body, &index); err != nil {
+		return nil, fmt.Errorf("decode advisory index: %w", err)
+	}
+	if index.Schema != SchemaVersion {
+		return nil, fmt.Errorf("unsupported advisory index schema %d", index.Schema)
+	}
+	var warnings []ModelWarning
+	if manifest.Yanked || len(manifest.YankURLs) > 0 {
+		warnings = append(warnings, ModelWarning{Code: "yanked", Message: fmt.Sprintf("model release %s is yanked", manifest.ModelID), URL: firstString(append(manifest.YankURLs, manifest.AdvisoryURLs...)...)})
+	}
+	for _, advisory := range index.Advisories {
+		if advisoryMatchesManifest(advisory, manifest) {
+			message := fmt.Sprintf("advisory %s applies to %s: %s", advisory.ID, manifest.ModelID, advisory.Title)
+			warnings = append(warnings, ModelWarning{Code: "advisory", Message: message, URL: advisory.URL})
+		}
+	}
+	for _, yank := range index.Yanks {
+		if advisoryYankMatchesManifest(yank, manifest) {
+			message := fmt.Sprintf("model release %s is yanked: %s", manifest.ModelID, yank.Reason)
+			warnings = append(warnings, ModelWarning{Code: "yanked", Message: message, URL: yank.URL})
+		}
+	}
+	return warnings, nil
+}
+
+func advisoryIndexURL(baseURL string) (string, error) {
+	parsed, err := originURL(baseURL)
+	if err != nil {
+		return "", err
+	}
+	parsed.Path = pathJoinURL(parsed.Path, "advisories", "v1", "index.json")
+	return parsed.String(), nil
+}
+
+func evidenceURLForManifest(ctx context.Context, request InstallRequest, manifest Manifest) string {
+	baseURL := strs.FirstNonEmpty(request.ManifestBaseURL, BaseURL(request.Env))
+	fallback := modelAuditURL(baseURL, manifest)
+	policy, err := newTrustPolicy(baseURL, request.Env)
+	if err != nil {
+		return fallback
+	}
+	indexURL, err := auditIndexURL(baseURL)
+	if err != nil {
+		return fallback
+	}
+	body, err := downloadMetadata(ctx, request.HTTPClient, policy, indexURL)
+	if err != nil {
+		return fallback
+	}
+	var index AuditIndex
+	if err := json.Unmarshal(body, &index); err != nil || index.Schema != SchemaVersion {
+		return fallback
+	}
+	for _, run := range index.Runs {
+		if run.ModelID == manifest.ModelID && (manifest.Version == "" || run.Version == "" || run.Version == manifest.Version) && strings.TrimSpace(run.RunURL) != "" {
+			return absoluteRegistryURL(baseURL, run.RunURL)
+		}
+	}
+	return fallback
+}
+
+func auditIndexURL(baseURL string) (string, error) {
+	parsed, err := originURL(baseURL)
+	if err != nil {
+		return "", err
+	}
+	parsed.Path = pathJoinURL(parsed.Path, "audit", "v1", "index.json")
+	return parsed.String(), nil
+}
+
+func modelAuditURL(baseURL string, manifest Manifest) string {
+	parts := []string{"audit", "v1", "models"}
+	for _, part := range strings.Split(strings.Trim(manifest.ModelID, "/"), "/") {
+		parts = append(parts, url.PathEscape(part))
+	}
+	if strings.TrimSpace(manifest.Version) != "" {
+		parts = append(parts, url.PathEscape(manifest.Version))
+	}
+	return absoluteRegistryURL(baseURL, "/"+strings.Join(parts, "/")+"/")
+}
+
+func absoluteRegistryURL(baseURL string, value string) string {
+	if parsed, err := url.Parse(value); err == nil && parsed.Scheme != "" && parsed.Host != "" {
+		return parsed.String()
+	}
+	origin, err := originURL(baseURL)
+	if err != nil {
+		return value
+	}
+	origin.Path = pathJoinURL(origin.Path, strings.TrimPrefix(value, "/"))
+	return origin.String()
+}
+
+func originURL(baseURL string) (*url.URL, error) {
+	parsed, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return nil, fmt.Errorf("invalid model registry URL %q", baseURL)
+	}
+	basePath := strings.TrimRight(parsed.Path, "/")
+	if strings.HasSuffix(basePath, "/models/v1") {
+		basePath = strings.TrimSuffix(basePath, "/models/v1")
+	}
+	parsed.Path = basePath
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed, nil
+}
+
+func advisoryMatchesManifest(advisory AdvisoryIndexSummary, manifest Manifest) bool {
+	if advisory.Model.ModelID == manifest.ModelID && (manifest.Version == "" || advisory.Model.Version == "" || advisory.Model.Version == manifest.Version) {
+		return true
+	}
+	return advisoryDigestMatchesManifest(advisory.BundleDigest, advisory.ArtifactDigest, advisory.ReleaseSignatureSubjectDigest, manifest)
 }
 
 func advisoryYankMatchesManifest(yank AdvisoryYank, manifest Manifest) bool {
 	if yank.Model.ModelID == manifest.ModelID && (manifest.Version == "" || yank.Model.Version == "" || yank.Model.Version == manifest.Version) {
 		return true
 	}
+	return advisoryDigestMatchesManifest(yank.BundleDigest, yank.ArtifactDigest, yank.ReleaseSignatureSubjectDigest, manifest)
+}
+
+func advisoryDigestMatchesManifest(bundleDigest string, artifactDigest string, releaseSignatureSubjectDigest string, manifest Manifest) bool {
 	for _, pair := range [][2]string{
-		{yank.ArtifactDigest, manifest.ArtifactDigest},
-		{yank.ArtifactDigest, manifest.SHA256},
-		{yank.BundleDigest, manifest.BundleDigest},
-		{yank.ReleaseSignatureSubjectDigest, manifest.ReleaseSignatureSubjectDigest},
+		{artifactDigest, manifest.ArtifactDigest},
+		{artifactDigest, manifest.SHA256},
+		{bundleDigest, manifest.BundleDigest},
+		{releaseSignatureSubjectDigest, manifest.ReleaseSignatureSubjectDigest},
 	} {
 		if pair[0] != "" && pair[1] != "" && digestStringsEqual(pair[0], pair[1]) {
 			return true
 		}
 	}
 	return false
+}
+
+func firstString(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func verifyCanonicalJSONAttestation(ctx context.Context, body []byte, subjectName string, sigBody []byte, trustRoot attest.TrustRoot, request InstallRequest) error {
+	_, canonicalBody, err := canonicalJSONDigest(body)
+	if err != nil {
+		return err
+	}
+	_, err = verifyAttestationBytes(ctx, canonicalBody, subjectName, sigBody, trustRoot, request)
+	return err
 }
 
 func verifyAdvisoryIndexSignature(body []byte, sigBody []byte, request InstallRequest) error {
@@ -510,7 +843,7 @@ func writeReceipt(targetPath string, manifest verifiedManifest) error {
 		Size:        manifest.Manifest.Size,
 		SHA256:      strings.ToLower(manifest.Manifest.SHA256),
 		Manifest:    encodeBase64(manifest.Body),
-		Signature:   manifest.Signature,
+		Attestation: json.RawMessage(manifest.AttestationBody),
 		InstalledAt: time.Now().UTC().Format(time.RFC3339),
 	}
 	return config.WriteJSONAtomic(receiptPath(targetPath), receipt, 0o600)
@@ -542,7 +875,15 @@ func verifyInstalledReceiptForManifest(request InstallRequest, expected Manifest
 	if err != nil {
 		return false, nil
 	}
-	if err := verifySignature(manifestBody, receipt.Signature, request); err != nil {
+	if len(receipt.Attestation) > 0 {
+		trustRoot, err := localPinnedTrustRoot(request)
+		if err != nil {
+			return false, nil
+		}
+		if _, err := verifyAttestationBytes(context.Background(), manifestBody, "manifest.json", receipt.Attestation, trustRoot, request); err != nil {
+			return false, nil
+		}
+	} else if err := verifySignature(manifestBody, receipt.Signature, request); err != nil {
 		return false, nil
 	}
 	var manifest Manifest

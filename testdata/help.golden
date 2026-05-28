@@ -19,6 +19,7 @@ Available Commands:
   login       authenticate with Sovereign46 using magic-link device auth
   logout      clear local credentials
   mode        view or set operating mode
+  models      verify attested model registry artifacts
   resume      resume a session remotely by default, or materialize it locally
   run         run a task in a local s46 session
   session     session subcommands

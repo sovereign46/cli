@@ -83,7 +83,7 @@ func (s Service) check(ctx context.Context, assumeVerifiedModel bool) Report {
 	if !assumeVerifiedModel {
 		modelDownloaded = s.modelDownloaded(ctx)
 	}
-	report.add(Check{Name: "model-downloaded", OK: modelDownloaded, Required: true, Message: boolMessage(modelDownloaded, s.modelPath(), "model is not verified by a signed s46 manifest")})
+	report.add(Check{Name: "model-downloaded", OK: modelDownloaded, Required: true, Message: boolMessage(modelDownloaded, s.modelPath(), "model is not verified by a s46-attest manifest attestation")})
 
 	llamacppRunning := s.runBoolCheck(ctx, s.checkTimeout(), s.llamacppRunning)
 	report.add(Check{Name: "llamacpp-running", OK: llamacppRunning, Required: true, Message: boolMessage(llamacppRunning, LlamacppURL(s.Env), "llama-server is not responding")})
@@ -174,7 +174,7 @@ func (s Service) modelDownloaded(ctx context.Context) bool {
 
 func (s Service) llamacppModelCheck(ctx context.Context, modelDownloaded bool, llamacppRunning bool) (bool, string) {
 	if !modelDownloaded {
-		return false, "skipped: model is not verified by a signed s46 manifest"
+		return false, "skipped: model is not verified by a s46-attest manifest attestation"
 	}
 	if !llamacppRunning {
 		return false, "skipped: llama-server is not running"

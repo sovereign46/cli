@@ -86,6 +86,7 @@ func NewRootCommand(runtime Runtime) *cobra.Command {
 	root.AddCommand(sessionCommand(runtime, opts))
 	root.AddCommand(modeCommand(runtime, opts))
 	root.AddCommand(airplaneCommand(runtime, opts))
+	root.AddCommand(modelsCommand(runtime, opts))
 	root.AddCommand(runCommand(runtime, opts))
 	defaultHelp := root.HelpFunc()
 	root.SetHelpFunc(func(cmd *cobra.Command, args []string) {

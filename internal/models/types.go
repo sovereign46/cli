@@ -84,15 +84,35 @@ type AdvisorySignature struct {
 	Signature     string `json:"signature"`
 }
 
+type AuditIndex struct {
+	Schema int        `json:"schema"`
+	Runs   []AuditRun `json:"runs"`
+}
+
+type AuditRun struct {
+	RunID        string `json:"runId"`
+	ModelID      string `json:"modelId"`
+	Version      string `json:"version"`
+	BundleDigest string `json:"bundleDigest"`
+	RunURL       string `json:"runUrl"`
+}
+
+type ModelWarning struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+	URL     string `json:"url,omitempty"`
+}
+
 type Receipt struct {
-	Schema      int       `json:"schema"`
-	ModelID     string    `json:"modelId"`
-	Backend     string    `json:"backendModel"`
-	Filename    string    `json:"filename"`
-	URL         string    `json:"url"`
-	Size        int64     `json:"size"`
-	SHA256      string    `json:"sha256"`
-	Manifest    string    `json:"manifest"`
-	Signature   Signature `json:"signature"`
-	InstalledAt string    `json:"installedAt"`
+	Schema      int             `json:"schema"`
+	ModelID     string          `json:"modelId"`
+	Backend     string          `json:"backendModel"`
+	Filename    string          `json:"filename"`
+	URL         string          `json:"url"`
+	Size        int64           `json:"size"`
+	SHA256      string          `json:"sha256"`
+	Manifest    string          `json:"manifest"`
+	Attestation json.RawMessage `json:"attestation,omitempty"`
+	Signature   Signature       `json:"signature,omitempty"`
+	InstalledAt string          `json:"installedAt"`
 }

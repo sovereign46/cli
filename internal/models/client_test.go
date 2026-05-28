@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	attest "github.com/sovereign46/attest"
 	"github.com/sovereign46/cli/internal/contextx"
 )
 
@@ -261,8 +263,8 @@ func TestInstallRejectsBadSignature(t *testing.T) {
 	fixture.body = []byte(strings.Replace(string(fixture.body), "test-backend", "tampered-backend", 1))
 
 	err := Install(context.Background(), InstallRequest{Env: fixture.env(server.URL), ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, TargetPath: filepath.Join(t.TempDir(), "model.gguf"), HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys()})
-	if err == nil || !strings.Contains(err.Error(), "signature verification failed") {
-		t.Fatalf("expected signature failure, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "attestation") {
+		t.Fatalf("expected attestation failure, got %v", err)
 	}
 }
 
@@ -279,7 +281,7 @@ func TestInstallRejectsUntrustedArtifactHost(t *testing.T) {
 	}
 }
 
-func TestInstallRejectsYankedAdvisoryIndex(t *testing.T) {
+func TestInstallRequiresAllowanceForYankedAdvisoryIndex(t *testing.T) {
 	fixture := newModelFixture(t, []byte("model"))
 	index := fmt.Sprintf(`{"schema":1,"advisories":[],"yanks":[{"model":{"modelId":"%s","version":"v1"},"subjectType":"bundle-digest","bundleDigest":"sha256:%s","artifactDigest":"sha256:%s","releaseSignatureSubjectDigest":"sha256:%s","reason":"test yank","url":"/advisories/v1/yanks/S46-2026-0001.json","signatureUrl":"/advisories/v1/yanks/S46-2026-0001.json.sig"}]}`, fixture.manifest.ModelID, strings.Repeat("1", 64), fixture.manifest.SHA256, strings.Repeat("2", 64))
 	server := fixture.server(t, map[string][]byte{"/advisories/v1/index.json": []byte(index)})
@@ -288,9 +290,41 @@ func TestInstallRejectsYankedAdvisoryIndex(t *testing.T) {
 	fixture.manifest.Version = "v1"
 	fixture.sign(t)
 
-	err := Install(context.Background(), InstallRequest{Env: fixture.env(server.URL), ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, TargetPath: filepath.Join(t.TempDir(), "model.gguf"), HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys()})
-	if err == nil || !strings.Contains(err.Error(), "yanked") {
-		t.Fatalf("expected yanked failure, got %v", err)
+	target := filepath.Join(t.TempDir(), "model.gguf")
+	err := Install(context.Background(), InstallRequest{Env: fixture.env(server.URL), ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, TargetPath: target, HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys()})
+	var warningsErr WarningsError
+	if !errors.As(err, &warningsErr) || len(warningsErr.Warnings) == 0 || !strings.Contains(err.Error(), "yanked") {
+		t.Fatalf("expected yanked warning failure, got %v", err)
+	}
+	if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
+		t.Fatalf("artifact should not download before warning acceptance, stat err=%v", statErr)
+	}
+	if err := Install(context.Background(), InstallRequest{Env: fixture.env(server.URL), ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, TargetPath: target, HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys(), AllowWarnings: true}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestInstallResolutionIncludesSignedRunURLAndDefaultPath(t *testing.T) {
+	fixture := newModelFixture(t, []byte("model"))
+	auditIndex := fmt.Sprintf(`{"schema":1,"runs":[{"runId":"test-run","modelId":"%s","version":"v1","bundleDigest":"sha256:%s","runUrl":"/audit/v1/runs/test-run/"}]}`, fixture.manifest.ModelID, strings.Repeat("3", 64))
+	server := fixture.server(t, map[string][]byte{"/audit/v1/index.json": []byte(auditIndex)})
+	defer server.Close()
+	fixture.manifest.URL = server.URL + "/artifacts/model.gguf"
+	fixture.manifest.Version = "v1"
+	fixture.sign(t)
+
+	var resolution InstallResolution
+	env := fixture.env(server.URL)
+	targetBase := t.TempDir()
+	env["XDG_DATA_HOME"] = targetBase
+	if err := Install(context.Background(), InstallRequest{Env: env, ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys(), OnResolve: func(value InstallResolution) { resolution = value }}); err != nil {
+		t.Fatal(err)
+	}
+	if resolution.TargetPath == "" || !strings.HasPrefix(resolution.TargetPath, filepath.Join(targetBase, "s46", "models")) {
+		t.Fatalf("unexpected default target path: %q", resolution.TargetPath)
+	}
+	if resolution.EvidenceURL != server.URL+"/audit/v1/runs/test-run/" {
+		t.Fatalf("evidence URL = %q", resolution.EvidenceURL)
 	}
 }
 
@@ -351,12 +385,13 @@ func TestVerifyInstalledDetectsTampering(t *testing.T) {
 }
 
 type modelFixture struct {
-	publicKey  ed25519.PublicKey
-	privateKey ed25519.PrivateKey
-	manifest   Manifest
-	body       []byte
-	signature  Signature
-	artifact   []byte
+	publicKey     ed25519.PublicKey
+	privateKey    ed25519.PrivateKey
+	manifest      Manifest
+	body          []byte
+	attestation   []byte
+	trustRootJSON []byte
+	artifact      []byte
 }
 
 func newModelFixture(t *testing.T, artifact []byte) *modelFixture {
@@ -394,7 +429,26 @@ func (f *modelFixture) sign(t *testing.T) {
 	}
 	body = append(body, '\n')
 	f.body = body
-	f.signature = Signature{Schema: SchemaVersion, KeyID: "test-key", Algorithm: SignatureAlgorithm, Signature: encodeBase64(ed25519.Sign(f.privateKey, body))}
+	subject, err := attest.SubjectFromBytes("manifest.json", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := attest.Sign(context.Background(), attest.SignOptions{Subjects: []attest.Subject{subject}, PrivateKey: encodeBase64(f.privateKey), KeyID: "test-key", PredicateKind: attest.PredicateKindRelease})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.attestation, err = attest.MarshalBundle(bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := attest.NewTrustRoot(attest.TrustRootOptions{SigningKeys: []attest.TrustedKey{{KeyID: "test-key", PublicKey: encodeBase64(f.publicKey)}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.trustRootJSON, err = attest.MarshalTrustRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (f *modelFixture) server(t *testing.T, overrides map[string][]byte) *httptest.Server {
@@ -412,7 +466,9 @@ func (f *modelFixture) server(t *testing.T, overrides map[string][]byte) *httpte
 		case "/models/v1/s46/test-model/manifest.json":
 			_, _ = w.Write(f.body)
 		case "/models/v1/s46/test-model/manifest.json.sig":
-			_ = json.NewEncoder(w).Encode(f.signature)
+			_, _ = w.Write(f.attestation)
+		case "/trust/v1/root.json":
+			_, _ = w.Write(f.trustRootJSON)
 		case "/advisories/v1/index.json":
 			_, _ = w.Write([]byte(`{"schema":1,"advisories":[]}`))
 		case "/artifacts/model.gguf":
@@ -442,7 +498,9 @@ func (f *modelFixture) rangeHandler(onArtifact func(*http.Request)) http.Handler
 		case "/models/v1/s46/test-model/manifest.json":
 			_, _ = w.Write(f.body)
 		case "/models/v1/s46/test-model/manifest.json.sig":
-			_ = json.NewEncoder(w).Encode(f.signature)
+			_, _ = w.Write(f.attestation)
+		case "/trust/v1/root.json":
+			_, _ = w.Write(f.trustRootJSON)
 		case "/advisories/v1/index.json":
 			_, _ = w.Write([]byte(`{"schema":1,"advisories":[]}`))
 		case "/artifacts/model.gguf":
