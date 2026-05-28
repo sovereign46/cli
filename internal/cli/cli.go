@@ -1,20 +1,15 @@
 package cli
 
 import (
-	"context"
-	"errors"
 	"fmt"
 	"io"
-	"os"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/sovereign46/cli/internal/airplane"
 	"github.com/sovereign46/cli/internal/api"
 	"github.com/sovereign46/cli/internal/config"
-	"github.com/sovereign46/cli/internal/contextx"
 	"github.com/sovereign46/cli/internal/harness"
 	"github.com/sovereign46/cli/internal/harness/claude"
 	"github.com/sovereign46/cli/internal/harness/codex"
@@ -22,22 +17,9 @@ import (
 	"github.com/sovereign46/cli/internal/harness/standard"
 	"github.com/sovereign46/cli/internal/keyring"
 	"github.com/sovereign46/cli/internal/output"
-	"github.com/sovereign46/cli/internal/strs"
-	"github.com/sovereign46/cli/internal/updater"
-	"github.com/sovereign46/cli/internal/version"
 )
 
-type Runtime struct {
-	Stdin  io.Reader
-	Stdout io.Writer
-	Stderr io.Writer
-	Env    map[string]string
-}
-
-const (
-	startupUpdateCheckTimeout = 2 * time.Second
-	localAirplaneTeamName     = "local"
-)
+const localAirplaneTeamName = "local"
 
 type options struct {
 	configPath string
@@ -49,56 +31,6 @@ type options struct {
 
 func (o *options) machineReadable() bool {
 	return o != nil && (o.json || o.jsonl)
-}
-
-func exactArgs(expected string, count int) cobra.PositionalArgs {
-	return func(cmd *cobra.Command, args []string) error {
-		if len(args) == count {
-			return nil
-		}
-		if len(args) < count {
-			return fmt.Errorf("missing argument\nexpected: %s", expected)
-		}
-		return fmt.Errorf("too many arguments\nexpected: %s", expected)
-	}
-}
-
-func maxArgs(expected string, count int) cobra.PositionalArgs {
-	return func(cmd *cobra.Command, args []string) error {
-		if len(args) <= count {
-			return nil
-		}
-		return fmt.Errorf("too many arguments\nexpected: %s", expected)
-	}
-}
-
-func minArgs(expected string, count int) cobra.PositionalArgs {
-	return func(cmd *cobra.Command, args []string) error {
-		if len(args) >= count {
-			return nil
-		}
-		return fmt.Errorf("missing argument\nexpected: %s", expected)
-	}
-}
-
-func anyFlagChanged(cmd *cobra.Command, names ...string) bool {
-	for _, name := range names {
-		if cmd.Flags().Changed(name) {
-			return true
-		}
-	}
-	return false
-}
-
-func ProcessEnv() map[string]string {
-	env := map[string]string{}
-	for _, item := range os.Environ() {
-		key, value, ok := strings.Cut(item, "=")
-		if ok {
-			env[key] = value
-		}
-	}
-	return env
 }
 
 func NewRootCommand(runtime Runtime) *cobra.Command {
@@ -178,75 +110,6 @@ func airplaneHelpNotice() string {
 		"[s46✈] Cloud-only commands are unavailable: login, devices, update, detach, resume, share uploads, session land.",
 		"[s46✈] Turn airplane mode off with: s46 airplane mode off",
 	}, "\n")
-}
-
-func checkForStartupUpdate(ctx context.Context, runtime Runtime, opts *options, cmd *cobra.Command) error {
-	if opts.json && opts.jsonl {
-		return fmt.Errorf("--json and --jsonl cannot be used together")
-	}
-	env := runtime.Env
-	if opts.machineReadable() || skipStartupUpdateCheck(cmd, env) {
-		return nil
-	}
-	stderr := runtime.Stderr
-	if stderr == nil {
-		stderr = io.Discard
-	}
-	parentCtx := ctx
-	ctx, cancel := contextx.WithMaxTimeout(parentCtx, startupUpdateCheckTimeout)
-	defer cancel()
-	prefix := OutputPrefix(env, opts.configPath)
-	check, err := updater.Updater{CurrentVersion: version.Version, Env: env}.Check(ctx)
-	if err != nil {
-		if ctxErr := contextx.Done(parentCtx, err); ctxErr != nil {
-			return ctxErr
-		}
-		if opts.verbose && !errors.Is(err, updater.ErrCheckDisabled) && !errors.Is(err, updater.ErrNoRelease) {
-			_, _ = fmt.Fprintf(stderr, "%s update check failed: %v\n", prefix, err)
-		}
-		return nil
-	}
-	if !check.UpdateAvailable {
-		return nil
-	}
-	_, _ = fmt.Fprintf(stderr, "%s update available: %s (current %s)\n", prefix, check.LatestVersion, check.CurrentVersion)
-	_, _ = fmt.Fprintf(stderr, "%s update with: %s\n", prefix, startupBrewInstruction(env))
-	return nil
-}
-
-func skipStartupUpdateCheck(cmd *cobra.Command, env map[string]string) bool {
-	if strs.Truthy(env["S46_SKIP_STARTUP_UPDATE_CHECK"]) || updater.IsCheckDisabled(env) {
-		return true
-	}
-	path := cmd.CommandPath()
-	return path == "s46 completion" || strings.HasPrefix(path, "s46 completion ") || path == "s46 update"
-}
-
-func startupBrewInstruction(env map[string]string) string {
-	formula := strings.TrimSpace(env["S46_HOMEBREW_FORMULA"])
-	if formula == "" {
-		formula = updater.DefaultBrewFormula
-	}
-	return "brew upgrade " + formula
-}
-
-func OutputPrefix(env map[string]string, configPath string) string {
-	return activeOutputPrefix(config.NewStore(env, configPath))
-}
-
-func activeOutputPrefix(store *config.Store) string {
-	cfg, err := store.LoadConfig()
-	return activeOutputPrefixForConfig(cfg, err)
-}
-
-func activeOutputPrefixForConfig(cfg config.Config, err error) string {
-	if err != nil {
-		return output.DefaultPrefix
-	}
-	if cfg.ActiveMode() == config.ModeAirplane {
-		return airplane.Prefix
-	}
-	return output.DefaultPrefix
 }
 
 func apiClientForMode(env map[string]string, cfg config.Config, cfgErr error) (api.Client, error) {

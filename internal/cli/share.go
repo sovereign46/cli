@@ -70,10 +70,15 @@ func runShare(ctx context.Context, app *app, sessionID string, ttl string, local
 		}
 		return err
 	}
+	shareOptions := sessioncmd.ShareOptions{SessionID: sessionID, TTL: ttl}
+	if inferred != nil {
+		shareOptions.TranscriptPath = inferred.TranscriptPath
+		shareOptions.Harness = inferred.Harness
+	}
 	var result sessioncmd.ShareResult
 	if err := app.withLock(ctx, func() error {
 		var err error
-		result, err = service.Share(ctx, sessionID, ttl)
+		result, err = service.ShareWithOptions(ctx, shareOptions)
 		return err
 	}); err != nil {
 		return err
@@ -99,7 +104,12 @@ func runShare(ctx context.Context, app *app, sessionID string, ttl string, local
 }
 
 func runLocalShare(ctx context.Context, app *app, service sessioncmd.Service, sessionID string, inferred *sessioncmd.ListedSession) error {
-	artifact, err := service.LocalShareArtifact(ctx, sessionID)
+	shareOptions := sessioncmd.ShareOptions{SessionID: sessionID}
+	if inferred != nil {
+		shareOptions.TranscriptPath = inferred.TranscriptPath
+		shareOptions.Harness = inferred.Harness
+	}
+	artifact, err := service.LocalShareArtifactWithOptions(ctx, shareOptions)
 	if err != nil {
 		return err
 	}

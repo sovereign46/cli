@@ -70,7 +70,7 @@ func (a *app) authService() auth.Service {
 // auth-token provider so session can fetch bearers without reaching
 // into the keyring directly.
 func (a *app) sessionService() sessioncmd.Service {
-	return sessioncmd.Service{API: a.api, Auth: a.authService(), Config: a.config, Keyring: a.keyring, Harness: a.harness}
+	return sessioncmd.Service{API: a.api, Auth: a.authService(), Config: a.config, Harness: a.harness}
 }
 
 func (a *app) writeStructured(value any) (bool, error) {
