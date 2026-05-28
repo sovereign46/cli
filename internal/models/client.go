@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sovereign46/cli/internal/config"
 	"github.com/sovereign46/cli/internal/contextx"
 	"github.com/sovereign46/cli/internal/strs"
 )
@@ -82,13 +83,13 @@ func Install(ctx context.Context, request InstallRequest) error {
 	if ok, err := verifyInstalledReceiptForManifest(request, manifest.Manifest, true); err != nil {
 		return err
 	} else if ok {
-		removeArtifactDownloadFiles(request.TargetPath)
+		bestEffortRemoveArtifactDownloadFiles(request.TargetPath)
 		return nil
 	}
 	if ok, err := verifyExistingArtifact(request, manifest.Manifest); err != nil {
 		return err
 	} else if ok {
-		removeArtifactDownloadFiles(request.TargetPath)
+		bestEffortRemoveArtifactDownloadFiles(request.TargetPath)
 		return writeReceipt(request.TargetPath, manifest)
 	}
 	return downloadAndInstallArtifact(ctx, request, manifest)
@@ -355,32 +356,7 @@ func writeReceipt(targetPath string, manifest verifiedManifest) error {
 		Signature:   manifest.Signature,
 		InstalledAt: time.Now().UTC().Format(time.RFC3339),
 	}
-	body, err := json.MarshalIndent(receipt, "", "  ")
-	if err != nil {
-		return err
-	}
-	body = append(body, '\n')
-	path := receiptPath(targetPath)
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	defer func() { _ = os.Remove(tmpPath) }()
-	if _, err := tmp.Write(body); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmpPath, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmpPath, path)
+	return config.WriteJSONAtomic(receiptPath(targetPath), receipt, 0o600)
 }
 
 func verifyInstalledReceipt(request InstallRequest, strict bool) (bool, error) {

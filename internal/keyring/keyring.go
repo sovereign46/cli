@@ -2,9 +2,8 @@ package keyring
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -14,6 +13,8 @@ import (
 	"github.com/sovereign46/cli/internal/contextx"
 	"github.com/sovereign46/cli/internal/strs"
 )
+
+var ErrNotFound = errors.New("credential not found")
 
 type Store interface {
 	Get(ctx context.Context, service string, account string) (string, error)
@@ -47,7 +48,7 @@ func (s SecurityStore) Get(ctx context.Context, service string, account string) 
 		if ctxErr := contextx.Done(ctx, err); ctxErr != nil {
 			return "", ctxErr
 		}
-		return "", fmt.Errorf("credential not found in keychain")
+		return "", fmt.Errorf("keychain credential unavailable: %w", ErrNotFound)
 	}
 	return trimTrailingNewline(string(out)), nil
 }
@@ -59,7 +60,7 @@ func (s SecurityStore) Set(ctx context.Context, service string, account string, 
 		if ctxErr := contextx.Done(ctx, err); ctxErr != nil {
 			return ctxErr
 		}
-		return fmt.Errorf("cannot store credential in keychain: %s", trimTrailingNewline(string(out)))
+		return fmt.Errorf("cannot store credential in keychain: %s: %w", trimTrailingNewline(string(out)), err)
 	}
 	return nil
 }
@@ -74,7 +75,7 @@ func (s SecurityStore) Delete(ctx context.Context, service string, account strin
 		if strings.Contains(message, "could not be found") || strings.Contains(message, "The specified item could not be found") {
 			return nil
 		}
-		return fmt.Errorf("cannot delete credential from keychain: %s", message)
+		return fmt.Errorf("cannot delete credential from keychain: %s: %w", message, err)
 	}
 	return nil
 }
@@ -88,7 +89,7 @@ func (s SecretToolStore) Get(ctx context.Context, service string, account string
 		if ctxErr := contextx.Done(ctx, err); ctxErr != nil {
 			return "", ctxErr
 		}
-		return "", fmt.Errorf("credential not found in Linux secret service; install libsecret tools or set S46_KEYRING_BACKEND=file for tests")
+		return "", fmt.Errorf("Linux secret service credential unavailable; install libsecret tools or set S46_KEYRING_BACKEND=file for tests: %w", ErrNotFound)
 	}
 	return trimTrailingNewline(string(out)), nil
 }
@@ -100,7 +101,7 @@ func (s SecretToolStore) Set(ctx context.Context, service string, account string
 		if ctxErr := contextx.Done(ctx, err); ctxErr != nil {
 			return ctxErr
 		}
-		return fmt.Errorf("cannot store credential in Linux secret service: %s", trimTrailingNewline(string(out)))
+		return fmt.Errorf("cannot store credential in Linux secret service: %s: %w", trimTrailingNewline(string(out)), err)
 	}
 	return nil
 }
@@ -115,7 +116,7 @@ func (s SecretToolStore) Delete(ctx context.Context, service string, account str
 		if strings.Contains(message, "No such secret") || strings.Contains(message, "not found") {
 			return nil
 		}
-		return fmt.Errorf("cannot delete credential from Linux secret service: %s", message)
+		return fmt.Errorf("cannot delete credential from Linux secret service: %s: %w", message, err)
 	}
 	return nil
 }
@@ -130,11 +131,11 @@ func (s FileStore) Get(ctx context.Context, service string, account string) (str
 	}
 	entries, err := s.read()
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("read keyring file: %w", err)
 	}
 	value, ok := entries[key(service, account)]
 	if !ok {
-		return "", fmt.Errorf("credential not found")
+		return "", ErrNotFound
 	}
 	return value, nil
 }
@@ -145,10 +146,13 @@ func (s FileStore) Set(ctx context.Context, service string, account string, secr
 	}
 	entries, err := s.read()
 	if err != nil {
-		return err
+		return fmt.Errorf("read keyring file: %w", err)
 	}
 	entries[key(service, account)] = secret
-	return s.write(entries)
+	if err := s.write(entries); err != nil {
+		return fmt.Errorf("write keyring file: %w", err)
+	}
+	return nil
 }
 
 func (s FileStore) Delete(ctx context.Context, service string, account string) error {
@@ -157,44 +161,25 @@ func (s FileStore) Delete(ctx context.Context, service string, account string) e
 	}
 	entries, err := s.read()
 	if err != nil {
-		return err
+		return fmt.Errorf("read keyring file: %w", err)
 	}
 	delete(entries, key(service, account))
-	return s.write(entries)
+	if err := s.write(entries); err != nil {
+		return fmt.Errorf("write keyring file: %w", err)
+	}
+	return nil
 }
 
 func (s FileStore) read() (map[string]string, error) {
 	entries := map[string]string{}
-	raw, err := os.ReadFile(s.Path)
-	if os.IsNotExist(err) {
-		return entries, nil
-	}
-	if err != nil {
+	if err := config.ReadJSON(s.Path, map[string]string{}, &entries); err != nil {
 		return nil, err
-	}
-	if len(raw) == 0 {
-		return entries, nil
-	}
-	if err := json.Unmarshal(raw, &entries); err != nil {
-		return nil, fmt.Errorf("cannot parse mock keyring %s: %w", s.Path, err)
 	}
 	return entries, nil
 }
 
 func (s FileStore) write(entries map[string]string) error {
-	if err := os.MkdirAll(filepath.Dir(s.Path), 0o700); err != nil {
-		return err
-	}
-	raw, err := json.MarshalIndent(entries, "", "  ")
-	if err != nil {
-		return err
-	}
-	raw = append(raw, '\n')
-	tmp := fmt.Sprintf("%s.%d.tmp", s.Path, os.Getpid())
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, s.Path)
+	return config.WriteJSONAtomic(s.Path, entries, 0o600)
 }
 
 func key(service string, account string) string {

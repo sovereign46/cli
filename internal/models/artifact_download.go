@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/sovereign46/cli/internal/config"
 	"github.com/sovereign46/cli/internal/contextx"
 	"github.com/sovereign46/cli/internal/strs"
 )
@@ -72,7 +74,7 @@ func downloadArtifact(ctx context.Context, request InstallRequest, manifest veri
 	return downloadArtifactSequential(ctx, request, manifest, policy)
 }
 
-func downloadArtifactSequential(ctx context.Context, request InstallRequest, manifest verifiedManifest, policy trustPolicy) error {
+func downloadArtifactSequential(ctx context.Context, request InstallRequest, manifest verifiedManifest, policy trustPolicy) (err error) {
 	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, manifest.Manifest.URL, nil)
 	if err != nil {
 		return err
@@ -94,7 +96,13 @@ func downloadArtifactSequential(ctx context.Context, request InstallRequest, man
 		return err
 	}
 	tmpPath := tmp.Name()
-	defer func() { _ = os.Remove(tmpPath) }()
+	defer func() {
+		if err != nil {
+			if removeErr := config.RemoveIfExists(tmpPath); removeErr != nil {
+				err = errors.Join(err, removeErr)
+			}
+		}
+	}()
 	hash := sha256.New()
 	written, err := copyWithInstallProgress(io.MultiWriter(tmp, hash), response.Body, request.Progress, installProgress(request, manifest.Manifest, InstallProgressDownloading))
 	if closeErr := tmp.Close(); err == nil {
@@ -112,7 +120,7 @@ func downloadArtifactSequential(ctx context.Context, request InstallRequest, man
 	if err := os.Rename(tmpPath, request.TargetPath); err != nil {
 		return err
 	}
-	removeArtifactDownloadFiles(request.TargetPath)
+	bestEffortRemoveArtifactDownloadFiles(request.TargetPath)
 	return nil
 }
 
@@ -138,7 +146,9 @@ func artifactRangeDownloadSupported(ctx context.Context, request InstallRequest,
 		if response.ContentLength >= 0 && response.ContentLength != 1 {
 			return false, nil
 		}
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1))
+		if _, err := io.Copy(io.Discard, io.LimitReader(response.Body, 1)); err != nil {
+			return false, contextx.ExternalError(ctx, err)
+		}
 		return true, nil
 	case http.StatusOK:
 		return false, nil
@@ -150,7 +160,7 @@ func artifactRangeDownloadSupported(ctx context.Context, request InstallRequest,
 	}
 }
 
-func downloadArtifactInRanges(ctx context.Context, request InstallRequest, manifest verifiedManifest, policy trustPolicy) error {
+func downloadArtifactInRanges(ctx context.Context, request InstallRequest, manifest verifiedManifest, policy trustPolicy) (err error) {
 	chunkSize := artifactDownloadChunkSize(request.Env)
 	store, err := prepareArtifactDownloadState(request.TargetPath, manifest.Manifest, chunkSize)
 	if err != nil {
@@ -164,7 +174,9 @@ func downloadArtifactInRanges(ctx context.Context, request InstallRequest, manif
 	closed := false
 	defer func() {
 		if !closed {
-			_ = file.Close()
+			if closeErr := config.CloseFile(file); closeErr != nil {
+				err = errors.Join(err, closeErr)
+			}
 		}
 	}()
 	if err := file.Truncate(manifest.Manifest.Size); err != nil {
@@ -186,7 +198,7 @@ func downloadArtifactInRanges(ctx context.Context, request InstallRequest, manif
 	}
 	closed = true
 	if err := verifyDownloadedArtifactFile(request, manifest.Manifest, partPath); err != nil {
-		removeArtifactDownloadFiles(request.TargetPath)
+		bestEffortRemoveArtifactDownloadFiles(request.TargetPath)
 		return err
 	}
 	if err := os.Chmod(partPath, 0o600); err != nil {
@@ -195,7 +207,7 @@ func downloadArtifactInRanges(ctx context.Context, request InstallRequest, manif
 	if err := os.Rename(partPath, request.TargetPath); err != nil {
 		return err
 	}
-	removeArtifactDownloadFiles(request.TargetPath)
+	bestEffortRemoveArtifactDownloadFiles(request.TargetPath)
 	return nil
 }
 
@@ -342,7 +354,7 @@ func prepareArtifactDownloadState(targetPath string, manifest Manifest, chunkSiz
 	path := artifactDownloadStatePath(targetPath)
 	state, ok := readArtifactDownloadState(path)
 	if !ok || !artifactDownloadStateMatches(state, manifest, chunkSize) || !artifactPartUsable(targetPath, state, manifest.Size) {
-		removeArtifactDownloadFiles(targetPath)
+		bestEffortRemoveArtifactDownloadFiles(targetPath)
 		state = newArtifactDownloadState(manifest, chunkSize)
 		if err := writeArtifactDownloadState(path, state); err != nil {
 			return nil, err
@@ -363,33 +375,50 @@ func readArtifactDownloadState(path string) (artifactDownloadState, bool) {
 	return state, true
 }
 
-func writeArtifactDownloadState(path string, state artifactDownloadState) error {
+func writeArtifactDownloadState(path string, state artifactDownloadState) (err error) {
 	state.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	body, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
-		return err
+		return fmt.Errorf("marshal %s: %w", path, err)
 	}
 	body = append(body, '\n')
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
+		return fmt.Errorf("create parent directory for %s: %w", path, err)
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*.tmp")
+	var file *os.File
+	file, err = os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*.tmp")
 	if err != nil {
-		return err
+		return fmt.Errorf("create temp file for %s: %w", path, err)
 	}
-	tmpPath := tmp.Name()
-	defer func() { _ = os.Remove(tmpPath) }()
-	if _, err := tmp.Write(body); err != nil {
-		_ = tmp.Close()
-		return err
+	tmpPath := file.Name()
+	closed := false
+	defer func() {
+		if !closed {
+			if closeErr := config.CloseFile(file); closeErr != nil {
+				err = errors.Join(err, closeErr)
+			}
+		}
+		if err != nil {
+			if removeErr := config.RemoveIfExists(tmpPath); removeErr != nil {
+				err = errors.Join(err, removeErr)
+			}
+		}
+	}()
+	if _, err := file.Write(body); err != nil {
+		return fmt.Errorf("write temp file for %s: %w", path, err)
 	}
-	if err := tmp.Close(); err != nil {
-		return err
+	if err := file.Close(); err != nil {
+		closed = true
+		return fmt.Errorf("close temp file for %s: %w", path, err)
 	}
+	closed = true
 	if err := os.Chmod(tmpPath, 0o600); err != nil {
-		return err
+		return fmt.Errorf("chmod temp file for %s: %w", path, err)
 	}
-	return os.Rename(tmpPath, path)
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("replace %s: %w", path, err)
+	}
+	return nil
 }
 
 func newArtifactDownloadState(manifest Manifest, chunkSize int64) artifactDownloadState {
@@ -652,9 +681,9 @@ func artifactDownloadStatePath(targetPath string) string {
 	return targetPath + ".part.s46.json"
 }
 
-func removeArtifactDownloadFiles(targetPath string) {
-	_ = os.Remove(artifactPartPath(targetPath))
-	_ = os.Remove(artifactDownloadStatePath(targetPath))
+func bestEffortRemoveArtifactDownloadFiles(targetPath string) {
+	_ = config.RemoveIfExists(artifactPartPath(targetPath))
+	_ = config.RemoveIfExists(artifactDownloadStatePath(targetPath))
 }
 
 func minInt(a int, b int) int {

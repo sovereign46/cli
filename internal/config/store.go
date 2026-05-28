@@ -1,6 +1,8 @@
 package config
 
 import (
+	"fmt"
+
 	"github.com/sovereign46/cli/internal/api"
 )
 
@@ -135,7 +137,7 @@ func DefaultState() State {
 func (s *Store) LoadConfig() (Config, error) {
 	cfg := DefaultConfig()
 	if err := ReadJSON(s.ConfigPath, DefaultConfig(), &cfg); err != nil {
-		return Config{}, err
+		return Config{}, fmt.Errorf("load config: %w", err)
 	}
 	if cfg.Teams == nil {
 		cfg.Teams = map[string]TeamConfig{}
@@ -147,13 +149,16 @@ func (s *Store) SaveConfig(cfg Config) error {
 	if cfg.Teams == nil {
 		cfg.Teams = map[string]TeamConfig{}
 	}
-	return WriteJSONAtomic(s.ConfigPath, cfg, 0o600)
+	if err := WriteJSONAtomic(s.ConfigPath, cfg, 0o600); err != nil {
+		return fmt.Errorf("save config: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) LoadState() (State, error) {
 	state := DefaultState()
 	if err := ReadJSON(s.StatePath, DefaultState(), &state); err != nil {
-		return State{}, err
+		return State{}, fmt.Errorf("load state: %w", err)
 	}
 	if state.Sessions == nil {
 		state.Sessions = map[string]api.Session{}
@@ -171,7 +176,10 @@ func (s *Store) SaveState(state State) error {
 	if state.Shares == nil {
 		state.Shares = map[string]Share{}
 	}
-	return WriteJSONAtomic(s.StatePath, state, 0o600)
+	if err := WriteJSONAtomic(s.StatePath, state, 0o600); err != nil {
+		return fmt.Errorf("save state: %w", err)
+	}
+	return nil
 }
 
 // TeamConfigFromAPI builds a TeamConfig from an api.Team response. The

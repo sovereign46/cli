@@ -3,6 +3,7 @@ package cli
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
@@ -99,17 +100,24 @@ func (a *app) stdinReader() *inputReader {
 	return a.promptReader
 }
 
-func (a *app) withLock(ctx context.Context, fn func() error) error {
-	lock, err := a.config.Lock(ctx)
+func (a *app) withLock(ctx context.Context, fn func() error) (err error) {
+	var lock *config.Lock
+	lock, err = a.config.Lock(ctx)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = lock.Unlock() }()
+	defer func() {
+		if unlockErr := lock.Unlock(); unlockErr != nil {
+			err = errors.Join(err, fmt.Errorf("release config lock: %w", unlockErr))
+		}
+	}()
 	return fn()
 }
 
 func (a *app) debug(format string, args ...any) {
 	if a != nil && a.options != nil && a.options.verbose && !a.options.machineReadable() {
-		fmt.Fprintf(a.runtime.Stderr, "[s46:debug] "+format+"\n", args...)
+		if _, err := fmt.Fprintf(a.runtime.Stderr, "[s46:debug] "+format+"\n", args...); err != nil {
+			return
+		}
 	}
 }

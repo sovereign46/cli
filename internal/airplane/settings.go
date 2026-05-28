@@ -69,7 +69,10 @@ func KeepAlive(env map[string]string) string {
 func KeepAliveSeconds(env map[string]string) int {
 	parsed, err := time.ParseDuration(KeepAlive(env))
 	if err != nil || parsed <= 0 {
-		parsed, _ = time.ParseDuration(DefaultKeepAlive)
+		parsed, err = time.ParseDuration(DefaultKeepAlive)
+		if err != nil || parsed <= 0 {
+			return 1
+		}
 	}
 	seconds := int(parsed.Seconds())
 	if seconds <= 0 {

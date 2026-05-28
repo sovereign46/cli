@@ -89,7 +89,7 @@ type ListedSession struct {
 func (s Service) List(ctx context.Context) ([]api.Session, error) {
 	entries, err := s.ListEntries(ctx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list session entries: %w", err)
 	}
 	sessions := make([]api.Session, 0, len(entries))
 	for _, entry := range entries {
@@ -101,7 +101,7 @@ func (s Service) List(ctx context.Context) ([]api.Session, error) {
 func (s Service) ListEntries(ctx context.Context) ([]ListedSession, error) {
 	ctxState, hasActiveTeam, err := s.relaxedContextState()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("resolve workspace: %w", err)
 	}
 	entries := []ListedSession{}
 	seen := map[string]int{}
@@ -110,7 +110,7 @@ func (s Service) ListEntries(ctx context.Context) ([]ListedSession, error) {
 	}
 	localEntries, err := s.localSessionEntries(ctx, ctxState)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list local sessions: %w", err)
 	}
 	for _, entry := range localEntries {
 		addListedSession(&entries, seen, entry)
@@ -133,7 +133,7 @@ func (s Service) ListEntries(ctx context.Context) ([]ListedSession, error) {
 			if errors.Is(err, api.ErrForbidden) {
 				return nil, s.sessionsForbiddenError(ctx, ctxState, accessToken)
 			}
-			return nil, err
+			return nil, fmt.Errorf("list remote sessions for %s: %w", ctxState.TeamName, err)
 		}
 		for _, session := range remote {
 			if ctxState.TeamConfig.DefaultHarness != "" {
@@ -149,7 +149,7 @@ func (s Service) ListEntries(ctx context.Context) ([]ListedSession, error) {
 func (s Service) LatestSession(ctx context.Context) (ListedSession, bool, error) {
 	entries, err := s.ListEntries(ctx)
 	if err != nil {
-		return ListedSession{}, false, err
+		return ListedSession{}, false, fmt.Errorf("list session entries: %w", err)
 	}
 	if len(entries) == 0 {
 		return ListedSession{}, false, nil
@@ -163,7 +163,7 @@ func (s Service) localSessionEntries(ctx context.Context, ctxState workspaceCont
 	}
 	locals, err := s.Harness.ListSessions(ctx, s.Config.Env)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list harness sessions: %w", err)
 	}
 	projectRoot := currentProjectRoot(ctx, s.Config.Env)
 	now := time.Now()
@@ -248,7 +248,7 @@ func localDevelopmentAPI(env map[string]string) bool {
 func (s Service) Detach(ctx context.Context, sessionID string, harness string) (api.Session, error) {
 	ctxState, err := s.contextState()
 	if err != nil {
-		return api.Session{}, err
+		return api.Session{}, fmt.Errorf("resolve workspace: %w", err)
 	}
 	existing := findOrDefault(ctxState.State, sessionID, ctxState.Team, ctxState.TeamConfig)
 	if harness == "" {
@@ -260,7 +260,7 @@ func (s Service) Detach(ctx context.Context, sessionID string, harness string) (
 	}
 	result, err := s.API.Detach(ctx, api.DetachRequest{SessionID: sessionID, Harness: harness, Team: ctxState.Team, AccessToken: accessToken})
 	if err != nil {
-		return api.Session{}, err
+		return api.Session{}, fmt.Errorf("detach session %s: %w", sessionID, err)
 	}
 	ctxState.State.Sessions[sessionID] = result
 	if err := s.Config.SaveState(ctxState.State); err != nil {
@@ -272,7 +272,7 @@ func (s Service) Detach(ctx context.Context, sessionID string, harness string) (
 func (s Service) Resume(ctx context.Context, sessionID string, target string) (api.Session, string, error) {
 	ctxState, err := s.contextState()
 	if err != nil {
-		return api.Session{}, "", err
+		return api.Session{}, "", fmt.Errorf("resolve workspace: %w", err)
 	}
 	existing := findOrDefault(ctxState.State, sessionID, ctxState.Team, ctxState.TeamConfig)
 	previous := existing.Location
@@ -282,7 +282,7 @@ func (s Service) Resume(ctx context.Context, sessionID string, target string) (a
 	}
 	result, err := s.API.Resume(ctx, api.ResumeRequest{SessionID: sessionID, Session: existing, Team: ctxState.Team, Target: target, AccessToken: accessToken})
 	if err != nil {
-		return api.Session{}, "", err
+		return api.Session{}, "", fmt.Errorf("resume session %s: %w", sessionID, err)
 	}
 	ctxState.State.Sessions[sessionID] = result
 	if err := s.Config.SaveState(ctxState.State); err != nil {
@@ -296,7 +296,7 @@ func (s Service) Share(ctx context.Context, sessionID string, ttl string) (Share
 	if sessionID == "" {
 		latest, ok, err := s.LatestSession(ctx)
 		if err != nil {
-			return ShareResult{}, err
+			return ShareResult{}, fmt.Errorf("select latest session: %w", err)
 		}
 		if !ok {
 			return ShareResult{}, fmt.Errorf("no sessions found; start a coding session, run `s46 sessions`, or pass a session id")
@@ -305,11 +305,11 @@ func (s Service) Share(ctx context.Context, sessionID string, ttl string) (Share
 	}
 	ctxState, _, err := s.relaxedContextState()
 	if err != nil {
-		return ShareResult{}, err
+		return ShareResult{}, fmt.Errorf("resolve workspace: %w", err)
 	}
 	normalizedTTL, err := sharepkg.NormalizeTTL(firstNonEmpty(ttl, s.Config.Env["S46_SHARE_TTL"]))
 	if err != nil {
-		return ShareResult{}, err
+		return ShareResult{}, fmt.Errorf("normalize share ttl: %w", err)
 	}
 	if s.Config.Env["S46_SHARE_BACKEND"] != "mock" {
 		if ensureAnonymousClientID(&ctxState.State) {
@@ -320,7 +320,7 @@ func (s Service) Share(ctx context.Context, sessionID string, ttl string) (Share
 	}
 	result, err := s.buildShare(ctx, ctxState, sessionID, normalizedTTL)
 	if err != nil {
-		return ShareResult{}, err
+		return ShareResult{}, fmt.Errorf("build share for session %s: %w", sessionID, err)
 	}
 	ctxState.State.Shares[sessionID] = config.Share{
 		ID:         result.ID,
@@ -345,7 +345,7 @@ func (s Service) LocalShareArtifact(ctx context.Context, sessionID string) (shar
 	if sessionID == "" {
 		latest, ok, err := s.LatestSession(ctx)
 		if err != nil {
-			return sharepkg.Artifact{}, err
+			return sharepkg.Artifact{}, fmt.Errorf("select latest session: %w", err)
 		}
 		if !ok {
 			return sharepkg.Artifact{}, fmt.Errorf("no sessions found; start a coding session, run `s46 sessions`, or pass a session id")
@@ -354,7 +354,7 @@ func (s Service) LocalShareArtifact(ctx context.Context, sessionID string) (shar
 	}
 	ctxState, _, err := s.relaxedContextState()
 	if err != nil {
-		return sharepkg.Artifact{}, err
+		return sharepkg.Artifact{}, fmt.Errorf("resolve workspace: %w", err)
 	}
 	session := findOrDefault(ctxState.State, sessionID, ctxState.Team, ctxState.TeamConfig)
 	return s.artifactForShare(ctx, ctxState, session)
@@ -363,7 +363,7 @@ func (s Service) LocalShareArtifact(ctx context.Context, sessionID string) (shar
 func (s Service) RevokeShare(ctx context.Context, target string) (RevokeResult, error) {
 	ctxState, _, err := s.relaxedContextState()
 	if err != nil {
-		return RevokeResult{}, err
+		return RevokeResult{}, fmt.Errorf("resolve workspace: %w", err)
 	}
 	sessionID, record, ok := findShareRecord(ctxState.State, target)
 	if !ok {
@@ -376,7 +376,7 @@ func (s Service) RevokeShare(ctx context.Context, target string) (RevokeResult, 
 	if !mock {
 		client := sharepkg.Client{BaseURL: shareAPIBaseURL(s.Config.Env)}
 		if _, err := client.Delete(ctx, record.ID, record.RevokeKey); err != nil {
-			return RevokeResult{}, err
+			return RevokeResult{}, fmt.Errorf("delete remote share %s: %w", record.ID, err)
 		}
 	}
 	delete(ctxState.State.Shares, sessionID)
@@ -398,7 +398,7 @@ func (s Service) mockShare(ctx context.Context, ctxState workspaceContext, sessi
 	existing := ctxState.State.Shares[sessionID]
 	encrypted, err := s.encryptedArtifactForShare(ctx, ctxState, session, existing)
 	if err != nil {
-		return ShareResult{}, err
+		return ShareResult{}, fmt.Errorf("encrypt share artifact: %w", err)
 	}
 	shareID := ""
 	revokeKey := ""
@@ -423,7 +423,7 @@ func (s Service) gistShare(ctx context.Context, ctxState workspaceContext, sessi
 	existing := ctxState.State.Shares[sessionID]
 	encrypted, err := s.encryptedArtifactForShare(ctx, ctxState, session, existing)
 	if err != nil {
-		return ShareResult{}, err
+		return ShareResult{}, fmt.Errorf("encrypt share artifact: %w", err)
 	}
 	client := sharepkg.Client{BaseURL: shareAPIBaseURL(s.Config.Env), AnonymousClientID: ctxState.State.AnonymousClientID}
 	request := sharepkg.UploadRequest{Blob: encrypted.Blob, TTL: ttl, ContentType: sharepkg.BlobContentType}
@@ -431,7 +431,7 @@ func (s Service) gistShare(ctx context.Context, ctxState workspaceContext, sessi
 		request.RevokeKey = existing.RevokeKey
 		response, err := client.Update(ctx, existing.ID, request)
 		if err != nil {
-			return ShareResult{}, err
+			return ShareResult{}, fmt.Errorf("update remote share %s: %w", existing.ID, err)
 		}
 		if response.ID == "" {
 			response.ID = existing.ID
@@ -446,7 +446,7 @@ func (s Service) gistShare(ctx context.Context, ctxState workspaceContext, sessi
 	}
 	response, err := client.Create(ctx, request)
 	if err != nil {
-		return ShareResult{}, err
+		return ShareResult{}, fmt.Errorf("create remote share: %w", err)
 	}
 	return shareResultFromUpload(sessionID, response, response.RevokeKey, encrypted.Key, false, false, s.Config.Env), nil
 }
@@ -475,7 +475,7 @@ func shareBuildOptions(ctxState workspaceContext, env map[string]string) sharepk
 func (s Service) encryptedArtifactForShare(ctx context.Context, ctxState workspaceContext, session api.Session, existing config.Share) (sharepkg.EncryptedBlob, error) {
 	artifact, err := s.artifactForShare(ctx, ctxState, session)
 	if err != nil {
-		return sharepkg.EncryptedBlob{}, err
+		return sharepkg.EncryptedBlob{}, fmt.Errorf("build share artifact: %w", err)
 	}
 	if key := decryptKeyFromViewerURL(existing.ViewerURL); key != "" {
 		return sharepkg.EncryptArtifactWithKey(artifact, key)
@@ -488,7 +488,7 @@ func (s Service) artifactForShare(ctx context.Context, ctxState workspaceContext
 	if s.Harness != nil {
 		artifact, ok, err := s.Harness.ShareArtifact(ctx, harness.ShareRequest{Env: s.Config.Env, Session: session, TeamName: ctxState.TeamName, User: ctxState.State.CurrentUser})
 		if err != nil {
-			return sharepkg.Artifact{}, err
+			return sharepkg.Artifact{}, fmt.Errorf("resolve harness share artifact: %w", err)
 		}
 		if ok {
 			return artifact, nil
@@ -551,7 +551,7 @@ func firstNonEmpty(values ...string) string {
 func (s Service) Land(ctx context.Context, sessionID string, title string) (api.LandResult, error) {
 	ctxState, err := s.contextState()
 	if err != nil {
-		return api.LandResult{}, err
+		return api.LandResult{}, fmt.Errorf("resolve workspace: %w", err)
 	}
 	session := findOrDefault(ctxState.State, sessionID, ctxState.Team, ctxState.TeamConfig)
 	accessToken, tokenErr := s.accessToken(ctx, ctxState)
@@ -560,7 +560,7 @@ func (s Service) Land(ctx context.Context, sessionID string, title string) (api.
 	}
 	result, err := s.API.Land(ctx, api.LandRequest{SessionID: sessionID, Session: session, Team: ctxState.Team, Title: title, AccessToken: accessToken})
 	if err != nil {
-		return api.LandResult{}, err
+		return api.LandResult{}, fmt.Errorf("land session %s: %w", sessionID, err)
 	}
 	return enrichLandWithGit(ctx, result), nil
 }
@@ -568,7 +568,7 @@ func (s Service) Land(ctx context.Context, sessionID string, title string) (api.
 func (s Service) Run(ctx context.Context, task string, model string, sessionID string) (RunResult, error) {
 	ctxState, err := s.contextState()
 	if err != nil {
-		return RunResult{}, err
+		return RunResult{}, fmt.Errorf("resolve workspace: %w", err)
 	}
 	if model == "" {
 		model = ctxState.Team.DefaultModel

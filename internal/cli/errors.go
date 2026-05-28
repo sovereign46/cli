@@ -23,6 +23,10 @@ type ErrorResponse struct {
 	Error ErrorBody `json:"error"`
 }
 
+type errorCoder interface {
+	ErrorCode() string
+}
+
 func RenderExecutionError(root *cobra.Command, runtime Runtime, err error) error {
 	if err == nil || errors.Is(err, context.Canceled) {
 		return nil
@@ -79,7 +83,7 @@ func errorResponse(err error, verbose bool) ErrorResponse {
 
 func errorBody(err error, verbose bool) ErrorBody {
 	message, detail := splitUnderlyingError(err.Error())
-	body := ErrorBody{Code: inferErrorCode(message), Message: message}
+	body := ErrorBody{Code: inferErrorCode(err, message), Message: message}
 	if verbose && detail != "" {
 		body.Detail = detail
 	}
@@ -93,7 +97,13 @@ func splitUnderlyingError(message string) (string, string) {
 	return strings.TrimSpace(message), ""
 }
 
-func inferErrorCode(message string) string {
+func inferErrorCode(err error, message string) string {
+	var coded errorCoder
+	if errors.As(err, &coded) {
+		if code := coded.ErrorCode(); code != "" {
+			return code
+		}
+	}
 	lower := strings.ToLower(message)
 	switch {
 	case strings.Contains(lower, "not authenticated") || strings.Contains(lower, "run `s46 login`"):

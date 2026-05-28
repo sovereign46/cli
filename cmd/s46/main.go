@@ -37,7 +37,9 @@ func run(ctx context.Context, runtime cli.Runtime, args []string) int {
 		if errors.Is(err, context.Canceled) {
 			return 130
 		}
-		_ = cli.RenderExecutionError(root, runtime, err)
+		if renderErr := cli.RenderExecutionError(root, runtime, err); renderErr != nil {
+			return 1
+		}
 		return 1
 	}
 	return 0

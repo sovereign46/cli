@@ -18,6 +18,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/sovereign46/cli/internal/config"
 	"github.com/sovereign46/cli/internal/contextx"
 	"github.com/sovereign46/cli/internal/strs"
 )
@@ -62,7 +63,7 @@ func (s Service) InstallGateway(ctx context.Context) error {
 			if ctxErr := contextx.Done(ctx, sourceErr); ctxErr != nil {
 				return ctxErr
 			}
-			return fmt.Errorf("%w; source clone fallback failed: %v", err, sourceErr)
+			return errors.Join(err, fmt.Errorf("source clone fallback failed: %w", sourceErr))
 		}
 	}
 	return nil
@@ -137,8 +138,11 @@ func (s Service) cloneGatewaySource(ctx context.Context, gitPath string, sourceD
 			return err
 		}
 		if err := s.runGatewayInstallCommand(ctx, "", gitPath, "clone", "--depth", "1", cloneURL, sourceDir); err != nil {
+			if cleanupErr := os.RemoveAll(sourceDir); cleanupErr != nil {
+				failures = append(failures, fmt.Sprintf("%s: %v; cleanup failed: %v", cloneURL, err, cleanupErr))
+				continue
+			}
 			failures = append(failures, fmt.Sprintf("%s: %v", cloneURL, err))
-			_ = os.RemoveAll(sourceDir)
 			continue
 		}
 		return nil
@@ -203,7 +207,7 @@ func (s Service) gatewayDownload(ctx context.Context) (gatewayDownload, error) {
 	if downloadURL := strings.TrimSpace(strs.EnvValue(s.Env, "S46_API_GATEWAY_DOWNLOAD_URL")); downloadURL != "" {
 		checksum, err := normalizeGatewaySHA256(strs.EnvValue(s.Env, "S46_API_GATEWAY_SHA256"))
 		if err != nil {
-			return gatewayDownload{}, fmt.Errorf("%w: S46_API_GATEWAY_SHA256: %v", errGatewayVerification, err)
+			return gatewayDownload{}, fmt.Errorf("%w: S46_API_GATEWAY_SHA256: %w", errGatewayVerification, err)
 		}
 		if checksum == "" {
 			return gatewayDownload{}, fmt.Errorf("%w: S46_API_GATEWAY_SHA256 is required when S46_API_GATEWAY_DOWNLOAD_URL is set", errGatewayVerification)
@@ -257,7 +261,7 @@ func (s Service) gatewayAssetSHA256(ctx context.Context, assets []gatewayAsset, 
 	if strings.TrimSpace(archive.Digest) != "" {
 		checksum, err := gatewaySHA256FromDigest(archive.Digest)
 		if err != nil {
-			return "", fmt.Errorf("%w: gateway release asset %s has invalid digest: %v", errGatewayVerification, archive.Name, err)
+			return "", fmt.Errorf("%w: gateway release asset %s has invalid digest: %w", errGatewayVerification, archive.Name, err)
 		}
 		return checksum, nil
 	}
@@ -267,11 +271,11 @@ func (s Service) gatewayAssetSHA256(ctx context.Context, assets []gatewayAsset, 
 	}
 	content, err := s.downloadGatewayChecksum(ctx, checksumAsset.BrowserDownloadURL)
 	if err != nil {
-		return "", fmt.Errorf("%w: %v", errGatewayVerification, err)
+		return "", fmt.Errorf("%w: %w", errGatewayVerification, err)
 	}
 	checksum, err := parseGatewayChecksum(content, archive.Name)
 	if err != nil {
-		return "", fmt.Errorf("%w: gateway checksum asset %s: %v", errGatewayVerification, checksumAsset.Name, err)
+		return "", fmt.Errorf("%w: gateway checksum asset %s: %w", errGatewayVerification, checksumAsset.Name, err)
 	}
 	return checksum, nil
 }
@@ -477,17 +481,29 @@ func normalizeReleaseVersion(version string) string {
 	return trimmed
 }
 
-func (s Service) installGatewayArchive(body io.Reader) error {
-	gzipReader, err := gzip.NewReader(body)
+func (s Service) installGatewayArchive(body io.Reader) (err error) {
+	var gzipReader *gzip.Reader
+	gzipReader, err = gzip.NewReader(body)
 	if err != nil {
-		return err
+		return fmt.Errorf("open gateway archive gzip stream: %w", err)
 	}
-	defer gzipReader.Close()
+	defer func() {
+		if closeErr := gzipReader.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close gateway archive gzip stream: %w", closeErr))
+		}
+	}()
 	target := s.managedGatewayBinaryPath()
 	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 		return err
 	}
 	tmp := target + ".tmp"
+	defer func() {
+		if err != nil {
+			if removeErr := config.RemoveIfExists(tmp); removeErr != nil {
+				err = errors.Join(err, removeErr)
+			}
+		}
+	}()
 	tarReader := tar.NewReader(gzipReader)
 	for {
 		header, err := tarReader.Next()
@@ -510,16 +526,13 @@ func (s Service) installGatewayArchive(body io.Reader) error {
 		_, copyErr := io.Copy(file, tarReader)
 		closeErr := file.Close()
 		if copyErr != nil {
-			_ = os.Remove(tmp)
-			return copyErr
+			return fmt.Errorf("extract gateway binary: %w", copyErr)
 		}
 		if closeErr != nil {
-			_ = os.Remove(tmp)
-			return closeErr
+			return fmt.Errorf("close gateway binary temp file: %w", closeErr)
 		}
 		if err := os.Chmod(tmp, 0o755); err != nil {
-			_ = os.Remove(tmp)
-			return err
+			return fmt.Errorf("chmod gateway binary temp file: %w", err)
 		}
 		return os.Rename(tmp, target)
 	}

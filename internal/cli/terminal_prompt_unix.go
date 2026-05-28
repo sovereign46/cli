@@ -4,6 +4,7 @@ package cli
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -16,13 +17,14 @@ func terminalInputAvailable(file *os.File) bool {
 	return err == nil
 }
 
-func readTerminalPromptLine(reader *bufio.Reader, source io.Reader, out io.Writer) (string, bool, error) {
+func readTerminalPromptLine(reader *bufio.Reader, source io.Reader, out io.Writer) (line string, ok bool, err error) {
 	file, ok := source.(*os.File)
 	if !ok {
 		return "", false, nil
 	}
 	fd := int(file.Fd())
-	previous, err := getTerminalState(fd)
+	var previous syscall.Termios
+	previous, err = getTerminalState(fd)
 	if err != nil {
 		return "", false, nil
 	}
@@ -33,9 +35,13 @@ func readTerminalPromptLine(reader *bufio.Reader, source io.Reader, out io.Write
 	if err := setTerminalState(fd, next); err != nil {
 		return "", false, nil
 	}
-	defer func() { _ = setTerminalState(fd, previous) }()
+	defer func() {
+		if restoreErr := setTerminalState(fd, previous); restoreErr != nil {
+			err = errors.Join(err, restoreErr)
+		}
+	}()
 
-	line, err := readRawPromptLine(reader, out)
+	line, err = readRawPromptLine(reader, out)
 	return line, true, err
 }
 

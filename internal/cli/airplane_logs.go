@@ -236,7 +236,10 @@ func devShellLogCandidates(filename string) []string {
 	}
 	candidates := []string{}
 	for _, pattern := range patterns {
-		matches, _ := filepath.Glob(pattern)
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			continue
+		}
 		candidates = append(candidates, matches...)
 	}
 	return candidates

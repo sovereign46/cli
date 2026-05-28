@@ -171,7 +171,10 @@ func (s Service) seamLlamacppServeProcess() (process llamacppProcess, found bool
 		if kind == "none" || kind == "missing" {
 			return llamacppProcess{}, false, true
 		}
-		pid, _ := strconv.Atoi(strs.FirstNonEmpty(strs.EnvValue(s.Env, "S46_TEST_LLAMACPP_PROCESS_PID"), strs.EnvValue(s.Env, "S46_TEST_OLLAMA_PROCESS_PID"), "123"))
+		pid, err := strconv.Atoi(strs.FirstNonEmpty(strs.EnvValue(s.Env, "S46_TEST_LLAMACPP_PROCESS_PID"), strs.EnvValue(s.Env, "S46_TEST_OLLAMA_PROCESS_PID"), "123"))
+		if err != nil {
+			pid = 123
+		}
 		command := strings.TrimSpace(strs.FirstNonEmpty(strs.EnvValue(s.Env, "S46_TEST_LLAMACPP_PROCESS_COMMAND"), strs.EnvValue(s.Env, "S46_TEST_OLLAMA_PROCESS_COMMAND")))
 		if command == "" {
 			command = testLlamacppCommand(kind)
@@ -197,7 +200,10 @@ func (s Service) seamMemoryBytes() (bytes int64, ok bool) {
 	if value == "" {
 		return 0, false
 	}
-	parsed, _ := strconv.ParseInt(value, 10, 64)
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return 0, false
+	}
 	return parsed, true
 }
 
@@ -206,6 +212,9 @@ func (s Service) seamFreeDiskBytes() (bytes int64, ok bool) {
 	if value == "" {
 		return 0, false
 	}
-	parsed, _ := strconv.ParseInt(value, 10, 64)
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return 0, false
+	}
 	return parsed, true
 }
