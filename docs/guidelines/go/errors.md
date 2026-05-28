@@ -4,7 +4,7 @@ Use returned errors for expected failure paths. Do not `panic`, `log.Fatal`, or 
 
 ## Rules
 
-- **Handle every error** - Do not discard errors with `_ =` in production code
+- **Handle every error** - Return it, wrap it, join it with the primary error, or handle it locally. Only discard errors for deliberately best-effort cleanup, diagnostics, or telemetry when failure must not change the primary result; make that intent explicit with a helper, comment, or `_ =`
 - **Add value at each layer** - Do not pass errors through layers without adding value. Either handle/classify the error, wrap it with useful context, or remove the pass-through layer
 - **Wrap with context** - Use `fmt.Errorf("operation: %w", err)` when returning an error across an operation boundary
 - **No double handling** - Either render/log an error or return it, not both
