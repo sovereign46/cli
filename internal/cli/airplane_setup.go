@@ -965,7 +965,7 @@ func applyAtomicModeOff(ctx context.Context, app *app, before, after config.Conf
 		return missingHarnessSnapshotError(strs.FirstNonEmpty(harnessName, harness.DefaultName))
 	}
 	if err := app.config.SaveConfig(after); err != nil {
-		return fmt.Errorf("airplane mode off: save config: %w", err)
+		return fmt.Errorf("airplane mode off: %w", err)
 	}
 	return nil
 }
@@ -976,7 +976,7 @@ func missingHarnessSnapshotError(harnessName string) error {
 
 func applyAtomicConfigAndSnapshot(app *app, before, after config.Config, snapshot config.HarnessSnapshot, op string) error {
 	if err := app.config.SaveConfig(after); err != nil {
-		return fmt.Errorf("%s: save config: %w", op, err)
+		return fmt.Errorf("%s: %w", op, err)
 	}
 	applied, err := harness.ApplySnapshot(app.runtime.Env, snapshot)
 	if err == nil {

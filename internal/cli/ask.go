@@ -408,12 +408,16 @@ func startAskSpinner(app *app) func() {
 		defer ticker.Stop()
 		i := 0
 		for {
-			_, _ = fmt.Fprintf(file, "\r\033[2K%s Thinking", frames[i%len(frames)])
+			if _, err := fmt.Fprintf(file, "\r\033[2K%s Thinking", frames[i%len(frames)]); err != nil {
+				return
+			}
 			i++
 			select {
 			case <-ticker.C:
 			case <-done:
-				_, _ = fmt.Fprint(file, "\r\033[2K")
+				if _, err := fmt.Fprint(file, "\r\033[2K"); err != nil {
+					return
+				}
 				return
 			}
 		}

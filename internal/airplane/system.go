@@ -65,7 +65,10 @@ func systemMemoryBytes(ctx context.Context) int64 {
 		if err != nil {
 			return 0
 		}
-		parsed, _ := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
+		parsed, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
+		if err != nil {
+			return 0
+		}
 		return parsed
 	case "linux":
 		raw, err := os.ReadFile("/proc/meminfo")
@@ -76,7 +79,10 @@ func systemMemoryBytes(ctx context.Context) int64 {
 			if strings.HasPrefix(line, "MemTotal:") {
 				fields := strings.Fields(line)
 				if len(fields) >= 2 {
-					kb, _ := strconv.ParseInt(fields[1], 10, 64)
+					kb, err := strconv.ParseInt(fields[1], 10, 64)
+					if err != nil {
+						return 0
+					}
 					return kb * 1024
 				}
 			}

@@ -28,6 +28,7 @@ type modelInstallProgressRenderer struct {
 	startedCurrent int64
 	lastUpdate     time.Time
 	lastLineLen    int
+	failed         bool
 }
 
 func (s Service) modelInstallProgress() models.InstallProgressFunc {
@@ -39,13 +40,16 @@ func (s Service) modelInstallProgress() models.InstallProgressFunc {
 }
 
 func (r *modelInstallProgressRenderer) Update(progress models.InstallProgress) {
-	if r.out == nil || progress.Total <= 0 {
+	if r.out == nil || r.failed || progress.Total <= 0 {
 		return
 	}
 	now := time.Now()
 	if r.startedAt.IsZero() || r.phase != progress.Phase {
 		if r.lastLineLen > 0 {
-			_, _ = fmt.Fprintln(r.out)
+			if _, err := fmt.Fprintln(r.out); err != nil {
+				r.failed = true
+				return
+			}
 		}
 		r.phase = progress.Phase
 		r.startedAt = now
@@ -63,9 +67,15 @@ func (r *modelInstallProgressRenderer) Update(progress models.InstallProgress) {
 	if r.lastLineLen > lineLen {
 		clear = strings.Repeat(" ", r.lastLineLen-lineLen)
 	}
-	_, _ = fmt.Fprintf(r.out, "\r%s%s", line, clear)
+	if _, err := fmt.Fprintf(r.out, "\r%s%s", line, clear); err != nil {
+		r.failed = true
+		return
+	}
 	if progress.Done {
-		_, _ = fmt.Fprintln(r.out)
+		if _, err := fmt.Fprintln(r.out); err != nil {
+			r.failed = true
+			return
+		}
 		r.startedAt = time.Time{}
 		r.startedCurrent = 0
 		r.lastUpdate = time.Time{}

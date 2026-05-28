@@ -284,7 +284,7 @@ func readVersion() (string, error) {
 		return "0.0.0", nil
 	}
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("read %s: %w", versionFile, err)
 	}
 	version := strings.TrimSpace(string(raw))
 	if !semverPattern.MatchString(version) {
@@ -295,7 +295,11 @@ func readVersion() (string, error) {
 
 func bumpVersion(current string, target string) (string, error) {
 	if semverPattern.MatchString(target) {
-		if compareVersions(target, current) <= 0 {
+		comparison, err := compareVersions(target, current)
+		if err != nil {
+			return "", err
+		}
+		if comparison <= 0 {
 			return "", fmt.Errorf("explicit version %s must be greater than current version %s", target, current)
 		}
 		return target, nil
@@ -317,15 +321,21 @@ func bumpVersion(current string, target string) (string, error) {
 	}
 }
 
-func compareVersions(left string, right string) int {
-	leftParts, _ := parseVersion(left)
-	rightParts, _ := parseVersion(right)
+func compareVersions(left string, right string) (int, error) {
+	leftParts, err := parseVersion(left)
+	if err != nil {
+		return 0, fmt.Errorf("parse left version: %w", err)
+	}
+	rightParts, err := parseVersion(right)
+	if err != nil {
+		return 0, fmt.Errorf("parse right version: %w", err)
+	}
 	for i := range leftParts {
 		if leftParts[i] != rightParts[i] {
-			return leftParts[i] - rightParts[i]
+			return leftParts[i] - rightParts[i], nil
 		}
 	}
-	return 0
+	return 0, nil
 }
 
 func parseVersion(version string) ([3]int, error) {
@@ -337,7 +347,7 @@ func parseVersion(version string) ([3]int, error) {
 	for i, field := range fields {
 		value, err := strconv.Atoi(field)
 		if err != nil {
-			return [3]int{}, fmt.Errorf("invalid version %q", version)
+			return [3]int{}, fmt.Errorf("invalid version %q: %w", version, err)
 		}
 		parts[i] = value
 	}
@@ -346,24 +356,27 @@ func parseVersion(version string) ([3]int, error) {
 
 func updateVersionFiles(version string) error {
 	if err := os.WriteFile(versionFile, []byte(version+"\n"), 0o644); err != nil {
-		return err
+		return fmt.Errorf("write %s: %w", versionFile, err)
 	}
 
 	raw, err := os.ReadFile(versionGoFile)
 	if err != nil {
-		return err
+		return fmt.Errorf("read %s: %w", versionGoFile, err)
 	}
 	updated := versionAssignmentRegexp.ReplaceAllString(string(raw), fmt.Sprintf("Version = %q", version))
 	if updated == string(raw) {
 		return fmt.Errorf("could not find Version assignment in %s", versionGoFile)
 	}
-	return os.WriteFile(versionGoFile, []byte(updated), 0o644)
+	if err := os.WriteFile(versionGoFile, []byte(updated), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", versionGoFile, err)
+	}
+	return nil
 }
 
 func updateChangelogForRelease(version string) error {
 	raw, err := os.ReadFile(changelogFile)
 	if err != nil {
-		return err
+		return fmt.Errorf("read %s: %w", changelogFile, err)
 	}
 	content := string(raw)
 	if !strings.Contains(content, "## [Unreleased]") {
@@ -371,13 +384,16 @@ func updateChangelogForRelease(version string) error {
 	}
 	date := time.Now().UTC().Format("2006-01-02")
 	updated := strings.Replace(content, "## [Unreleased]", fmt.Sprintf("## [%s] - %s", version, date), 1)
-	return os.WriteFile(changelogFile, []byte(updated), 0o644)
+	if err := os.WriteFile(changelogFile, []byte(updated), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", changelogFile, err)
+	}
+	return nil
 }
 
 func addUnreleasedSection() error {
 	raw, err := os.ReadFile(changelogFile)
 	if err != nil {
-		return err
+		return fmt.Errorf("read %s: %w", changelogFile, err)
 	}
 	content := string(raw)
 	if strings.Contains(content, "## [Unreleased]") {
@@ -388,7 +404,10 @@ func addUnreleasedSection() error {
 		return fmt.Errorf("%s has no version section to insert before", changelogFile)
 	}
 	updated := content[:index[0]] + "## [Unreleased]\n\n" + content[index[0]:]
-	return os.WriteFile(changelogFile, []byte(updated), 0o644)
+	if err := os.WriteFile(changelogFile, []byte(updated), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", changelogFile, err)
+	}
+	return nil
 }
 
 func requireUnreleasedChangelogEntries() error {
@@ -405,7 +424,7 @@ func requireUnreleasedChangelogEntries() error {
 func unreleasedChangelogSection() (string, error) {
 	raw, err := os.ReadFile(changelogFile)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("read %s: %w", changelogFile, err)
 	}
 	content := string(raw)
 	header := regexp.MustCompile(`(?m)^## \[Unreleased\]\s*$`).FindStringIndex(content)
@@ -423,7 +442,7 @@ func unreleasedChangelogSection() (string, error) {
 func latestChangelogReleaseVersion() (string, error) {
 	raw, err := os.ReadFile(changelogFile)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("read %s: %w", changelogFile, err)
 	}
 	match := changelogVersionRegexp.FindStringSubmatch(string(raw))
 	if len(match) < 2 {
@@ -461,7 +480,7 @@ func lastChangelogCommit(ctx context.Context) (string, bool) {
 func stageChangedFiles(ctx context.Context) error {
 	output, err := runOutput(ctx, "git", "ls-files", "-m", "-o", "-d", "--exclude-standard")
 	if err != nil {
-		return err
+		return fmt.Errorf("list changed files: %w", err)
 	}
 	paths := splitLines(output)
 	if len(paths) == 0 {
@@ -528,7 +547,7 @@ func captureOutput(ctx context.Context, name string, args ...string) (string, er
 		if reason == "" {
 			reason = err.Error()
 		}
-		return "", fmt.Errorf("command failed: %s: %s", commandString(name, args...), reason)
+		return "", fmt.Errorf("command failed: %s: %s: %w", commandString(name, args...), reason, err)
 	}
 	return stdout.String(), nil
 }

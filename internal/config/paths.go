@@ -15,7 +15,10 @@ func HomeDir(env map[string]string) string {
 	if value := strs.EnvValue(env, "USERPROFILE"); value != "" {
 		return value
 	}
-	dir, _ := os.UserHomeDir()
+	dir, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
 	return dir
 }
 

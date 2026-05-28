@@ -124,19 +124,19 @@ func (c Client) doJSON(ctx context.Context, method string, path string, body any
 		var err error
 		payload, err = json.Marshal(body)
 		if err != nil {
-			return err
+			return fmt.Errorf("encode s46-gist %s %s request: %w", method, path, err)
 		}
 		reader = bytes.NewReader(payload)
 	}
 
 	proof, err := c.proofHeaders(ctx, proofOperation, payload)
 	if err != nil {
-		return err
+		return fmt.Errorf("prepare s46-gist proof for %s %s: %w", method, path, err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL()+path, reader)
 	if err != nil {
-		return err
+		return fmt.Errorf("build s46-gist %s %s request: %w", method, path, err)
 	}
 	req.Header.Set("Accept", "application/json")
 	if body != nil {
@@ -156,7 +156,7 @@ func (c Client) doJSON(ctx context.Context, method string, path string, body any
 	defer resp.Body.Close()
 	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return err
+		return fmt.Errorf("read s46-gist %s %s response: %w", method, path, err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("s46-gist %s %s failed: HTTP %d: %s", method, path, resp.StatusCode, strings.TrimSpace(string(responseBody)))
@@ -164,7 +164,10 @@ func (c Client) doJSON(ctx context.Context, method string, path string, body any
 	if out == nil || len(responseBody) == 0 {
 		return nil
 	}
-	return json.Unmarshal(responseBody, out)
+	if err := json.Unmarshal(responseBody, out); err != nil {
+		return fmt.Errorf("decode s46-gist %s %s response: %w", method, path, err)
+	}
+	return nil
 }
 
 func (c Client) proofHeaders(ctx context.Context, operation string, payload []byte) (map[string]string, error) {
@@ -178,7 +181,7 @@ func (c Client) proofHeaders(ctx context.Context, operation string, payload []by
 	bodyHash := sha256Hex(payload)
 	challenge, err := c.requestChallenge(ctx, ChallengeRequest{ClientID: clientID, BodyHash: bodyHash, Operation: operation})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("request share proof challenge: %w", err)
 	}
 	if challenge.Algorithm != "" && challenge.Algorithm != "sha256" {
 		return nil, fmt.Errorf("unsupported share proof algorithm %q", challenge.Algorithm)
@@ -191,7 +194,7 @@ func (c Client) proofHeaders(ctx context.Context, operation string, payload []by
 	}
 	suffix, err := solveProof(ctx, challenge.Nonce, bodyHash, challenge.Difficulty)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("solve share proof challenge: %w", err)
 	}
 	return map[string]string{
 		"X-S46-Client-ID":     clientID,
@@ -207,11 +210,11 @@ func (c Client) requestChallenge(ctx context.Context, body ChallengeRequest) (Ch
 
 	payload, err := json.Marshal(body)
 	if err != nil {
-		return ChallengeResponse{}, err
+		return ChallengeResponse{}, fmt.Errorf("encode s46-gist challenge request: %w", err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL()+"/v1/share-challenges", bytes.NewReader(payload))
 	if err != nil {
-		return ChallengeResponse{}, err
+		return ChallengeResponse{}, fmt.Errorf("build s46-gist challenge request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
@@ -224,14 +227,14 @@ func (c Client) requestChallenge(ctx context.Context, body ChallengeRequest) (Ch
 	defer resp.Body.Close()
 	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return ChallengeResponse{}, err
+		return ChallengeResponse{}, fmt.Errorf("read s46-gist challenge response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return ChallengeResponse{}, fmt.Errorf("s46-gist challenge failed: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(responseBody)))
 	}
 	var out ChallengeResponse
 	if err := json.Unmarshal(responseBody, &out); err != nil {
-		return ChallengeResponse{}, err
+		return ChallengeResponse{}, fmt.Errorf("decode s46-gist challenge response: %w", err)
 	}
 	return out, nil
 }

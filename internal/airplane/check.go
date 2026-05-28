@@ -244,11 +244,15 @@ func (s Service) writeModelProbeProgress(done <-chan struct{}, finished chan<- s
 		if elapsed <= 0 {
 			elapsed = time.Second
 		}
-		_, _ = fmt.Fprintf(s.Progress, "\r%s loading %s; might take a while... %s elapsed", s.logPrefix(), LocalModelID, formatDuration(elapsed))
+		if _, err := fmt.Fprintf(s.Progress, "\r%s loading %s; might take a while... %s elapsed", s.logPrefix(), LocalModelID, formatDuration(elapsed)); err != nil {
+			return
+		}
 		select {
 		case <-ticker.C:
 		case <-done:
-			_, _ = fmt.Fprintln(s.Progress)
+			if _, err := fmt.Fprintln(s.Progress); err != nil {
+				return
+			}
 			return
 		}
 	}
@@ -258,13 +262,16 @@ func (s Service) modelProbe(ctx context.Context) (bool, string) {
 	if probeOK, message, ok := s.seamModelProbe(); ok {
 		return probeOK, message
 	}
-	body, _ := json.Marshal(map[string]any{
+	body, err := json.Marshal(map[string]any{
 		"model":      s.backendModel(),
 		"messages":   []map[string]string{{"role": "user", "content": "Reply with: ok"}},
 		"stream":     false,
 		"max_tokens": 4,
 		"n_predict":  4,
 	})
+	if err != nil {
+		return false, "probe request failed: " + err.Error()
+	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(LlamacppURL(s.Env), "/")+"/v1/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return false, "probe request failed: " + err.Error()

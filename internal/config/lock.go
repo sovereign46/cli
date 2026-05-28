@@ -28,11 +28,11 @@ func (s *Store) Lock(ctx context.Context) (*Lock, error) {
 	}
 	lockPath := s.ConfigPath + ".lock"
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create lock directory for %s: %w", lockPath, err)
 	}
 	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("open lock file %s: %w", lockPath, err)
 	}
 	for {
 		err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
@@ -40,12 +40,10 @@ func (s *Store) Lock(ctx context.Context) (*Lock, error) {
 			return &Lock{file: file}, nil
 		}
 		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
-			_ = file.Close()
-			return nil, fmt.Errorf("cannot acquire s46 lock: %w", err)
+			return nil, errors.Join(fmt.Errorf("cannot acquire s46 lock: %w", err), CloseFile(file))
 		}
 		if err := contextx.Sleep(ctx, lockRetryInterval); err != nil {
-			_ = file.Close()
-			return nil, fmt.Errorf("cannot acquire s46 lock: %w", err)
+			return nil, errors.Join(fmt.Errorf("cannot acquire s46 lock: %w", err), CloseFile(file))
 		}
 	}
 }
@@ -58,7 +56,10 @@ func (l *Lock) Unlock() error {
 	closeErr := l.file.Close()
 	l.file = nil
 	if err != nil {
-		return err
+		err = fmt.Errorf("unlock s46 lock: %w", err)
 	}
-	return closeErr
+	if closeErr != nil {
+		closeErr = fmt.Errorf("close s46 lock: %w", closeErr)
+	}
+	return errors.Join(err, closeErr)
 }

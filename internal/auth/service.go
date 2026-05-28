@@ -323,7 +323,10 @@ func (s Service) currentTokenSet(ctx context.Context, refresh bool) (config.Stat
 	}
 	tokens, err := s.loadTokens(ctx, state.CurrentUser)
 	if err != nil {
-		return config.State{}, api.TokenSet{}, fmt.Errorf("no refresh token available; run `s46 login` first")
+		if errors.Is(err, keyring.ErrNotFound) {
+			return config.State{}, api.TokenSet{}, fmt.Errorf("no refresh token available; run `s46 login` first")
+		}
+		return config.State{}, api.TokenSet{}, fmt.Errorf("load stored token for %s: %w", state.CurrentUser, err)
 	}
 	if refresh || time.Until(tokens.ExpiresAt) < 30*time.Second {
 		tokens, err = s.API.RefreshToken(ctx, tokens.RefreshToken, state.CurrentUser)
@@ -354,9 +357,12 @@ func (s Service) clearLocalCredentials(ctx context.Context, state config.State) 
 func (s Service) storeTokens(ctx context.Context, tokens api.TokenSet) error {
 	raw, err := json.Marshal(tokens)
 	if err != nil {
-		return err
+		return fmt.Errorf("encode tokens for %s: %w", tokens.Account, err)
 	}
-	return s.Keyring.Set(ctx, TokenService, tokens.Account, string(raw))
+	if err := s.Keyring.Set(ctx, TokenService, tokens.Account, string(raw)); err != nil {
+		return fmt.Errorf("store tokens for %s: %w", tokens.Account, err)
+	}
+	return nil
 }
 
 func (s Service) loadTokens(ctx context.Context, account string) (api.TokenSet, error) {
@@ -366,7 +372,7 @@ func (s Service) loadTokens(ctx context.Context, account string) (api.TokenSet, 
 	}
 	var tokens api.TokenSet
 	if err := json.Unmarshal([]byte(raw), &tokens); err != nil {
-		return api.TokenSet{}, err
+		return api.TokenSet{}, fmt.Errorf("decode tokens for %s: %w", account, err)
 	}
 	return tokens, nil
 }

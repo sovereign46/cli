@@ -36,6 +36,7 @@ type Error struct {
 	Code       string
 	Message    string
 	StatusCode int
+	Err        error
 }
 
 func (e Error) Error() string {
@@ -46,6 +47,14 @@ func (e Error) Error() string {
 		return e.Code
 	}
 	return fmt.Sprintf("HTTP %d", e.StatusCode)
+}
+
+func (e Error) Unwrap() error {
+	return e.Err
+}
+
+func (e Error) ErrorCode() string {
+	return e.Code
 }
 
 type HTTPClient struct {
@@ -73,7 +82,14 @@ func (c *HTTPClient) StartDeviceLogin(ctx context.Context, req DeviceLoginReques
 	if err := c.do(ctx, http.MethodPost, "/v1/auth/device/start", "", req, &response); err != nil {
 		return DeviceLogin{}, err
 	}
-	expiresAt, _ := time.Parse(time.RFC3339, response.ExpiresAt)
+	var expiresAt time.Time
+	if response.ExpiresAt != "" {
+		var err error
+		expiresAt, err = time.Parse(time.RFC3339, response.ExpiresAt)
+		if err != nil {
+			return DeviceLogin{}, fmt.Errorf("parse device login expiry %q: %w", response.ExpiresAt, err)
+		}
+	}
 	return DeviceLogin{
 		DeviceCode:      response.DeviceCode,
 		UserCode:        response.UserCode,
@@ -327,13 +343,13 @@ func (c *HTTPClient) do(ctx context.Context, method string, endpoint string, bea
 	} else {
 		raw, err := json.Marshal(body)
 		if err != nil {
-			return err
+			return fmt.Errorf("encode %s %s request: %w", method, endpoint, err)
 		}
 		reader = bytes.NewReader(raw)
 	}
 	request, err := http.NewRequestWithContext(ctx, method, c.BaseURL+endpoint, reader)
 	if err != nil {
-		return err
+		return fmt.Errorf("build %s %s request: %w", method, endpoint, err)
 	}
 	request.Header.Set("Accept", "application/json")
 	if body != nil {
@@ -359,33 +375,29 @@ func (c *HTTPClient) do(ctx context.Context, method string, endpoint string, bea
 	if target == nil {
 		return nil
 	}
-	return json.NewDecoder(response.Body).Decode(target)
+	if err := json.NewDecoder(response.Body).Decode(target); err != nil {
+		return fmt.Errorf("decode %s %s response: %w", method, endpoint, err)
+	}
+	return nil
 }
 
 func decodeErrorResponse(method string, endpoint string, response *http.Response) error {
-	raw, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	raw, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if err != nil {
+		return fmt.Errorf("read %s %s error response: %w", method, endpoint, err)
+	}
 	var body struct {
 		Error struct {
 			Code    string `json:"code"`
 			Message string `json:"message"`
 		} `json:"error"`
 	}
-	_ = json.Unmarshal(raw, &body)
-	apiErr := Error{Code: body.Error.Code, Message: body.Error.Message, StatusCode: response.StatusCode}
-	switch apiErr.Code {
-	case "authorization_pending":
-		return fmt.Errorf("%w", ErrAuthorizationPending)
-	case "expired":
-		return fmt.Errorf("%w", ErrExpired)
-	case "not_invited":
-		return fmt.Errorf("%w", ErrNotInvited)
-	case "authenticate_first":
-		return fmt.Errorf("%w", ErrAuthenticateFirst)
-	case "unauthorized":
-		return fmt.Errorf("%w", ErrUnauthorized)
-	case "forbidden":
-		return fmt.Errorf("%w", ErrForbidden)
+	if err := json.Unmarshal(raw, &body); err != nil {
+		// Non-JSON error bodies fall through to the raw response text below.
+		body.Error.Code = ""
+		body.Error.Message = ""
 	}
+	apiErr := Error{Code: body.Error.Code, Message: body.Error.Message, StatusCode: response.StatusCode, Err: sentinelForCode(body.Error.Code)}
 	if apiErr.Code != "" || apiErr.Message != "" {
 		return apiErr
 	}
@@ -394,4 +406,23 @@ func decodeErrorResponse(method string, endpoint string, response *http.Response
 		return fmt.Errorf("%s %s: %s: %s", method, endpoint, response.Status, message)
 	}
 	return fmt.Errorf("%s %s: %s", method, endpoint, response.Status)
+}
+
+func sentinelForCode(code string) error {
+	switch code {
+	case "authorization_pending":
+		return ErrAuthorizationPending
+	case "expired":
+		return ErrExpired
+	case "not_invited":
+		return ErrNotInvited
+	case "authenticate_first":
+		return ErrAuthenticateFirst
+	case "unauthorized":
+		return ErrUnauthorized
+	case "forbidden":
+		return ErrForbidden
+	default:
+		return nil
+	}
 }

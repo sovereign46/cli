@@ -208,7 +208,7 @@ func buildConnectConfigs(cfg config.Config, team api.Team, harnessName, model, m
 // cause plus any cleanup failures that may need manual reconciliation.
 func applyAtomicConfigAndHarness(ctx context.Context, app *app, before, after config.Config, adapter harness.Adapter, plan harness.Plan, op string) (harness.AppliedPlan, error) {
 	if err := app.config.SaveConfig(after); err != nil {
-		return harness.AppliedPlan{}, fmt.Errorf("%s: save config: %w", op, err)
+		return harness.AppliedPlan{}, fmt.Errorf("%s: %w", op, err)
 	}
 	applied, err := adapter.Apply(ctx, plan)
 	if err == nil {
