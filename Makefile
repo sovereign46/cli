@@ -4,7 +4,12 @@ build:
 	go build ./cmd/s46
 
 lint:
-	@fmt="$$(gofmt -l $$(git ls-files '*.go'))"; \
+	@files="$$(git ls-files -co --exclude-standard '*.go' | while IFS= read -r file; do [ -f "$$file" ] && printf '%s\n' "$$file"; done)"; \
+	if [ -n "$$files" ]; then \
+		fmt="$$(printf '%s\n' "$$files" | xargs gofmt -l)"; \
+	else \
+		fmt=""; \
+	fi; \
 	if [ -n "$$fmt" ]; then \
 		echo "[s46] gofmt needed:"; \
 		echo "$$fmt"; \
