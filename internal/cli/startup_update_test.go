@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestStartupUpdateCheckPrintsHomebrewInstruction(t *testing.T) {
@@ -25,6 +26,16 @@ func TestStartupUpdateCheckPrintsHomebrewInstruction(t *testing.T) {
 	}
 	if strings.Contains(result.stdout, "update available") {
 		t.Fatalf("startup update check polluted stdout: %s", result.stdout)
+	}
+}
+
+func TestStartupUpdateCheckRejectsFutureCache(t *testing.T) {
+	env := testEnv(t)
+	now := time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC)
+	noteStartupUpdateCheck(env, now.Add(time.Hour))
+
+	if startupUpdateCheckFresh(env, now) {
+		t.Fatal("future startup update cache timestamp was treated as fresh")
 	}
 }
 

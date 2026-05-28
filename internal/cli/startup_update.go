@@ -89,6 +89,9 @@ func startupUpdateCheckFresh(env map[string]string, now time.Time) bool {
 	if err != nil {
 		return false
 	}
+	if last.After(now) {
+		return false
+	}
 	return now.Sub(last) < startupUpdateCheckInterval
 }
 
