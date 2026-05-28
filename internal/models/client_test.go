@@ -279,6 +279,21 @@ func TestInstallRejectsUntrustedArtifactHost(t *testing.T) {
 	}
 }
 
+func TestInstallRejectsYankedAdvisoryIndex(t *testing.T) {
+	fixture := newModelFixture(t, []byte("model"))
+	index := fmt.Sprintf(`{"schema":1,"advisories":[],"yanks":[{"model":{"modelId":"%s","version":"v1"},"subjectType":"bundle-digest","bundleDigest":"sha256:%s","artifactDigest":"sha256:%s","releaseSignatureSubjectDigest":"sha256:%s","reason":"test yank","url":"/advisories/v1/yanks/S46-2026-0001.json","signatureUrl":"/advisories/v1/yanks/S46-2026-0001.json.sig"}]}`, fixture.manifest.ModelID, strings.Repeat("1", 64), fixture.manifest.SHA256, strings.Repeat("2", 64))
+	server := fixture.server(t, map[string][]byte{"/advisories/v1/index.json": []byte(index)})
+	defer server.Close()
+	fixture.manifest.URL = server.URL + "/artifacts/model.gguf"
+	fixture.manifest.Version = "v1"
+	fixture.sign(t)
+
+	err := Install(context.Background(), InstallRequest{Env: fixture.env(server.URL), ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, TargetPath: filepath.Join(t.TempDir(), "model.gguf"), HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys()})
+	if err == nil || !strings.Contains(err.Error(), "yanked") {
+		t.Fatalf("expected yanked failure, got %v", err)
+	}
+}
+
 func TestInstallRejectsArtifactChecksumMismatch(t *testing.T) {
 	fixture := newModelFixture(t, []byte("model"))
 	server := fixture.server(t, map[string][]byte{"/artifacts/model.gguf": []byte("wrong")})
@@ -398,6 +413,8 @@ func (f *modelFixture) server(t *testing.T, overrides map[string][]byte) *httpte
 			_, _ = w.Write(f.body)
 		case "/models/v1/s46/test-model/manifest.json.sig":
 			_ = json.NewEncoder(w).Encode(f.signature)
+		case "/advisories/v1/index.json":
+			_, _ = w.Write([]byte(`{"schema":1,"advisories":[]}`))
 		case "/artifacts/model.gguf":
 			_, _ = w.Write(f.artifact)
 		default:
@@ -426,6 +443,8 @@ func (f *modelFixture) rangeHandler(onArtifact func(*http.Request)) http.Handler
 			_, _ = w.Write(f.body)
 		case "/models/v1/s46/test-model/manifest.json.sig":
 			_ = json.NewEncoder(w).Encode(f.signature)
+		case "/advisories/v1/index.json":
+			_, _ = w.Write([]byte(`{"schema":1,"advisories":[]}`))
 		case "/artifacts/model.gguf":
 			if onArtifact != nil {
 				onArtifact(r)

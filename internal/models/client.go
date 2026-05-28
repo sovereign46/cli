@@ -80,6 +80,9 @@ func Install(ctx context.Context, request InstallRequest) error {
 	if err := validateManifest(manifest.Manifest, request); err != nil {
 		return err
 	}
+	if err := checkAdvisories(ctx, request, manifest.Manifest); err != nil {
+		return err
+	}
 	if ok, err := verifyInstalledReceiptForManifest(request, manifest.Manifest, true); err != nil {
 		return err
 	} else if ok {
@@ -189,6 +192,9 @@ func verifySignature(body []byte, signature Signature, request InstallRequest) e
 	if signature.Algorithm != SignatureAlgorithm {
 		return fmt.Errorf("unsupported model signature algorithm %q", signature.Algorithm)
 	}
+	if signature.SignedPayload != "" && signature.SignedPayload != "raw-json-bytes" {
+		return fmt.Errorf("unsupported model signature payload %q", signature.SignedPayload)
+	}
 	keys, err := trustedKeys(request.Env)
 	if err != nil {
 		return err
@@ -208,6 +214,157 @@ func verifySignature(body []byte, signature Signature, request InstallRequest) e
 		return fmt.Errorf("model manifest signature verification failed")
 	}
 	return nil
+}
+
+func checkAdvisories(ctx context.Context, request InstallRequest, manifest Manifest) error {
+	baseURL := strs.FirstNonEmpty(request.ManifestBaseURL, BaseURL(request.Env))
+	policy, err := newTrustPolicy(baseURL, request.Env)
+	if err != nil {
+		return err
+	}
+	indexURL, err := advisoryIndexURL(baseURL)
+	if err != nil {
+		return err
+	}
+	body, err := downloadMetadata(ctx, request.HTTPClient, policy, indexURL)
+	if err != nil {
+		return fmt.Errorf("download advisory index: %w", err)
+	}
+	if sigBody, err := downloadMetadata(ctx, request.HTTPClient, policy, indexURL+".sig"); err == nil {
+		if err := verifyAdvisoryIndexSignature(body, sigBody, request); err != nil {
+			return err
+		}
+	} else if !metadataNotFound(err) {
+		return fmt.Errorf("download advisory index signature: %w", err)
+	}
+	var index AdvisoryIndex
+	if err := json.Unmarshal(body, &index); err != nil {
+		return fmt.Errorf("decode advisory index: %w", err)
+	}
+	if index.Schema != SchemaVersion {
+		return fmt.Errorf("unsupported advisory index schema %d", index.Schema)
+	}
+	if manifest.Yanked || len(manifest.YankURLs) > 0 {
+		return fmt.Errorf("model release %s is yanked", manifest.ModelID)
+	}
+	for _, yank := range index.Yanks {
+		if advisoryYankMatchesManifest(yank, manifest) {
+			return fmt.Errorf("model release %s is yanked: %s", manifest.ModelID, yank.Reason)
+		}
+	}
+	return nil
+}
+
+func advisoryIndexURL(baseURL string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", fmt.Errorf("invalid model registry URL %q", baseURL)
+	}
+	basePath := strings.TrimRight(parsed.Path, "/")
+	if strings.HasSuffix(basePath, "/models/v1") {
+		basePath = strings.TrimSuffix(basePath, "/models/v1")
+	}
+	parsed.Path = pathJoinURL(basePath, "advisories", "v1", "index.json")
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String(), nil
+}
+
+func advisoryYankMatchesManifest(yank AdvisoryYank, manifest Manifest) bool {
+	if yank.Model.ModelID == manifest.ModelID && (manifest.Version == "" || yank.Model.Version == "" || yank.Model.Version == manifest.Version) {
+		return true
+	}
+	for _, pair := range [][2]string{
+		{yank.ArtifactDigest, manifest.ArtifactDigest},
+		{yank.ArtifactDigest, manifest.SHA256},
+		{yank.BundleDigest, manifest.BundleDigest},
+		{yank.ReleaseSignatureSubjectDigest, manifest.ReleaseSignatureSubjectDigest},
+	} {
+		if pair[0] != "" && pair[1] != "" && digestStringsEqual(pair[0], pair[1]) {
+			return true
+		}
+	}
+	return false
+}
+
+func verifyAdvisoryIndexSignature(body []byte, sigBody []byte, request InstallRequest) error {
+	var signature AdvisorySignature
+	if err := json.Unmarshal(sigBody, &signature); err != nil {
+		return fmt.Errorf("decode advisory index signature: %w", err)
+	}
+	if signature.Schema != SchemaVersion || signature.Algorithm != SignatureAlgorithm || signature.SignedPayload != "canonical-json-v1" {
+		return fmt.Errorf("unsupported advisory index signature metadata")
+	}
+	digest, canonicalBody, err := canonicalJSONDigest(body)
+	if err != nil {
+		return err
+	}
+	if !digestStringsEqual(signature.SubjectDigest, digest) {
+		return fmt.Errorf("advisory index signature subject digest mismatch")
+	}
+	keys, err := trustedKeys(request.Env)
+	if err != nil {
+		return err
+	}
+	for keyID, publicKey := range request.trustedKeys {
+		keys[keyID] = publicKey
+	}
+	publicKey, ok := keys[signature.KeyID]
+	if !ok {
+		return fmt.Errorf("advisory index signed by untrusted key %q", signature.KeyID)
+	}
+	if signature.PublicKey != "" {
+		declared, err := decodeBase64(signature.PublicKey)
+		if err != nil {
+			return fmt.Errorf("decode advisory index public key: %w", err)
+		}
+		if string(declared) != string(publicKey) {
+			return fmt.Errorf("advisory index signature public key does not match trusted key %q", signature.KeyID)
+		}
+	}
+	sig, err := decodeBase64(signature.Signature)
+	if err != nil {
+		return fmt.Errorf("decode advisory index signature: %w", err)
+	}
+	if !ed25519.Verify(publicKey, canonicalBody, sig) {
+		return fmt.Errorf("advisory index signature verification failed")
+	}
+	return nil
+}
+
+func canonicalJSONDigest(body []byte) (string, []byte, error) {
+	var value any
+	decoder := json.NewDecoder(strings.NewReader(string(body)))
+	decoder.UseNumber()
+	if err := decoder.Decode(&value); err != nil {
+		return "", nil, fmt.Errorf("decode advisory index for signature: %w", err)
+	}
+	canonicalBody, err := json.Marshal(value)
+	if err != nil {
+		return "", nil, err
+	}
+	sum := sha256.Sum256(canonicalBody)
+	return "sha256:" + hex.EncodeToString(sum[:]), canonicalBody, nil
+}
+
+func metadataNotFound(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "HTTP 404")
+}
+
+func pathJoinURL(base string, parts ...string) string {
+	all := []string{strings.TrimRight(base, "/")}
+	all = append(all, parts...)
+	joined := strings.Join(all, "/")
+	if !strings.HasPrefix(joined, "/") {
+		joined = "/" + joined
+	}
+	return joined
+}
+
+func digestStringsEqual(left string, right string) bool {
+	leftDigest, leftErr := normalizeSHA256(left)
+	rightDigest, rightErr := normalizeSHA256(right)
+	return leftErr == nil && rightErr == nil && strings.EqualFold(leftDigest, rightDigest)
 }
 
 func validateManifest(manifest Manifest, request InstallRequest) error {
