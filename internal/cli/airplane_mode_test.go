@@ -118,6 +118,33 @@ func TestAirplaneModeOnPromptsForHarnessAndRestoresSelectedHarness(t *testing.T)
 	}
 }
 
+func TestAirplaneModeOnStopsWhenModelVerificationIsSkipped(t *testing.T) {
+	env := testEnv(t)
+	delete(env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")
+	env["S46_TEST_MEMORY_BYTES"] = "68000000000"
+	env["S46_TEST_FREE_DISK_BYTES"] = "61000000000"
+	env["S46_TEST_LLAMACPP_PATH"] = "/opt/homebrew/bin/llama-server"
+	env["S46_TEST_LLAMACPP_RUNNING"] = "1"
+	env["S46_TEST_MODEL_DOWNLOADED"] = "0"
+	env["S46_TEST_MODEL_PROBE"] = "0"
+	env["S46_TEST_GATEWAY_READY"] = "0"
+	env["S46_TEST_GATEWAY_BINARY"] = "/tmp/s46-gateway"
+
+	result := runWithStdin(t, env, strings.NewReader("Y\nn\n"), "airplane", "mode", "on")
+	if result.err == nil || !strings.Contains(result.err.Error(), "airplane setup is still incomplete") || !strings.Contains(result.err.Error(), "model-downloaded") {
+		t.Fatalf("expected model verification setup incomplete error, got err=%v stdout=%q stderr=%q", result.err, result.stdout, result.stderr)
+	}
+	if strings.Contains(result.err.Error(), "could not start local s46 gateway") {
+		t.Fatalf("mode on should not try to start the gateway after model verification fails, got err=%v", result.err)
+	}
+	if strings.Count(result.stdout, "airplane setup: checking local runtime") != 1 {
+		t.Fatalf("expected one setup check, got output:\n%s", result.stdout)
+	}
+	if !strings.Contains(result.stdout, "[s46] Model download skipped.") {
+		t.Fatalf("expected manual model instructions after skipped verification, got:\n%s", result.stdout)
+	}
+}
+
 func TestAirplaneModeOnRestoresExistingPiDefaultSettings(t *testing.T) {
 	env := testEnv(t)
 	settingsPath := filepath.Join(env["HOME"], ".pi", "agent", "settings.json")

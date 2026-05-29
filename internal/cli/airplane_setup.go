@@ -25,12 +25,16 @@ func runAirplaneSetup(ctx context.Context, app *app, allowPrompts bool) (airplan
 	return runAirplaneSetupWithOptions(ctx, app, airplaneSetupOptions{AllowPrompts: allowPrompts})
 }
 
-func runAirplaneSetupWithOptions(ctx context.Context, app *app, options airplaneSetupOptions) (airplane.Report, error) {
+func newAirplaneSetupService(app *app) airplane.Service {
 	var progress io.Writer
 	if !app.options.machineReadable() {
 		progress = app.runtime.Stdout
 	}
-	service := airplane.Service{Env: app.runtime.Env, Stdin: app.runtime.Stdin, Stdout: app.runtime.Stdout, Stderr: app.runtime.Stderr, Progress: progress, LogPrefix: "[s46]"}
+	return airplane.Service{Env: app.runtime.Env, Stdin: app.runtime.Stdin, Stdout: app.runtime.Stdout, Stderr: app.runtime.Stderr, Progress: progress, LogPrefix: "[s46]"}
+}
+
+func runAirplaneSetupWithOptions(ctx context.Context, app *app, options airplaneSetupOptions) (airplane.Report, error) {
+	service := newAirplaneSetupService(app)
 	report := service.Check(ctx)
 	if err := ctx.Err(); err != nil {
 		return report, err
@@ -41,6 +45,10 @@ func runAirplaneSetupWithOptions(ctx context.Context, app *app, options airplane
 	if err := app.renderer.Lines(renderAirplaneReport(report)...); err != nil {
 		return report, err
 	}
+	return continueAirplaneSetup(ctx, app, service, report, options)
+}
+
+func continueAirplaneSetup(ctx context.Context, app *app, service airplane.Service, report airplane.Report, options airplaneSetupOptions) (airplane.Report, error) {
 	if !options.AllowPrompts || !checkOK(report, "memory") || !checkOK(report, "disk") {
 		return report, nil
 	}

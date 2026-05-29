@@ -247,7 +247,8 @@ func prepareAirplaneRuntime(ctx context.Context, app *app, service airplane.Serv
 	if !yes {
 		return fmt.Errorf("airplane setup is incomplete; run `s46 airplane setup`")
 	}
-	report, err = runAirplaneSetup(ctx, app, true)
+	setupService := newAirplaneSetupService(app)
+	report, err = continueAirplaneSetup(ctx, app, setupService, report, airplaneSetupOptions{AllowPrompts: true})
 	if err != nil {
 		return err
 	}
@@ -261,7 +262,10 @@ func prepareAirplaneRuntime(ctx context.Context, app *app, service airplane.Serv
 		}
 	}
 	if !checkOK(report, "local-gateway") {
-		if err := startGatewayForReport(ctx, service, report); err != nil {
+		if !checkOK(report, "llamacpp-model") || !checkOK(report, "llamacpp-settings") {
+			return airplaneSetupStillIncompleteError(report)
+		}
+		if err := service.StartGatewayAssumingVerifiedModel(ctx); err != nil {
 			return fmt.Errorf("could not start local s46 gateway: %w", err)
 		}
 		report = waitForAirplaneCheckAssumingVerifiedModel(ctx, service, "local-gateway", 30*time.Second)
@@ -270,16 +274,18 @@ func prepareAirplaneRuntime(ctx context.Context, app *app, service airplane.Serv
 		}
 	}
 	if !report.Ready {
-		return fmt.Errorf("airplane setup is still incomplete")
+		return airplaneSetupStillIncompleteError(report)
 	}
 	return nil
 }
 
-func startGatewayForReport(ctx context.Context, service airplane.Service, report airplane.Report) error {
-	if checkOK(report, "llamacpp-model") {
-		return service.StartGatewayAssumingVerifiedModel(ctx)
+func airplaneSetupStillIncompleteError(report airplane.Report) error {
+	for _, check := range report.Checks {
+		if check.Required && !check.OK && !strings.HasPrefix(check.Message, "skipped:") {
+			return fmt.Errorf("airplane setup is still incomplete: %s: %s", check.Name, check.Message)
+		}
 	}
-	return service.StartGateway(ctx)
+	return fmt.Errorf("airplane setup is still incomplete")
 }
 
 // startAirplaneRuntime ensures both llama.cpp and the gateway are running
