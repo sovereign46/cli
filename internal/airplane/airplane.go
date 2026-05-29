@@ -41,9 +41,8 @@ const (
 	modelProbeNoticeAfter    = 2 * time.Second
 	modelProbeProgressEvery  = time.Second
 	modelProbeBodyLimit      = 4 * 1024
-	gatewayDownloadTimeout   = 30 * time.Second
+	gatewayRequestTimeout    = 30 * time.Second
 	gatewaySourceInstallTime = 5 * time.Minute
-	githubLatestURLFormat    = "https://api.github.com/repos/%s/releases/latest"
 )
 
 type LogFile struct {

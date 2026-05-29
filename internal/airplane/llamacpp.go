@@ -403,6 +403,7 @@ func (s Service) llamacppRunning(ctx context.Context) bool {
 	if err != nil {
 		return false
 	}
+	request.Header.Set("Accept", "application/json")
 	response, err := contextx.WithoutHTTPTimeout(s.httpClient()).Do(request)
 	if err != nil {
 		return false

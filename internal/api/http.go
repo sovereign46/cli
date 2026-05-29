@@ -16,7 +16,12 @@ import (
 	"github.com/sovereign46/cli/internal/contextx"
 )
 
-const DefaultHTTPTimeout = 30 * time.Second
+const (
+	DefaultHTTPTimeout   = 30 * time.Second
+	maxResponseBytes     = 1 << 20
+	maxErrorMessageBytes = 4 * 1024
+	userAgent            = "s46-cli"
+)
 
 var (
 	ErrAuthorizationPending = errors.New("authorization pending")
@@ -330,12 +335,12 @@ func isS46Host(host string) bool {
 }
 
 func (c *HTTPClient) do(ctx context.Context, method string, endpoint string, bearer string, body any, target any) error {
-	parentCtx := ctx
 	timeout := c.Timeout
 	if timeout == 0 {
 		timeout = DefaultHTTPTimeout
 	}
-	ctx, cancel := contextx.WithMaxTimeout(parentCtx, timeout)
+	client, timeout := contextx.HTTPClientTimeout(c.Client, timeout)
+	ctx, cancel := contextx.WithMaxTimeout(ctx, timeout)
 	defer cancel()
 	var reader *bytes.Reader
 	if body == nil {
@@ -352,16 +357,16 @@ func (c *HTTPClient) do(ctx context.Context, method string, endpoint string, bea
 		return fmt.Errorf("build %s %s request: %w", method, endpoint, err)
 	}
 	request.Header.Set("Accept", "application/json")
+	request.Header.Set("User-Agent", userAgent)
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
 	if bearer != "" {
 		request.Header.Set("Authorization", "Bearer "+bearer)
 	}
-	client := contextx.WithoutHTTPTimeout(c.Client)
 	response, err := client.Do(request)
 	if err != nil {
-		if ctxErr := contextx.Done(parentCtx, err); ctxErr != nil {
+		if ctxErr := contextx.Done(request.Context(), err); ctxErr != nil {
 			return ctxErr
 		}
 		// Transport failure: classify as ErrCloudUnavailable so callers
@@ -375,14 +380,14 @@ func (c *HTTPClient) do(ctx context.Context, method string, endpoint string, bea
 	if target == nil {
 		return nil
 	}
-	if err := json.NewDecoder(response.Body).Decode(target); err != nil {
+	if err := json.NewDecoder(io.LimitReader(response.Body, maxResponseBytes)).Decode(target); err != nil {
 		return fmt.Errorf("decode %s %s response: %w", method, endpoint, err)
 	}
 	return nil
 }
 
 func decodeErrorResponse(method string, endpoint string, response *http.Response) error {
-	raw, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	raw, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes))
 	if err != nil {
 		return fmt.Errorf("read %s %s error response: %w", method, endpoint, err)
 	}
@@ -401,7 +406,11 @@ func decodeErrorResponse(method string, endpoint string, response *http.Response
 	if apiErr.Code != "" || apiErr.Message != "" {
 		return apiErr
 	}
-	message := strings.TrimSpace(string(raw))
+	messageRaw := raw
+	if len(messageRaw) > maxErrorMessageBytes {
+		messageRaw = messageRaw[:maxErrorMessageBytes]
+	}
+	message := strings.TrimSpace(string(messageRaw))
 	if message != "" {
 		return fmt.Errorf("%s %s: %s: %s", method, endpoint, response.Status, message)
 	}

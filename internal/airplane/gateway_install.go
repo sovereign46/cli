@@ -11,7 +11,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,7 +25,11 @@ import (
 	"github.com/sovereign46/cli/internal/strs"
 )
 
-const gatewayChecksumMaxBytes = 1 << 20
+const (
+	gatewayChecksumMaxBytes = 1 << 20
+	gatewayReleaseMaxBytes  = 1 << 20
+	gatewayErrorSnippetSize = 4 * 1024
+)
 
 var errGatewayVerification = errors.New("gateway verification failed")
 
@@ -40,9 +46,10 @@ type gatewayAsset struct {
 }
 
 type gatewayDownload struct {
-	Name   string
-	URL    string
-	SHA256 string
+	Name        string
+	URL         string
+	SHA256      string
+	AllowedHost string
 }
 
 func (s Service) InstallGateway(ctx context.Context) error {
@@ -74,22 +81,27 @@ func (s Service) installGatewayRelease(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	requestCtx, cancel := contextx.WithMaxTimeout(ctx, gatewayDownloadTimeout)
-	defer cancel()
-	request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, download.URL, nil)
-	if err != nil {
-		return err
+	if err := validateGatewayDownloadURL(download.URL, download.AllowedHost); err != nil {
+		return fmt.Errorf("%w: gateway release asset URL is not trusted: %w", errGatewayVerification, err)
 	}
-	s.setGitHubHeaders(request)
-	response, err := contextx.WithoutHTTPTimeout(s.httpClient()).Do(request)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, download.URL, nil)
 	if err != nil {
-		return contextx.ExternalError(requestCtx, err)
+		return fmt.Errorf("build gateway release GET %s request: %w", download.URL, err)
+	}
+	s.setGitHubHeaders(request, "application/octet-stream")
+	request.Header.Set("Accept-Encoding", "identity")
+	response, err := gatewayHTTPClient(s.httpClient(), download.AllowedHost).Do(request)
+	if err != nil {
+		if ctxErr := contextx.Done(request.Context(), err); ctxErr != nil {
+			return ctxErr
+		}
+		return fmt.Errorf("gateway release GET %s: %w", download.URL, err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("download gateway release failed: %s", response.Status)
+		return gatewayStatusError("download gateway release", request, response)
 	}
-	return s.installGatewayVerifiedArchive(requestCtx, response.Body, download)
+	return s.installGatewayVerifiedArchive(ctx, response.Body, download)
 }
 
 func (s Service) installGatewayVerifiedArchive(ctx context.Context, body io.Reader, download gatewayDownload) error {
@@ -100,7 +112,10 @@ func (s Service) installGatewayVerifiedArchive(ctx context.Context, body io.Read
 	var archive bytes.Buffer
 	hash := sha256.New()
 	if _, err := io.Copy(io.MultiWriter(&archive, hash), body); err != nil {
-		return contextx.ExternalError(ctx, err)
+		if ctxErr := contextx.Done(ctx, err); ctxErr != nil {
+			return ctxErr
+		}
+		return fmt.Errorf("read gateway release GET %s response: %w", download.URL, err)
 	}
 	got := hex.EncodeToString(hash.Sum(nil))
 	if !strings.EqualFold(got, download.SHA256) {
@@ -212,40 +227,52 @@ func (s Service) gatewayDownload(ctx context.Context) (gatewayDownload, error) {
 		if checksum == "" {
 			return gatewayDownload{}, fmt.Errorf("%w: S46_API_GATEWAY_SHA256 is required when S46_API_GATEWAY_DOWNLOAD_URL is set", errGatewayVerification)
 		}
-		return gatewayDownload{Name: gatewayDownloadName(downloadURL), URL: downloadURL, SHA256: checksum}, nil
+		allowedHost := gatewayDownloadHost(downloadURL)
+		if err := validateGatewayDownloadURL(downloadURL, allowedHost); err != nil {
+			return gatewayDownload{}, fmt.Errorf("%w: gateway release asset URL is not trusted: %w", errGatewayVerification, err)
+		}
+		return gatewayDownload{Name: gatewayDownloadName(downloadURL), URL: downloadURL, SHA256: checksum, AllowedHost: allowedHost}, nil
 	}
-	requestCtx, cancel := contextx.WithMaxTimeout(ctx, gatewayDownloadTimeout)
+	requestCtx, cancel := contextx.WithMaxTimeout(ctx, gatewayRequestTimeout)
 	defer cancel()
-	request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, s.gatewayLatestReleaseURL(), nil)
+	latestURL := s.gatewayLatestReleaseURL()
+	request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, latestURL, nil)
 	if err != nil {
-		return gatewayDownload{}, err
+		return gatewayDownload{}, fmt.Errorf("build gateway release check GET %s request: %w", latestURL, err)
 	}
-	s.setGitHubHeaders(request)
+	s.setGitHubHeaders(request, "application/vnd.github+json")
 	response, err := contextx.WithoutHTTPTimeout(s.httpClient()).Do(request)
 	if err != nil {
-		return gatewayDownload{}, contextx.ExternalError(requestCtx, err)
+		if ctxErr := contextx.Done(request.Context(), err); ctxErr != nil {
+			return gatewayDownload{}, ctxErr
+		}
+		return gatewayDownload{}, fmt.Errorf("gateway release check GET %s: %w", latestURL, err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusNotFound {
 		return gatewayDownload{}, fmt.Errorf("no gateway release found for %s", s.gatewayGitHubRepo())
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return gatewayDownload{}, fmt.Errorf("gateway release check failed: %s", response.Status)
+		return gatewayDownload{}, gatewayStatusError("gateway release check", request, response)
 	}
 	var release gatewayRelease
-	if err := json.NewDecoder(response.Body).Decode(&release); err != nil {
-		return gatewayDownload{}, err
+	if err := json.NewDecoder(io.LimitReader(response.Body, gatewayReleaseMaxBytes)).Decode(&release); err != nil {
+		return gatewayDownload{}, fmt.Errorf("decode gateway release check GET %s response: %w", latestURL, err)
 	}
 	version := normalizeReleaseVersion(strs.FirstNonEmpty(release.TagName, release.Name))
 	asset := selectGatewayAsset(release.Assets, version)
 	if asset.BrowserDownloadURL == "" {
 		return gatewayDownload{}, fmt.Errorf("gateway release %s has no %s/%s archive", strs.FirstNonEmpty(release.TagName, release.Name, "latest"), runtime.GOOS, runtime.GOARCH)
 	}
-	checksum, err := s.gatewayAssetSHA256(ctx, release.Assets, asset, version)
+	allowedHost := gatewayDownloadHost(latestURL)
+	if err := validateGatewayDownloadURL(asset.BrowserDownloadURL, allowedHost); err != nil {
+		return gatewayDownload{}, fmt.Errorf("%w: gateway release asset URL is not trusted: %w", errGatewayVerification, err)
+	}
+	checksum, err := s.gatewayAssetSHA256(ctx, release.Assets, asset, version, allowedHost)
 	if err != nil {
 		return gatewayDownload{}, err
 	}
-	return gatewayDownload{Name: asset.Name, URL: asset.BrowserDownloadURL, SHA256: checksum}, nil
+	return gatewayDownload{Name: asset.Name, URL: asset.BrowserDownloadURL, SHA256: checksum, AllowedHost: allowedHost}, nil
 }
 
 func gatewayDownloadName(downloadURL string) string {
@@ -257,7 +284,7 @@ func gatewayDownloadName(downloadURL string) string {
 	return name
 }
 
-func (s Service) gatewayAssetSHA256(ctx context.Context, assets []gatewayAsset, archive gatewayAsset, version string) (string, error) {
+func (s Service) gatewayAssetSHA256(ctx context.Context, assets []gatewayAsset, archive gatewayAsset, version string, allowedHost string) (string, error) {
 	if strings.TrimSpace(archive.Digest) != "" {
 		checksum, err := gatewaySHA256FromDigest(archive.Digest)
 		if err != nil {
@@ -269,7 +296,7 @@ func (s Service) gatewayAssetSHA256(ctx context.Context, assets []gatewayAsset, 
 	if checksumAsset.BrowserDownloadURL == "" {
 		return "", fmt.Errorf("%w: gateway release asset %s has no sha256 digest or checksum asset", errGatewayVerification, archive.Name)
 	}
-	content, err := s.downloadGatewayChecksum(ctx, checksumAsset.BrowserDownloadURL)
+	content, err := s.downloadGatewayChecksum(ctx, checksumAsset.BrowserDownloadURL, allowedHost)
 	if err != nil {
 		return "", fmt.Errorf("%w: %w", errGatewayVerification, err)
 	}
@@ -288,25 +315,34 @@ func gatewaySHA256FromDigest(digest string) (string, error) {
 	return normalizeGatewaySHA256(value)
 }
 
-func (s Service) downloadGatewayChecksum(ctx context.Context, checksumURL string) ([]byte, error) {
-	requestCtx, cancel := contextx.WithMaxTimeout(ctx, gatewayDownloadTimeout)
+func (s Service) downloadGatewayChecksum(ctx context.Context, checksumURL string, allowedHost string) ([]byte, error) {
+	if err := validateGatewayDownloadURL(checksumURL, allowedHost); err != nil {
+		return nil, fmt.Errorf("gateway checksum URL is not trusted: %w", err)
+	}
+	requestCtx, cancel := contextx.WithMaxTimeout(ctx, gatewayRequestTimeout)
 	defer cancel()
 	request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, checksumURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("build gateway checksum GET %s request: %w", checksumURL, err)
 	}
-	s.setGitHubHeaders(request)
-	response, err := contextx.WithoutHTTPTimeout(s.httpClient()).Do(request)
+	s.setGitHubHeaders(request, "text/plain, application/octet-stream")
+	response, err := gatewayHTTPClient(s.httpClient(), allowedHost).Do(request)
 	if err != nil {
-		return nil, contextx.ExternalError(requestCtx, err)
+		if ctxErr := contextx.Done(request.Context(), err); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, fmt.Errorf("gateway checksum GET %s: %w", checksumURL, err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, fmt.Errorf("download gateway checksum failed: %s", response.Status)
+		return nil, gatewayStatusError("download gateway checksum", request, response)
 	}
 	content, err := io.ReadAll(io.LimitReader(response.Body, gatewayChecksumMaxBytes+1))
 	if err != nil {
-		return nil, contextx.ExternalError(requestCtx, err)
+		if ctxErr := contextx.Done(request.Context(), err); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, fmt.Errorf("read gateway checksum GET %s response: %w", checksumURL, err)
 	}
 	if len(content) > gatewayChecksumMaxBytes {
 		return nil, fmt.Errorf("gateway checksum is larger than %d bytes", gatewayChecksumMaxBytes)
@@ -437,7 +473,15 @@ func (s Service) gatewayLatestReleaseURL() string {
 	if url := strings.TrimSpace(strs.EnvValue(s.Env, "S46_API_GATEWAY_LATEST_URL")); url != "" {
 		return url
 	}
-	return fmt.Sprintf(githubLatestURLFormat, s.gatewayGitHubRepo())
+	return "https://api.github.com/repos/" + escapedGatewayRepoPath(s.gatewayGitHubRepo()) + "/releases/latest"
+}
+
+func escapedGatewayRepoPath(repo string) string {
+	parts := strings.Split(strings.Trim(repo, "/"), "/")
+	for i, part := range parts {
+		parts[i] = url.PathEscape(part)
+	}
+	return strings.Join(parts, "/")
 }
 
 func (s Service) gatewayGitHubRepo() string {
@@ -539,12 +583,82 @@ func (s Service) installGatewayArchive(body io.Reader) (err error) {
 	return fmt.Errorf("gateway archive did not contain %s", GatewayBinaryName)
 }
 
-func (s Service) setGitHubHeaders(request *http.Request) {
-	request.Header.Set("Accept", "application/vnd.github+json")
+func gatewayStatusError(operation string, request *http.Request, response *http.Response) error {
+	raw, err := io.ReadAll(io.LimitReader(response.Body, gatewayErrorSnippetSize))
+	if err != nil {
+		return fmt.Errorf("read %s GET %s error response: %w", operation, request.URL, err)
+	}
+	detail := strings.TrimSpace(string(raw))
+	if detail != "" {
+		return fmt.Errorf("%s GET %s failed: %s: %s", operation, request.URL, response.Status, detail)
+	}
+	return fmt.Errorf("%s GET %s failed: %s", operation, request.URL, response.Status)
+}
+
+func gatewayHTTPClient(client *http.Client, allowedHost string) *http.Client {
+	configured := *contextx.WithoutHTTPTimeout(client)
+	configured.CheckRedirect = func(request *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return fmt.Errorf("stopped after 10 redirects")
+		}
+		return validateGatewayDownloadURL(request.URL.String(), allowedHost)
+	}
+	return &configured
+}
+
+func validateGatewayDownloadURL(rawURL string, allowedHost string) error {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return fmt.Errorf("invalid URL %q", rawURL)
+	}
+	if parsed.User != nil {
+		return fmt.Errorf("URL must not include user info")
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if parsed.Scheme == "http" && isLoopbackHost(host) {
+		return nil
+	}
+	if parsed.Scheme != "https" {
+		return fmt.Errorf("URL must use https")
+	}
+	if host != allowedHost && !isGatewayDownloadHost(host) {
+		return fmt.Errorf("untrusted host %q", host)
+	}
+	return nil
+}
+
+func gatewayDownloadHost(rawURL string) string {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(parsed.Hostname())
+}
+
+func isGatewayDownloadHost(host string) bool {
+	return isGitHubHost(host) || host == "objects.githubusercontent.com" || host == "release-assets.githubusercontent.com" || isLoopbackHost(host)
+}
+
+func isLoopbackHost(host string) bool {
+	host = strings.Trim(strings.ToLower(host), "[]")
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func (s Service) setGitHubHeaders(request *http.Request, accept string) {
+	request.Header.Set("Accept", accept)
 	request.Header.Set("User-Agent", "s46-airplane")
-	if token := strings.TrimSpace(strs.EnvValue(s.Env, "GITHUB_TOKEN")); token != "" {
+	if token := strings.TrimSpace(strs.EnvValue(s.Env, "GITHUB_TOKEN")); token != "" && isGitHubHost(request.URL.Hostname()) {
 		request.Header.Set("Authorization", "Bearer "+token)
 	}
+}
+
+func isGitHubHost(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	return host == "github.com" || strings.HasSuffix(host, ".github.com")
 }
 
 func (s Service) managedGatewayBinaryPath() string {

@@ -10,6 +10,7 @@ import (
 	"io"
 	"math/bits"
 	"net/http"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -19,11 +20,14 @@ import (
 )
 
 const (
-	DefaultAPIBaseURL  = "https://gist.s46.dev"
-	DefaultViewerURL   = "https://share.s46.dev"
-	DefaultTTL         = "30d"
-	BlobContentType    = "application/vnd.s46.share+json"
-	DefaultHTTPTimeout = 20 * time.Second
+	DefaultAPIBaseURL    = "https://gist.s46.dev"
+	DefaultViewerURL     = "https://share.s46.dev"
+	DefaultTTL           = "30d"
+	BlobContentType      = "application/vnd.s46.share+json"
+	DefaultHTTPTimeout   = 20 * time.Second
+	maxResponseBytes     = 1 << 20
+	maxErrorSnippetBytes = 4 * 1024
+	userAgent            = "s46-cli"
 
 	MaxPOWDifficulty = 26
 )
@@ -99,7 +103,7 @@ func (c Client) Create(ctx context.Context, req UploadRequest) (UploadResponse, 
 
 func (c Client) Update(ctx context.Context, id string, req UploadRequest) (UploadResponse, error) {
 	var out UploadResponse
-	if err := c.doJSON(ctx, http.MethodPut, "/v1/shares/"+id, req, &out, "", "update"); err != nil {
+	if err := c.doJSON(ctx, http.MethodPut, "/v1/shares/"+url.PathEscape(id), req, &out, "", "update"); err != nil {
 		return UploadResponse{}, err
 	}
 	return out, nil
@@ -107,7 +111,7 @@ func (c Client) Update(ctx context.Context, id string, req UploadRequest) (Uploa
 
 func (c Client) Delete(ctx context.Context, id string, revokeKey string) (DeleteResponse, error) {
 	var out DeleteResponse
-	if err := c.doJSON(ctx, http.MethodDelete, "/v1/shares/"+id, nil, &out, revokeKey, ""); err != nil {
+	if err := c.doJSON(ctx, http.MethodDelete, "/v1/shares/"+url.PathEscape(id), nil, &out, revokeKey, ""); err != nil {
 		return DeleteResponse{}, err
 	}
 	return out, nil
@@ -139,6 +143,7 @@ func (c Client) doJSON(ctx context.Context, method string, path string, body any
 		return fmt.Errorf("build s46-gist %s %s request: %w", method, path, err)
 	}
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", userAgent)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -151,15 +156,18 @@ func (c Client) doJSON(ctx context.Context, method string, path string, body any
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return contextx.ExternalError(ctx, err)
+		if ctxErr := contextx.Done(req.Context(), err); ctxErr != nil {
+			return ctxErr
+		}
+		return fmt.Errorf("s46-gist %s %s: %w", method, path, err)
 	}
 	defer resp.Body.Close()
-	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
 		return fmt.Errorf("read s46-gist %s %s response: %w", method, path, err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("s46-gist %s %s failed: HTTP %d: %s", method, path, resp.StatusCode, strings.TrimSpace(string(responseBody)))
+		return fmt.Errorf("s46-gist %s %s failed: HTTP %d: %s", method, path, resp.StatusCode, responseSnippet(responseBody))
 	}
 	if out == nil || len(responseBody) == 0 {
 		return nil
@@ -218,25 +226,36 @@ func (c Client) requestChallenge(ctx context.Context, body ChallengeRequest) (Ch
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("X-S46-Client-ID", body.ClientID)
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return ChallengeResponse{}, contextx.ExternalError(ctx, err)
+		if ctxErr := contextx.Done(req.Context(), err); ctxErr != nil {
+			return ChallengeResponse{}, ctxErr
+		}
+		return ChallengeResponse{}, fmt.Errorf("s46-gist POST /v1/share-challenges: %w", err)
 	}
 	defer resp.Body.Close()
-	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
 		return ChallengeResponse{}, fmt.Errorf("read s46-gist challenge response: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return ChallengeResponse{}, fmt.Errorf("s46-gist challenge failed: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(responseBody)))
+		return ChallengeResponse{}, fmt.Errorf("s46-gist challenge failed: HTTP %d: %s", resp.StatusCode, responseSnippet(responseBody))
 	}
 	var out ChallengeResponse
 	if err := json.Unmarshal(responseBody, &out); err != nil {
 		return ChallengeResponse{}, fmt.Errorf("decode s46-gist challenge response: %w", err)
 	}
 	return out, nil
+}
+
+func responseSnippet(body []byte) string {
+	if len(body) > maxErrorSnippetBytes {
+		body = body[:maxErrorSnippetBytes]
+	}
+	return strings.TrimSpace(string(body))
 }
 
 func (c Client) baseURL() string {

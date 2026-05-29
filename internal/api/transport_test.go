@@ -49,7 +49,7 @@ func TestHTTPClientWrapsTransportErrorAsCloudUnavailable(t *testing.T) {
 	}
 }
 
-func TestHTTPClientWrapsLocalTimeoutAsCloudUnavailable(t *testing.T) {
+func TestHTTPClientPreservesLocalTimeout(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = contextx.Sleep(r.Context(), 50*time.Millisecond)
 		w.WriteHeader(http.StatusOK)
@@ -63,8 +63,11 @@ func TestHTTPClientWrapsLocalTimeoutAsCloudUnavailable(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected timeout error")
 	}
-	if !errors.Is(err, ErrCloudUnavailable) {
-		t.Fatalf("expected timeout to wrap ErrCloudUnavailable, got: %v", err)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected timeout to be preserved, got: %v", err)
+	}
+	if errors.Is(err, ErrCloudUnavailable) {
+		t.Fatalf("timeout should not be classified as cloud unavailable: %v", err)
 	}
 }
 

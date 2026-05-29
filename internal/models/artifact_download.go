@@ -29,6 +29,8 @@ const (
 	maxArtifactDownloadParallelism     = 16
 	defaultArtifactDownloadChunkSize   = 32 * 1024 * 1024
 	minArtifactDownloadChunkSize       = 1024 * 1024
+	artifactProbeTimeout               = 30 * time.Second
+	artifactErrorSnippetBytes          = 4 * 1024
 )
 
 type artifactDownloadState struct {
@@ -77,16 +79,20 @@ func downloadArtifact(ctx context.Context, request InstallRequest, manifest veri
 func downloadArtifactSequential(ctx context.Context, request InstallRequest, manifest verifiedManifest, policy trustPolicy) (err error) {
 	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, manifest.Manifest.URL, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("build model artifact GET %s request: %w", manifest.Manifest.URL, err)
 	}
 	httpRequest.Header.Set("Accept-Encoding", "identity")
+	httpRequest.Header.Set("User-Agent", userAgent)
 	response, err := httpClient(request.HTTPClient, policy).Do(httpRequest)
 	if err != nil {
-		return contextx.ExternalError(ctx, err)
+		if ctxErr := contextx.Done(httpRequest.Context(), err); ctxErr != nil {
+			return ctxErr
+		}
+		return fmt.Errorf("model artifact GET %s: %w", manifest.Manifest.URL, err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("download model artifact failed: HTTP %d", response.StatusCode)
+		return artifactStatusError("download model artifact", httpRequest, response)
 	}
 	if response.ContentLength >= 0 && response.ContentLength != manifest.Manifest.Size {
 		return fmt.Errorf("model artifact size mismatch from content-length: got %d, want %d", response.ContentLength, manifest.Manifest.Size)
@@ -109,7 +115,10 @@ func downloadArtifactSequential(ctx context.Context, request InstallRequest, man
 		err = closeErr
 	}
 	if err != nil {
-		return contextx.ExternalError(ctx, err)
+		if ctxErr := contextx.Done(httpRequest.Context(), err); ctxErr != nil {
+			return ctxErr
+		}
+		return fmt.Errorf("read model artifact GET %s response: %w", manifest.Manifest.URL, err)
 	}
 	if err := verifyArtifactDigest(written, hash.Sum(nil), manifest.Manifest); err != nil {
 		return err
@@ -125,17 +134,24 @@ func downloadArtifactSequential(ctx context.Context, request InstallRequest, man
 }
 
 func artifactRangeDownloadSupported(ctx context.Context, request InstallRequest, manifest Manifest, policy trustPolicy) (bool, error) {
-	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, manifest.URL, nil)
+	timeout := httpRequestTimeout(request.HTTPClient, artifactProbeTimeout)
+	probeCtx, cancel := contextx.WithMaxTimeout(ctx, timeout)
+	defer cancel()
+	httpRequest, err := http.NewRequestWithContext(probeCtx, http.MethodGet, manifest.URL, nil)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("build model artifact range probe GET %s request: %w", manifest.URL, err)
 	}
 	httpRequest.Header.Set("Accept-Encoding", "identity")
+	httpRequest.Header.Set("User-Agent", userAgent)
 	httpRequest.Header.Set("Range", "bytes=0-0")
 	client := artifactRangeHTTPClient(request.HTTPClient, policy, 1)
 	defer client.CloseIdleConnections()
 	response, err := client.Do(httpRequest)
 	if err != nil {
-		return false, contextx.ExternalError(ctx, err)
+		if ctxErr := contextx.Done(httpRequest.Context(), err); ctxErr != nil {
+			return false, ctxErr
+		}
+		return false, fmt.Errorf("model artifact range probe GET %s: %w", manifest.URL, err)
 	}
 	defer response.Body.Close()
 	switch response.StatusCode {
@@ -147,14 +163,17 @@ func artifactRangeDownloadSupported(ctx context.Context, request InstallRequest,
 			return false, nil
 		}
 		if _, err := io.Copy(io.Discard, io.LimitReader(response.Body, 1)); err != nil {
-			return false, contextx.ExternalError(ctx, err)
+			if ctxErr := contextx.Done(httpRequest.Context(), err); ctxErr != nil {
+				return false, ctxErr
+			}
+			return false, fmt.Errorf("read model artifact range probe GET %s response: %w", manifest.URL, err)
 		}
 		return true, nil
 	case http.StatusOK:
 		return false, nil
 	default:
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
-			return false, fmt.Errorf("download model artifact range probe failed: HTTP %d", response.StatusCode)
+			return false, artifactStatusError("download model artifact range probe", httpRequest, response)
 		}
 		return false, nil
 	}
@@ -307,17 +326,21 @@ func downloadArtifactChunk(ctx context.Context, client *http.Client, manifest Ma
 	length := end - start + 1
 	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, manifest.URL, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("build model artifact range GET %s request: %w", manifest.URL, err)
 	}
 	httpRequest.Header.Set("Accept-Encoding", "identity")
+	httpRequest.Header.Set("User-Agent", userAgent)
 	httpRequest.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
 	response, err := client.Do(httpRequest)
 	if err != nil {
-		return contextx.ExternalError(ctx, err)
+		if ctxErr := contextx.Done(httpRequest.Context(), err); ctxErr != nil {
+			return ctxErr
+		}
+		return fmt.Errorf("model artifact range GET %s: %w", manifest.URL, err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusPartialContent {
-		return fmt.Errorf("download model artifact range %d-%d failed: HTTP %d", start, end, response.StatusCode)
+		return artifactStatusError(fmt.Sprintf("download model artifact range %d-%d", start, end), httpRequest, response)
 	}
 	if err := validateContentRange(response.Header.Get("Content-Range"), start, end, manifest.Size); err != nil {
 		return err
@@ -328,12 +351,27 @@ func downloadArtifactChunk(ctx context.Context, client *http.Client, manifest Ma
 	writer := &artifactChunkWriter{file: file, offset: start, remaining: length, progress: progress}
 	written, err := io.Copy(writer, response.Body)
 	if err != nil {
-		return contextx.ExternalError(ctx, err)
+		if ctxErr := contextx.Done(httpRequest.Context(), err); ctxErr != nil {
+			return ctxErr
+		}
+		return fmt.Errorf("read model artifact range GET %s response: %w", manifest.URL, err)
 	}
 	if written != length {
 		return fmt.Errorf("model artifact range size mismatch: got %d, want %d", written, length)
 	}
 	return nil
+}
+
+func artifactStatusError(operation string, request *http.Request, response *http.Response) error {
+	raw, err := io.ReadAll(io.LimitReader(response.Body, artifactErrorSnippetBytes))
+	if err != nil {
+		return fmt.Errorf("read %s GET %s error response: %w", operation, request.URL, err)
+	}
+	detail := strings.TrimSpace(string(raw))
+	if detail != "" {
+		return fmt.Errorf("%s GET %s failed: %s: %s", operation, request.URL, response.Status, detail)
+	}
+	return fmt.Errorf("%s GET %s failed: %s", operation, request.URL, response.Status)
 }
 
 func verifyDownloadedArtifactFile(request InstallRequest, manifest Manifest, path string) error {
