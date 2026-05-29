@@ -24,6 +24,9 @@ import (
 
 const (
 	metadataMaxBytes           = 1 << 20
+	metadataErrorSnippetBytes  = 4 * 1024
+	metadataTimeout            = 30 * time.Second
+	userAgent                  = "s46-cli"
 	defaultHTTPDialTimeout     = 10 * time.Second
 	defaultHTTPHeaderTimeout   = 30 * time.Second
 	defaultHTTPIdleConnTimeout = 90 * time.Second
@@ -265,26 +268,49 @@ func downloadMetadata(ctx context.Context, client *http.Client, policy trustPoli
 	if err := policy.validate(rawURL); err != nil {
 		return nil, err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	timeout := httpRequestTimeout(client, metadataTimeout)
+	requestCtx, cancel := contextx.WithMaxTimeout(ctx, timeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("build model registry GET %s request: %w", rawURL, err)
 	}
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("User-Agent", userAgent)
 	response, err := httpClient(client, policy).Do(request)
 	if err != nil {
-		return nil, contextx.ExternalError(ctx, err)
+		if ctxErr := contextx.Done(request.Context(), err); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, fmt.Errorf("model registry GET %s: %w", rawURL, err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, fmt.Errorf("HTTP %d from %s", response.StatusCode, rawURL)
+		detail, err := readMetadataSnippet(response.Body)
+		if err != nil {
+			return nil, fmt.Errorf("read model registry GET %s error response: %w", rawURL, err)
+		}
+		if detail != "" {
+			return nil, fmt.Errorf("model registry GET %s failed: HTTP %d: %s", rawURL, response.StatusCode, detail)
+		}
+		return nil, fmt.Errorf("model registry GET %s failed: HTTP %d", rawURL, response.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, metadataMaxBytes+1))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read model registry GET %s response: %w", rawURL, err)
 	}
 	if len(body) > metadataMaxBytes {
-		return nil, fmt.Errorf("metadata exceeds %d bytes", metadataMaxBytes)
+		return nil, fmt.Errorf("model registry GET %s response exceeds %d bytes", rawURL, metadataMaxBytes)
 	}
 	return body, nil
+}
+
+func readMetadataSnippet(body io.Reader) (string, error) {
+	raw, err := io.ReadAll(io.LimitReader(body, metadataErrorSnippetBytes))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(raw)), nil
 }
 
 func fetchTrustRoot(ctx context.Context, request InstallRequest, policy trustPolicy, baseURL string) (attest.TrustRoot, error) {
@@ -1017,6 +1043,13 @@ func (p trustPolicy) validate(rawURL string) error {
 		}
 	}
 	return nil
+}
+
+func httpRequestTimeout(client *http.Client, fallback time.Duration) time.Duration {
+	if client != nil && client.Timeout > 0 && (fallback <= 0 || client.Timeout < fallback) {
+		return client.Timeout
+	}
+	return fallback
 }
 
 func httpClient(client *http.Client, policy trustPolicy) *http.Client {

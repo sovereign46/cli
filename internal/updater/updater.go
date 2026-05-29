@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -18,10 +20,11 @@ import (
 )
 
 const (
-	DefaultRepo        = "sovereign46/cli"
-	DefaultBrewFormula = "s46"
-	latestURLFormat    = "https://api.github.com/repos/%s/releases/latest"
-	defaultTimeout     = 10 * time.Second
+	DefaultRepo                = "sovereign46/cli"
+	DefaultBrewFormula         = "s46"
+	defaultTimeout             = 10 * time.Second
+	maxReleaseResponseSize     = 1 << 20
+	maxReleaseErrorSnippetSize = 4 * 1024
 )
 
 var (
@@ -131,7 +134,7 @@ func (u Updater) UpdateInstruction(method InstallMethod) string {
 		formula := strs.FirstNonEmpty(strs.EnvValue(u.Env, "S46_HOMEBREW_FORMULA"), DefaultBrewFormula)
 		return fmt.Sprintf("brew upgrade %s", formula)
 	default:
-		return fmt.Sprintf("install the latest release from https://github.com/%s/releases/latest", strs.FirstNonEmpty(u.Repo, strs.EnvValue(u.Env, "S46_UPDATE_REPO"), DefaultRepo))
+		return fmt.Sprintf("install the latest release from %s", githubReleasePageURL(strs.FirstNonEmpty(u.Repo, strs.EnvValue(u.Env, "S46_UPDATE_REPO"), DefaultRepo)))
 	}
 }
 
@@ -229,31 +232,42 @@ func (u Updater) latestRelease(ctx context.Context) (Release, error) {
 	ctx, cancel := contextx.WithMaxTimeout(ctx, timeout)
 	defer cancel()
 
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, u.latestReleaseURL(), nil)
+	latestURL := u.latestReleaseURL()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, latestURL, nil)
 	if err != nil {
-		return Release{}, err
+		return Release{}, fmt.Errorf("build GitHub GET %s request: %w", latestURL, err)
 	}
 	request.Header.Set("Accept", "application/vnd.github+json")
 	request.Header.Set("User-Agent", "s46/"+u.currentVersion())
-	if token := strs.EnvValue(u.Env, "GITHUB_TOKEN"); token != "" {
+	if token := strs.EnvValue(u.Env, "GITHUB_TOKEN"); token != "" && isGitHubHost(request.URL.Hostname()) {
 		request.Header.Set("Authorization", "Bearer "+token)
 	}
 
 	response, err := httpClient.Do(request)
 	if err != nil {
-		return Release{}, contextx.ExternalError(ctx, err)
+		if ctxErr := contextx.Done(request.Context(), err); ctxErr != nil {
+			return Release{}, ctxErr
+		}
+		return Release{}, fmt.Errorf("GitHub GET %s: %w", latestURL, err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusNotFound {
 		return Release{}, ErrNoRelease
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		detail, err := readReleaseSnippet(response.Body)
+		if err != nil {
+			return Release{}, fmt.Errorf("read GitHub GET %s error response: %w", latestURL, err)
+		}
+		if detail != "" {
+			return Release{}, fmt.Errorf("GitHub release check failed: %s: %s", response.Status, detail)
+		}
 		return Release{}, fmt.Errorf("GitHub release check failed: %s", response.Status)
 	}
 
 	var github githubRelease
-	if err := json.NewDecoder(response.Body).Decode(&github); err != nil {
-		return Release{}, err
+	if err := json.NewDecoder(io.LimitReader(response.Body, maxReleaseResponseSize)).Decode(&github); err != nil {
+		return Release{}, fmt.Errorf("decode GitHub GET %s response: %w", latestURL, err)
 	}
 	version := normalizeVersion(strs.FirstNonEmpty(github.TagName, github.Name))
 	if version == "" {
@@ -261,6 +275,19 @@ func (u Updater) latestRelease(ctx context.Context) (Release, error) {
 	}
 	assetName := selectReleaseAsset(github.Assets, version)
 	return Release{Version: version, TagName: github.TagName, URL: github.HTMLURL, AssetName: assetName}, nil
+}
+
+func readReleaseSnippet(body io.Reader) (string, error) {
+	raw, err := io.ReadAll(io.LimitReader(body, maxReleaseErrorSnippetSize))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(raw)), nil
+}
+
+func isGitHubHost(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	return host == "github.com" || strings.HasSuffix(host, ".github.com")
 }
 
 func selectReleaseAsset(assets []githubAsset, version string) string {
@@ -285,7 +312,24 @@ func (u Updater) latestReleaseURL() string {
 		return value
 	}
 	repo := strs.FirstNonEmpty(u.Repo, strs.EnvValue(u.Env, "S46_UPDATE_REPO"), DefaultRepo)
-	return fmt.Sprintf(latestURLFormat, repo)
+	return githubLatestReleaseURL(repo)
+}
+
+func githubLatestReleaseURL(repo string) string {
+	parts := escapedRepoPath(repo)
+	return "https://api.github.com/repos/" + parts + "/releases/latest"
+}
+
+func githubReleasePageURL(repo string) string {
+	return "https://github.com/" + escapedRepoPath(repo) + "/releases/latest"
+}
+
+func escapedRepoPath(repo string) string {
+	parts := strings.Split(strings.Trim(repo, "/"), "/")
+	for i, part := range parts {
+		parts[i] = url.PathEscape(part)
+	}
+	return strings.Join(parts, "/")
 }
 
 func (u Updater) currentVersion() string {

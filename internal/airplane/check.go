@@ -276,13 +276,14 @@ func (s Service) modelProbe(ctx context.Context) (bool, string) {
 	if err != nil {
 		return false, "probe request failed: " + err.Error()
 	}
+	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Content-Type", "application/json")
 	response, err := contextx.WithoutHTTPTimeout(s.httpClient()).Do(request)
 	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(request.Context().Err(), context.DeadlineExceeded) {
 			return false, fmt.Sprintf("probe timed out after %s while loading %s", formatDuration(s.modelProbeTimeout()), s.backendModel())
 		}
-		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+		if errors.Is(err, context.Canceled) || errors.Is(request.Context().Err(), context.Canceled) {
 			return false, "probe canceled while loading " + s.backendModel()
 		}
 		return false, "probe request failed: " + err.Error()
@@ -340,6 +341,7 @@ func (s Service) gatewayResponding(ctx context.Context) bool {
 	if err != nil {
 		return false
 	}
+	request.Header.Set("Accept", "application/json")
 	response, err := contextx.WithoutHTTPTimeout(s.httpClient()).Do(request)
 	if err != nil {
 		return false

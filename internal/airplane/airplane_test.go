@@ -382,6 +382,15 @@ func TestInstallGatewayDownloadsReleaseAssetWithDigest(t *testing.T) {
 func TestInstallGatewayDownloadsArchive(t *testing.T) {
 	archive := gatewayArchive(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Accept"); got != "application/octet-stream" {
+			t.Fatalf("Accept = %q", got)
+		}
+		if got := r.Header.Get("Accept-Encoding"); got != "identity" {
+			t.Fatalf("Accept-Encoding = %q", got)
+		}
+		if got := r.Header.Get("User-Agent"); got != "s46-airplane" {
+			t.Fatalf("User-Agent = %q", got)
+		}
 		_, _ = w.Write(archive)
 	}))
 	defer server.Close()

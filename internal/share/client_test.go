@@ -25,6 +25,7 @@ func TestClientCreateUpdateDelete(t *testing.T) {
 			}
 			_ = json.NewEncoder(w).Encode(ChallengeResponse{Algorithm: "sha256", Nonce: "nonce", Difficulty: 0, BodyHash: req.BodyHash, ClientID: req.ClientID, Operation: req.Operation, Challenge: "signed"})
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/shares":
+			requireJSONHeaders(t, r, true)
 			sawCreateProof = r.Header.Get("Authorization") == "" && r.Header.Get("X-S46-Client-ID") == "anon_test_client" && r.Header.Get("X-S46-POW-Challenge") == "signed" && r.Header.Get("X-S46-POW-Suffix") != ""
 			_ = json.NewEncoder(w).Encode(UploadResponse{ID: "share_1", URL: "http://gist/v1/shares/share_1", TTL: "30d", RevokeKey: "revoke"})
 		case r.Method == http.MethodPut && r.URL.Path == "/v1/shares/share_1":
@@ -54,6 +55,39 @@ func TestClientCreateUpdateDelete(t *testing.T) {
 	}
 	if !sawCreateProof || !sawUpdateProof || !sawRevoke {
 		t.Fatalf("sawCreateProof=%v sawUpdateProof=%v sawRevoke=%v", sawCreateProof, sawUpdateProof, sawRevoke)
+	}
+}
+
+func TestClientEscapesShareID(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.URL.EscapedPath() != "/v1/shares/share%2Fone" {
+			t.Fatalf("unexpected %s %s", r.Method, r.URL.EscapedPath())
+		}
+		_ = json.NewEncoder(w).Encode(DeleteResponse{ID: "share/one", Deleted: true})
+	}))
+	defer server.Close()
+
+	deleted, err := (Client{BaseURL: server.URL, HTTPClient: server.Client()}).Delete(context.Background(), "share/one", "revoke")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !deleted.Deleted {
+		t.Fatalf("deleted = %#v", deleted)
+	}
+}
+
+func requireJSONHeaders(t *testing.T, r *http.Request, hasBody bool) {
+	t.Helper()
+	requireHeader(t, r, "Accept", "application/json")
+	if hasBody {
+		requireHeader(t, r, "Content-Type", "application/json")
+	}
+}
+
+func requireHeader(t *testing.T, r *http.Request, name string, want string) {
+	t.Helper()
+	if got := r.Header.Get(name); got != want {
+		t.Fatalf("%s = %q, want %q", name, got, want)
 	}
 }
 

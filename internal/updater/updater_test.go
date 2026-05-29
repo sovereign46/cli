@@ -38,6 +38,12 @@ func TestCompareVersions(t *testing.T) {
 
 func TestCheckUsesGitHubReleaseAndHomebrewInstruction(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Accept"); got != "application/vnd.github+json" {
+			t.Fatalf("Accept = %q", got)
+		}
+		if got := r.Header.Get("User-Agent"); got != "s46/0.1.0" {
+			t.Fatalf("User-Agent = %q", got)
+		}
 		fmt.Fprintf(w, `{"tag_name":"v0.2.0","html_url":"https://github.com/sovereign46/cli/releases/tag/v0.2.0","assets":[{"name":"s46_0.2.0_%s_%s.tar.gz"}]}`, runtime.GOOS, runtime.GOARCH)
 	}))
 	defer server.Close()

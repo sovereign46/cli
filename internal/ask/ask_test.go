@@ -23,6 +23,9 @@ func TestPlanPostsChatCompletionRequestAndParsesPlan(t *testing.T) {
 		if request.Method != http.MethodPost || request.URL.String() != "http://gateway/v1/chat/completions" {
 			t.Fatalf("unexpected request: %s %s", request.Method, request.URL)
 		}
+		if got := request.Header.Get("Accept"); got != "application/json" {
+			t.Fatalf("Accept = %q", got)
+		}
 		if got := request.Header.Get("Content-Type"); got != "application/json" {
 			t.Fatalf("Content-Type = %q", got)
 		}
@@ -60,7 +63,7 @@ func TestChatReportsHTTPDecodeAndEmptyResponseErrors(t *testing.T) {
 		response   *http.Response
 		wantErrSub string
 	}{
-		{name: "http error snippet", response: textHTTPResponse(503, "gateway down"), wantErrSub: "local model returned HTTP 503: gateway down"},
+		{name: "http error snippet", response: textHTTPResponse(503, "gateway down"), wantErrSub: "local model POST /v1/chat/completions failed: HTTP 503: gateway down"},
 		{name: "malformed json", response: textHTTPResponse(200, "{"), wantErrSub: "decode local model response"},
 		{name: "empty choices", response: jsonHTTPResponse(200, `{"choices":[]}`), wantErrSub: "empty response"},
 		{name: "empty content", response: jsonHTTPResponse(200, `{"choices":[{"message":{"content":"   "}}]}`), wantErrSub: "empty response"},

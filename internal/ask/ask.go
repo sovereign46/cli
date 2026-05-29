@@ -100,20 +100,29 @@ func (c Client) chat(ctx context.Context, messages []map[string]string) (string,
 		"messages": messages,
 	})
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("encode local model chat request: %w", err)
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.BaseURL, "/")+"/v1/chat/completions", bytes.NewReader(body))
+	endpoint := "/v1/chat/completions"
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(c.BaseURL, "/")+endpoint, bytes.NewReader(body))
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("build local model POST %s request: %w", endpoint, err)
 	}
+	request.Header.Set("Accept", "application/json")
 	request.Header.Set("Content-Type", "application/json")
 	response, err := httpClient.Do(request)
 	if err != nil {
-		return "", contextx.ExternalError(ctx, err)
+		if ctxErr := contextx.Done(request.Context(), err); ctxErr != nil {
+			return "", ctxErr
+		}
+		return "", fmt.Errorf("local model POST %s: %w", endpoint, err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return "", fmt.Errorf("local model returned HTTP %d: %s", response.StatusCode, readSnippet(response.Body))
+		detail := readSnippet(response.Body)
+		if detail != "" {
+			return "", fmt.Errorf("local model POST %s failed: HTTP %d: %s", endpoint, response.StatusCode, detail)
+		}
+		return "", fmt.Errorf("local model POST %s failed: HTTP %d", endpoint, response.StatusCode)
 	}
 	var payload struct {
 		Choices []struct {

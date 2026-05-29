@@ -1,7 +1,11 @@
 package airplane
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"runtime"
 	"strings"
 	"testing"
@@ -60,6 +64,29 @@ func TestParseGatewayChecksumSupportsBSDFormat(t *testing.T) {
 	}
 	if got != checksum {
 		t.Fatalf("checksum = %q, want %q", got, checksum)
+	}
+}
+
+func TestGatewayDownloadRejectsUntrustedReleaseAssetURL(t *testing.T) {
+	assetName := GatewayBinaryName + "_1.2.3_" + runtime.GOOS + "_" + runtime.GOARCH + ".tar.gz"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(gatewayRelease{TagName: "v1.2.3", Assets: []gatewayAsset{{Name: assetName, BrowserDownloadURL: "https://evil.example/archive", Digest: "sha256:" + strings.Repeat("a", 64)}}})
+	}))
+	defer server.Close()
+
+	err := (Service{Env: map[string]string{"S46_API_GATEWAY_LATEST_URL": server.URL}}).installGatewayRelease(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "untrusted host") {
+		t.Fatalf("expected untrusted host error, got %v", err)
+	}
+}
+
+func TestGatewayDownloadRejectsUntrustedRedirect(t *testing.T) {
+	server := httptest.NewServer(http.RedirectHandler("https://evil.example/archive", http.StatusFound))
+	defer server.Close()
+
+	err := (Service{Env: map[string]string{"S46_API_GATEWAY_DOWNLOAD_URL": server.URL, "S46_API_GATEWAY_SHA256": strings.Repeat("a", 64)}}).installGatewayRelease(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "untrusted host") {
+		t.Fatalf("expected untrusted host error, got %v", err)
 	}
 }
 

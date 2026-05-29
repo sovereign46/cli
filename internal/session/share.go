@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/sovereign46/cli/internal/api"
@@ -180,7 +181,7 @@ func (s Service) mockShare(ctx context.Context, ctxState workspaceContext, sessi
 	if revokeKey == "" {
 		revokeKey = secureToken(32)
 	}
-	blobURL := strings.TrimRight(shareAPIBaseURL(s.Config.Env), "/") + "/v1/shares/" + shareID
+	blobURL := shareBlobURL(s.Config.Env, shareID)
 	return ShareResult{ID: shareID, SessionID: sessionID, ViewerURL: viewerURL(s.Config.Env, shareID, encrypted.Key), BlobURL: blobURL, RevokeKey: revokeKey, TTL: ttl, Visibility: "unlisted", Format: "s46.share.v1+aes-gcm", Provider: "s46-gist", Updated: updated, Mock: true}, nil
 }
 
@@ -203,7 +204,7 @@ func (s Service) gistShare(ctx context.Context, ctxState workspaceContext, sessi
 			response.ID = existing.ID
 		}
 		if response.URL == "" {
-			response.URL = strs.FirstNonEmpty(existing.BlobURL, strings.TrimRight(shareAPIBaseURL(s.Config.Env), "/")+"/v1/shares/"+response.ID)
+			response.URL = strs.FirstNonEmpty(existing.BlobURL, shareBlobURL(s.Config.Env, response.ID))
 		}
 		if response.TTL == "" {
 			response.TTL = ttl
@@ -289,7 +290,11 @@ func findShareRecord(state config.State, target string) (string, config.Share, b
 }
 
 func viewerURL(env map[string]string, shareID string, decryptKey string) string {
-	return strings.TrimRight(shareViewerBaseURL(env), "/") + "/" + shareID + "#" + decryptKey
+	return strings.TrimRight(shareViewerBaseURL(env), "/") + "/" + url.PathEscape(shareID) + "#" + url.PathEscape(decryptKey)
+}
+
+func shareBlobURL(env map[string]string, shareID string) string {
+	return strings.TrimRight(shareAPIBaseURL(env), "/") + "/v1/shares/" + url.PathEscape(shareID)
 }
 
 func shareViewerBaseURL(env map[string]string) string {

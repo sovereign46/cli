@@ -122,6 +122,12 @@ func TestInstallDownloadsArtifactWithParallelRanges(t *testing.T) {
 	var activeRanges int32
 	var maxActiveRanges int32
 	server := fixture.rangeServer(t, func(r *http.Request) {
+		if got := r.Header.Get("Accept-Encoding"); got != "identity" {
+			t.Fatalf("Accept-Encoding = %q", got)
+		}
+		if got := r.Header.Get("User-Agent"); got != userAgent {
+			t.Fatalf("User-Agent = %q", got)
+		}
 		if r.Header.Get("Range") == "" {
 			return
 		}
@@ -594,6 +600,7 @@ func (f *modelFixture) server(t *testing.T, overrides map[string][]byte) *httpte
 		}
 		switch r.URL.Path {
 		case "/models/v1/s46/test-model/manifest.json":
+			requireModelJSONHeaders(t, r)
 			_, _ = w.Write(f.body)
 		case "/models/v1/s46/test-model/manifest.json.sig":
 			_, _ = w.Write(f.attestation)
@@ -615,21 +622,22 @@ func (f *modelFixture) server(t *testing.T, overrides map[string][]byte) *httpte
 
 func (f *modelFixture) rangeServer(t *testing.T, onArtifact func(*http.Request)) *httptest.Server {
 	t.Helper()
-	return httptest.NewServer(f.rangeHandler(onArtifact))
+	return httptest.NewServer(f.rangeHandler(t, onArtifact))
 }
 
 func (f *modelFixture) rangeTLSServer(t *testing.T, onArtifact func(*http.Request)) *httptest.Server {
 	t.Helper()
-	server := httptest.NewUnstartedServer(f.rangeHandler(onArtifact))
+	server := httptest.NewUnstartedServer(f.rangeHandler(t, onArtifact))
 	server.EnableHTTP2 = true
 	server.StartTLS()
 	return server
 }
 
-func (f *modelFixture) rangeHandler(onArtifact func(*http.Request)) http.Handler {
+func (f *modelFixture) rangeHandler(t *testing.T, onArtifact func(*http.Request)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/models/v1/s46/test-model/manifest.json":
+			requireModelJSONHeaders(t, r)
 			_, _ = w.Write(f.body)
 		case "/models/v1/s46/test-model/manifest.json.sig":
 			_, _ = w.Write(f.attestation)
@@ -650,6 +658,13 @@ func (f *modelFixture) rangeHandler(onArtifact func(*http.Request)) http.Handler
 			http.NotFound(w, r)
 		}
 	})
+}
+
+func requireModelJSONHeaders(t *testing.T, r *http.Request) {
+	t.Helper()
+	if got := r.Header.Get("Accept"); got != "application/json" {
+		t.Fatalf("Accept = %q", got)
+	}
 }
 
 func assertMissing(t *testing.T, path string) {
