@@ -19,6 +19,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Fixed shared transcripts so `think` steps keep their full context instead of being capped like tool output.
 - Fixed airplane llama-server startup to honor `S46_LOCAL_MODEL` when setting the backend model alias.
 
 ### Security
