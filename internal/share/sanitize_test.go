@@ -38,6 +38,22 @@ func TestRedactorRemovesPrivateKeyBlocks(t *testing.T) {
 	}
 }
 
+func TestRedactorDoesNotTruncateThinkSteps(t *testing.T) {
+	body := strings.Repeat("context ", maxShareTextBytes)
+	got := (Redactor{}).StepText("think", body)
+	if got != body {
+		t.Fatalf("think step was truncated: got %d bytes, want %d", len(got), len(body))
+	}
+}
+
+func TestRedactorStillTruncatesToolSteps(t *testing.T) {
+	body := strings.Repeat("output ", maxShareToolBytes)
+	got := (Redactor{}).StepText("bash", body)
+	if !strings.Contains(got, "[truncated]") || len(got) >= len(body) {
+		t.Fatalf("tool step was not truncated: got %d bytes, want less than %d", len(got), len(body))
+	}
+}
+
 func TestRedactorRemovesPiThinkingFieldsFromNestedToolOutput(t *testing.T) {
 	got := (Redactor{}).String(`{"type":"thinking","thinking":"private reasoning","thinkingSignature":"encrypted"} {'thinking': "more private", 'encrypted_content': 'ciphertext'}`)
 	for _, leak := range []string{"private reasoning", `"encrypted"`, "more private", "ciphertext"} {

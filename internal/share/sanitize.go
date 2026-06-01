@@ -95,6 +95,8 @@ func (r Redactor) StepText(kind string, value string) string {
 	switch kind {
 	case "read", "bash", "edit":
 		return r.Tool(value)
+	case "think":
+		return r.String(value)
 	default:
 		return r.Text(value)
 	}
