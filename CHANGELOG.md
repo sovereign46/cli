@@ -6,6 +6,10 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- Changed the project license to Apache 2.0 and updated release metadata to match.
+
 ## [0.2.2] - 2026-06-01
 
 ### Added
