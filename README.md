@@ -98,3 +98,7 @@ make release-patch | release-minor | release-major
 ```
 
 The pushed `v*.*.*` tag triggers `.github/workflows/release.yml`.
+
+## License
+
+This repository is licensed under the Apache License 2.0. See [LICENSE](LICENSE).

@@ -46,7 +46,7 @@ brews:
     directory: Formula
     homepage: https://sovereign46.com
     description: Sovereign46 CLI control plane for coding-agent harnesses
-    license: BUSL-1.1
+    license: Apache-2.0
     install: |
       bin.install "s46"
       generate_completions_from_executable(bin/"s46", "completion")
