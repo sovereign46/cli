@@ -2,7 +2,12 @@ package keyring
 
 import (
 	"context"
+	"encoding/hex"
+	"os"
 	"path/filepath"
+	"reflect"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -34,6 +39,47 @@ func TestNewFileBackendFromEnv(t *testing.T) {
 	}
 	if _, ok := store.(FileStore); !ok {
 		t.Fatalf("expected FileStore, got %T", store)
+	}
+}
+
+func TestSecurityStoreSetPassesSecretAsHexPasswordData(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script security shim is unix-only")
+	}
+	dir := t.TempDir()
+	argsFile := filepath.Join(dir, "args")
+	stdinFile := filepath.Join(dir, "stdin")
+	security := filepath.Join(dir, "security")
+	script := `#!/bin/sh
+printf '%s\n' "$@" > "$SECURITY_ARGS_FILE"
+cat > "$SECURITY_STDIN_FILE"
+`
+	if err := os.WriteFile(security, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("SECURITY_ARGS_FILE", argsFile)
+	t.Setenv("SECURITY_STDIN_FILE", stdinFile)
+
+	secret := `{"accessToken":"s46_access_secret","refreshToken":"s46_refresh_secret"}`
+	if err := (SecurityStore{}).Set(context.Background(), "s46.tokens", "nuno@yld.io", secret); err != nil {
+		t.Fatal(err)
+	}
+	argsRaw, err := os.ReadFile(argsFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Split(strings.TrimSuffix(string(argsRaw), "\n"), "\n")
+	want := []string{"add-generic-password", "-a", "nuno@yld.io", "-s", "s46.tokens", "-U", "-X", hex.EncodeToString([]byte(secret))}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("security args = %#v, want %#v", got, want)
+	}
+	stdinRaw, err := os.ReadFile(stdinFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(stdinRaw) != "" {
+		t.Fatalf("security stdin = %q, want empty", string(stdinRaw))
 	}
 }
 

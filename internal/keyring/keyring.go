@@ -2,6 +2,7 @@ package keyring
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -54,8 +55,7 @@ func (s SecurityStore) Get(ctx context.Context, service string, account string) 
 }
 
 func (s SecurityStore) Set(ctx context.Context, service string, account string, secret string) error {
-	cmd := exec.CommandContext(ctx, "security", "add-generic-password", "-a", account, "-s", service, "-U", "-w")
-	cmd.Stdin = strings.NewReader(secret)
+	cmd := exec.CommandContext(ctx, "security", "add-generic-password", "-a", account, "-s", service, "-U", "-X", hex.EncodeToString([]byte(secret)))
 	if out, err := cmd.CombinedOutput(); err != nil {
 		if ctxErr := contextx.Done(ctx, err); ctxErr != nil {
 			return ctxErr
