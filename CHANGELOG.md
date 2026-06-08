@@ -6,6 +6,10 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed macOS Keychain token storage so `s46 login` no longer prompts for password data.
+
 ## [0.2.3] - 2026-06-04
 
 ### Changed
