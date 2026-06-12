@@ -33,10 +33,16 @@ func TestShareLocalWorksInAirplaneMode(t *testing.T) {
 	writePiSessionFixture(t, filepath.Join(env["HOME"], ".pi", "agent", "sessions", "--Users-dscape-dev-app--", "2026-05-21T11-00-00-000Z_"+sessionID+".jsonl"), sessionID, projectRoot, "airplane local prompt")
 	requireOK(t, run(t, env, "mode", "airplane"))
 
-	local := requireOK(t, run(t, env, "share", "--local", "--json"))
+	report := requireOK(t, run(t, env, "share", "--local"))
+	artifactPath := requireLocalShareArtifactPath(t, report)
+	t.Cleanup(func() { _ = os.Remove(artifactPath) })
+	raw, err := os.ReadFile(artifactPath)
+	if err != nil {
+		t.Fatalf("read local share artifact: %v", err)
+	}
 	var artifact sharepkg.Artifact
-	if err := json.Unmarshal([]byte(local), &artifact); err != nil {
-		t.Fatalf("invalid local share artifact JSON: %v\n%s", err, local)
+	if err := json.Unmarshal(raw, &artifact); err != nil {
+		t.Fatalf("invalid local share artifact file JSON: %v\n%s", err, string(raw))
 	}
 	if artifact.Session.ID != sessionID || artifact.Session.Harness.Name != "pi" || artifact.Session.Model.Name != airplane.LocalModelID || artifact.Session.Task != "airplane local prompt" {
 		t.Fatalf("unexpected artifact: %#v", artifact.Session)
@@ -45,8 +51,34 @@ func TestShareLocalWorksInAirplaneMode(t *testing.T) {
 		t.Fatalf("incomplete artifact: %#v", artifact)
 	}
 
+	local := requireOK(t, run(t, env, "share", "--local", "--json"))
+	var structured sharepkg.Artifact
+	if err := json.Unmarshal([]byte(local), &structured); err != nil {
+		t.Fatalf("invalid local share artifact JSON: %v\n%s", err, local)
+	}
+	if structured.Session.ID != sessionID {
+		t.Fatalf("unexpected structured artifact: %#v", structured.Session)
+	}
+
 	defaultShare := run(t, env, "share", sessionID)
 	if defaultShare.err == nil || !strings.Contains(defaultShare.err.Error(), "share requires cloud connectivity") {
 		t.Fatalf("airplane share upload should still fail, got err=%v stdout=%s", defaultShare.err, defaultShare.stdout)
 	}
+}
+
+func requireLocalShareArtifactPath(t *testing.T, output string) string {
+	t.Helper()
+	for _, line := range strings.Split(output, "\n") {
+		_, path, ok := strings.Cut(line, "artifact file:")
+		if !ok {
+			continue
+		}
+		path = strings.TrimSpace(path)
+		if path == "" {
+			t.Fatalf("empty local share artifact path in output:\n%s", output)
+		}
+		return path
+	}
+	t.Fatalf("missing local share artifact path in output:\n%s", output)
+	return ""
 }

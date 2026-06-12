@@ -2,13 +2,16 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/sovereign46/cli/internal/api"
 	sessioncmd "github.com/sovereign46/cli/internal/session"
+	sharepkg "github.com/sovereign46/cli/internal/share"
 )
 
 func shareCommand(runtime Runtime, opts *options) *cobra.Command {
@@ -116,15 +119,46 @@ func runLocalShare(ctx context.Context, app *app, service sessioncmd.Service, se
 	if ok, err := app.writeStructured(artifact); ok {
 		return err
 	}
+	artifactPath, err := writeLocalShareArtifactFile(artifact)
+	if err != nil {
+		return err
+	}
 	lines := inferredShareLines(inferred)
 	lines = append(lines,
 		fmt.Sprintf("[s46] local share artifact: %s", artifact.Session.ID),
+		fmt.Sprintf("[s46] artifact file: %s", artifactPath),
 		fmt.Sprintf("[s46] harness: %s · model: %s", artifact.Session.Harness.Name, artifact.Session.Model.Name),
 		fmt.Sprintf("[s46] steps:   %d", len(artifact.Steps)),
 		fmt.Sprintf("[s46] files:   %d", len(artifact.Files)),
 		"[s46] no upload performed; rerun without --local to create a share URL",
 	)
 	return app.renderer.Lines(lines...)
+}
+
+func writeLocalShareArtifactFile(artifact sharepkg.Artifact) (string, error) {
+	file, err := os.CreateTemp(os.TempDir(), "s46-share-*.json")
+	if err != nil {
+		return "", fmt.Errorf("create local share artifact temp file: %w", err)
+	}
+	path := file.Name()
+	saved := false
+	defer func() {
+		if !saved {
+			_ = os.Remove(path)
+		}
+	}()
+
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(artifact); err != nil {
+		_ = file.Close()
+		return "", fmt.Errorf("write local share artifact temp file %s: %w", path, err)
+	}
+	if err := file.Close(); err != nil {
+		return "", fmt.Errorf("close local share artifact temp file %s: %w", path, err)
+	}
+	saved = true
+	return path, nil
 }
 
 func inferredShareLines(session *sessioncmd.ListedSession) []string {
