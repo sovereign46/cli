@@ -8,6 +8,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Fixed `s46 share --local` to write the generated artifact to a temporary JSON file in human-readable output.
 - Fixed model audit verification to accept signed registry entries that report green `verificationStatus`.
 
 ## [0.2.4] - 2026-06-08
