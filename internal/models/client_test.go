@@ -321,6 +321,22 @@ func TestInstallRejectsModelAuditThatDidNotPass(t *testing.T) {
 	}
 }
 
+func TestInstallAcceptsGreenVerificationStatusAudit(t *testing.T) {
+	fixture := newModelFixture(t, []byte("model"))
+	overrides := map[string][]byte{}
+	server := fixture.server(t, overrides)
+	defer server.Close()
+	fixture.manifest.URL = server.URL + "/artifacts/model.gguf"
+	fixture.sign(t)
+	greenAuditIndex := []byte(fmt.Sprintf(`{"schema":1,"runs":[{"runId":"test-run","modelId":"%s","version":"%s","verificationStatus":"green","artifactDigest":"sha256:%s","runUrl":"/audit/v1/runs/test-run/"}]}`, fixture.manifest.ModelID, fixture.manifest.Version, fixture.manifest.SHA256))
+	overrides["/audit/v1/index.json"] = greenAuditIndex
+	overrides["/audit/v1/index.json.sig"] = fixture.signCanonicalJSONBody(t, "index.json", greenAuditIndex)
+
+	if err := Install(context.Background(), InstallRequest{Env: fixture.env(server.URL), ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, TargetPath: filepath.Join(t.TempDir(), "model.gguf"), HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys()}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestInstallRequiresAllowanceForYankedAdvisoryIndex(t *testing.T) {
 	fixture := newModelFixture(t, []byte("model"))
 	index := fmt.Sprintf(`{"schema":1,"advisories":[],"yanks":[{"model":{"modelId":"%s","version":"v1"},"subjectType":"bundle-digest","bundleDigest":"sha256:%s","artifactDigest":"sha256:%s","releaseSignatureSubjectDigest":"sha256:%s","reason":"test yank","url":"/advisories/v1/yanks/S46-2026-0001.json","signatureUrl":"/advisories/v1/yanks/S46-2026-0001.json.sig"}]}`, fixture.manifest.ModelID, strings.Repeat("1", 64), fixture.manifest.SHA256, strings.Repeat("2", 64))

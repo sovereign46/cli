@@ -559,11 +559,11 @@ func auditRunPassed(run AuditRun) bool {
 	if run.Passed != nil {
 		return *run.Passed
 	}
-	for _, value := range []string{run.Status, run.Result} {
+	for _, value := range []string{run.Status, run.Result, run.VerificationStatus} {
 		switch strings.ToLower(strings.TrimSpace(value)) {
-		case "pass", "passed", "success", "succeeded", "ok":
+		case "green", "pass", "passed", "success", "succeeded", "ok":
 			return true
-		case "fail", "failed", "failure", "error", "errored", "refused", "warning":
+		case "yellow", "red", "reviewed", "fail", "failed", "failure", "error", "errored", "refused", "warning":
 			return false
 		}
 	}

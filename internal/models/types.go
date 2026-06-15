@@ -91,6 +91,7 @@ type AuditRun struct {
 	BundleDigest                  string `json:"bundleDigest"`
 	ArtifactDigest                string `json:"artifactDigest,omitempty"`
 	ReleaseSignatureSubjectDigest string `json:"releaseSignatureSubjectDigest,omitempty"`
+	VerificationStatus            string `json:"verificationStatus,omitempty"`
 	RunURL                        string `json:"runUrl"`
 }
 
