@@ -3,13 +3,13 @@ package models
 import "encoding/json"
 
 const (
-	SchemaVersion      = 1
-	SignatureAlgorithm = "ed25519"
-	DefaultBaseURL     = "https://models.s46.dev/models/v1"
-	DefaultHost        = "models.s46.dev"
+	SchemaVersion  = 1
+	DefaultBaseURL = "https://models.s46.dev/models/v1"
+	DefaultHost    = "models.s46.dev"
 )
 
 type Manifest struct {
+	Format                        string          `json:"format,omitempty"`
 	Schema                        int             `json:"schema"`
 	ModelID                       string          `json:"modelId"`
 	BackendModel                  string          `json:"backendModel"`
@@ -65,15 +65,9 @@ type AdvisoryModel struct {
 	Version string `json:"version"`
 }
 
-type AdvisorySignature struct {
-	Schema        int    `json:"schema"`
-	Kind          string `json:"kind"`
-	KeyID         string `json:"keyId"`
-	Algorithm     string `json:"algorithm"`
-	PublicKey     string `json:"publicKey"`
-	SignedPayload string `json:"signedPayload"`
-	SubjectDigest string `json:"subjectDigest"`
-	Signature     string `json:"signature"`
+type SignedMetadata struct {
+	Body        json.RawMessage `json:"body"`
+	Attestation json.RawMessage `json:"attestation"`
 }
 
 type AuditIndex struct {
@@ -102,16 +96,18 @@ type ModelWarning struct {
 }
 
 type Receipt struct {
-	Schema      int             `json:"schema"`
-	ModelID     string          `json:"modelId"`
-	Backend     string          `json:"backendModel"`
-	Filename    string          `json:"filename"`
-	URL         string          `json:"url"`
-	Size        int64           `json:"size"`
-	SHA256      string          `json:"sha256"`
-	Manifest    string          `json:"manifest"`
-	Attestation json.RawMessage `json:"attestation,omitempty"`
-	TrustRoot   string          `json:"trustRoot,omitempty"`
-	Audit       AuditRun        `json:"audit"`
-	InstalledAt string          `json:"installedAt"`
+	Schema        int             `json:"schema"`
+	ModelID       string          `json:"modelId"`
+	Backend       string          `json:"backendModel"`
+	Filename      string          `json:"filename"`
+	URL           string          `json:"url"`
+	Size          int64           `json:"size"`
+	SHA256        string          `json:"sha256"`
+	Manifest      string          `json:"manifest"`
+	Attestation   json.RawMessage `json:"attestation,omitempty"`
+	TrustRoot     string          `json:"trustRoot,omitempty"`
+	Audit         AuditRun        `json:"audit"`
+	AuditIndex    SignedMetadata  `json:"auditIndex"`
+	AdvisoryIndex SignedMetadata  `json:"advisoryIndex"`
+	InstalledAt   string          `json:"installedAt"`
 }

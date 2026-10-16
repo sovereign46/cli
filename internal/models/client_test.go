@@ -340,7 +340,10 @@ func TestInstallAcceptsGreenVerificationStatusAudit(t *testing.T) {
 func TestInstallRequiresAllowanceForYankedAdvisoryIndex(t *testing.T) {
 	fixture := newModelFixture(t, []byte("model"))
 	index := fmt.Sprintf(`{"schema":1,"advisories":[],"yanks":[{"model":{"modelId":"%s","version":"v1"},"subjectType":"bundle-digest","bundleDigest":"sha256:%s","artifactDigest":"sha256:%s","releaseSignatureSubjectDigest":"sha256:%s","reason":"test yank","url":"/advisories/v1/yanks/S46-2026-0001.json","signatureUrl":"/advisories/v1/yanks/S46-2026-0001.json.sig"}]}`, fixture.manifest.ModelID, strings.Repeat("1", 64), fixture.manifest.SHA256, strings.Repeat("2", 64))
-	server := fixture.server(t, map[string][]byte{"/advisories/v1/index.json": []byte(index)})
+	server := fixture.server(t, map[string][]byte{
+		"/advisories/v1/index.json":     []byte(index),
+		"/advisories/v1/index.json.sig": fixture.signCanonicalJSONBody(t, "index.json", []byte(index)),
+	})
 	defer server.Close()
 	fixture.manifest.URL = server.URL + "/artifacts/model.gguf"
 	fixture.manifest.Version = "v1"
@@ -474,17 +477,23 @@ func TestVerifyInstalledRequiresAuditedReceipt(t *testing.T) {
 }
 
 type modelFixture struct {
-	publicKey        ed25519.PublicKey
-	privateKey       ed25519.PrivateKey
-	logKey           attest.KeyPair
-	witnesses        []attest.KeyPair
-	manifest         Manifest
-	body             []byte
-	attestation      []byte
-	trustRootJSON    []byte
-	auditIndex       []byte
-	auditAttestation []byte
-	artifact         []byte
+	publicKey           ed25519.PublicKey
+	privateKey          ed25519.PrivateKey
+	logKey              attest.KeyPair
+	submitKey           attest.KeyPair
+	identity            attest.Identity
+	signedAt            time.Time
+	witnessedAt         time.Time
+	witnesses           []attest.KeyPair
+	manifest            Manifest
+	body                []byte
+	attestation         []byte
+	trustRootJSON       []byte
+	auditIndex          []byte
+	auditAttestation    []byte
+	advisoryIndex       []byte
+	advisoryAttestation []byte
+	artifact            []byte
 }
 
 func newModelFixture(t *testing.T, artifact []byte) *modelFixture {
@@ -500,6 +509,8 @@ func newModelFixture(t *testing.T, artifact []byte) *modelFixture {
 		publicKey:  publicKey,
 		privateKey: privateKey,
 		logKey:     logKey,
+		submitKey:  mustAttestKeyPair(t),
+		identity:   attest.Identity{Issuer: modelSigningIssuer, Subject: modelSigningSubject},
 		witnesses:  witnesses,
 		artifact:   artifact,
 		manifest: Manifest{
@@ -537,11 +548,13 @@ func (f *modelFixture) sign(t *testing.T) {
 		SigningKeys: []attest.TrustedKey{{
 			KeyID:     "test-key",
 			PublicKey: encodeBase64(f.publicKey),
+			Identity:  f.identity,
 		}},
 		Sigsum: attest.SigsumTrustRoot{
-			Logs:      []attest.TrustedKey{{KeyID: "log-1", PublicKey: f.logKey.PublicKey}},
-			Witnesses: trustedWitnesses,
-			Quorum:    len(trustedWitnesses),
+			Logs:       []attest.TrustedKey{{KeyID: "log-1", PublicKey: f.logKey.PublicKey}},
+			Witnesses:  trustedWitnesses,
+			Quorum:     len(trustedWitnesses),
+			SubmitKeys: []attest.SigsumSubmitKey{{KeyID: "submit-key", PublicKey: f.submitKey.PublicKey, SigningKeyID: "test-key", Identity: f.identity}},
 		},
 		TransparencyStatus: attest.TransparencyStatus{State: attest.TransparencyOperational},
 	}
@@ -551,6 +564,8 @@ func (f *modelFixture) sign(t *testing.T) {
 	}
 	f.auditIndex = []byte(fmt.Sprintf(`{"schema":1,"runs":[{"runId":"test-run","modelId":"%s","version":"%s","status":"passed","artifactDigest":"sha256:%s","runUrl":"/audit/v1/runs/test-run/"}]}`, f.manifest.ModelID, f.manifest.Version, f.manifest.SHA256))
 	f.auditAttestation = f.signCanonicalJSONBody(t, "index.json", f.auditIndex)
+	f.advisoryIndex = []byte(`{"schema":1,"advisories":[]}`)
+	f.advisoryAttestation = f.signCanonicalJSONBody(t, "index.json", f.advisoryIndex)
 }
 
 func mustAttestKeyPair(t *testing.T) attest.KeyPair {
@@ -572,15 +587,22 @@ func (f *modelFixture) signBody(t *testing.T, name string, body []byte) []byte {
 	for _, witness := range f.witnesses {
 		witnessPrivateKeys = append(witnessPrivateKeys, witness.PrivateKey)
 	}
+	witnessedAt := f.witnessedAt
+	if witnessedAt.IsZero() {
+		witnessedAt = time.Now().UTC()
+	}
 	bundle, err := attest.Sign(context.Background(), attest.SignOptions{
 		Subjects:      []attest.Subject{subject},
 		PrivateKey:    encodeBase64(f.privateKey),
 		KeyID:         "test-key",
+		Identity:      f.identity,
+		SignedAt:      f.signedAt,
 		PredicateKind: attest.PredicateKindRelease,
 		Sigsum: &attest.SigsumSignOptions{
+			SubmitPrivateKey:       f.submitKey.PrivateKey,
 			LogPrivateKey:          f.logKey.PrivateKey,
 			WitnessPrivateKeys:     witnessPrivateKeys,
-			WitnessTimestamp:       time.Now().UTC(),
+			WitnessTimestamp:       witnessedAt,
 			DeterministicTreeNonce: name,
 		},
 	})
@@ -596,7 +618,7 @@ func (f *modelFixture) signBody(t *testing.T, name string, body []byte) []byte {
 
 func (f *modelFixture) signCanonicalJSONBody(t *testing.T, name string, body []byte) []byte {
 	t.Helper()
-	_, canonicalBody, err := canonicalJSONDigest(body)
+	canonicalBody, err := canonicalJSONBytes(body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -611,6 +633,10 @@ func (f *modelFixture) server(t *testing.T, overrides map[string][]byte) *httpte
 			return
 		}
 		if override, ok := overrides[r.URL.Path]; ok {
+			if override == nil {
+				http.NotFound(w, r)
+				return
+			}
 			_, _ = w.Write(override)
 			return
 		}
@@ -623,7 +649,9 @@ func (f *modelFixture) server(t *testing.T, overrides map[string][]byte) *httpte
 		case "/trust/v1/root.json":
 			_, _ = w.Write(f.trustRootJSON)
 		case "/advisories/v1/index.json":
-			_, _ = w.Write([]byte(`{"schema":1,"advisories":[]}`))
+			_, _ = w.Write(f.advisoryIndex)
+		case "/advisories/v1/index.json.sig":
+			_, _ = w.Write(f.advisoryAttestation)
 		case "/audit/v1/index.json":
 			_, _ = w.Write(f.auditIndex)
 		case "/audit/v1/index.json.sig":
@@ -660,7 +688,9 @@ func (f *modelFixture) rangeHandler(t *testing.T, onArtifact func(*http.Request)
 		case "/trust/v1/root.json":
 			_, _ = w.Write(f.trustRootJSON)
 		case "/advisories/v1/index.json":
-			_, _ = w.Write([]byte(`{"schema":1,"advisories":[]}`))
+			_, _ = w.Write(f.advisoryIndex)
+		case "/advisories/v1/index.json.sig":
+			_, _ = w.Write(f.advisoryAttestation)
 		case "/audit/v1/index.json":
 			_, _ = w.Write(f.auditIndex)
 		case "/audit/v1/index.json.sig":

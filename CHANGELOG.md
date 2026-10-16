@@ -6,6 +6,12 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+
+- **Breaking:** Model installation and cached verification now require signed advisory evidence and current activation checks; old receipts must refresh their verification evidence.
+- Recheck signed audits and advisories after artifact verification, and invalidate matching cached receipts after an authenticated policy refusal.
+- Reject native safetensors packages before downloading them through the GGUF-only airplane installer.
+
 ### Removed
 
 - Removed the unfinished `detach`, `resume`, and `session land` command surfaces.

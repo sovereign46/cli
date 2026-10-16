@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -27,6 +28,8 @@ const (
 	metadataErrorSnippetBytes  = 4 * 1024
 	metadataTimeout            = 30 * time.Second
 	userAgent                  = "s46-cli"
+	modelSigningIssuer         = "https://models.s46.dev"
+	modelSigningSubject        = "sovereign46/models-release"
 	defaultHTTPDialTimeout     = 10 * time.Second
 	defaultHTTPHeaderTimeout   = 30 * time.Second
 	defaultHTTPIdleConnTimeout = 90 * time.Second
@@ -47,6 +50,7 @@ type InstallRequest struct {
 	AllowWarnings   bool
 	OnResolve       func(InstallResolution)
 	trustedKeys     map[string]ed25519.PublicKey
+	now             func() time.Time
 }
 
 type InstallResolution struct {
@@ -72,6 +76,13 @@ func (e WarningsError) Error() string {
 	return "model has warnings; pass --yes or confirm interactively: " + strings.Join(messages, "; ")
 }
 
+// auditPolicyError is returned only after authenticating an audit index and
+// finding that it no longer unambiguously authorizes the requested release.
+type auditPolicyError struct{ err error }
+
+func (e auditPolicyError) Error() string { return e.err.Error() }
+func (e auditPolicyError) Unwrap() error { return e.err }
+
 type InstallProgressFunc func(InstallProgress)
 
 type InstallProgressPhase string
@@ -95,13 +106,14 @@ type InstallProgress struct {
 type verifiedManifest struct {
 	Manifest        Manifest
 	Body            []byte
-	Attestation     attest.Bundle
 	AttestationBody []byte
 	TrustRootBody   []byte
 	Audit           AuditRun
+	AuditIndex      SignedMetadata
+	AdvisoryIndex   SignedMetadata
 }
 
-func Install(ctx context.Context, request InstallRequest) error {
+func Install(ctx context.Context, request InstallRequest) (resultErr error) {
 	if err := validateModelRequest(request); err != nil {
 		return err
 	}
@@ -115,33 +127,41 @@ func Install(ctx context.Context, request InstallRequest) error {
 	if strings.TrimSpace(request.TargetPath) == "" {
 		request.TargetPath = DefaultTargetPath(request.Env, manifest.Manifest)
 	}
-	audit, err := requirePassedAudit(ctx, request, manifest.Manifest)
+	defer func() {
+		var warnings WarningsError
+		var audit auditPolicyError
+		if errors.As(resultErr, &warnings) || errors.As(resultErr, &audit) {
+			if err := invalidateRefusedReceipt(request, manifest.Manifest); err != nil {
+				resultErr = errors.Join(resultErr, fmt.Errorf("invalidate refused model receipt: %w", err))
+			}
+		}
+	}()
+	if err := requireWarningAllowance(manifestWarnings(manifest.Manifest), request.AllowWarnings); err != nil {
+		return err
+	}
+	audit, auditIndex, err := requirePassedAudit(ctx, request, manifest.Manifest)
 	if err != nil {
 		return err
 	}
 	manifest.Audit = audit
-	warnings, err := advisoryWarnings(ctx, request, manifest.Manifest)
+	manifest.AuditIndex = auditIndex
+	warnings, advisoryIndex, err := advisoryWarnings(ctx, request, manifest.Manifest)
 	if err != nil {
 		return err
 	}
+	manifest.AdvisoryIndex = advisoryIndex
 	evidenceURL := auditEvidenceURL(request, audit, manifest.Manifest)
 	if request.OnResolve != nil {
 		request.OnResolve(InstallResolution{Manifest: manifest.Manifest, TargetPath: request.TargetPath, RegistryURL: BaseURL(request.Env), EvidenceURL: evidenceURL, Warnings: warnings})
 	}
-	if len(warnings) > 0 && !request.AllowWarnings {
-		return WarningsError{Warnings: warnings}
-	}
-	if ok, err := verifyInstalledReceiptForManifest(request, manifest.Manifest, true); err != nil {
+	if err := requireWarningAllowance(warnings, request.AllowWarnings); err != nil {
 		return err
-	} else if ok {
-		bestEffortRemoveArtifactDownloadFiles(request.TargetPath)
-		return nil
 	}
 	if ok, err := verifyExistingArtifact(request, manifest.Manifest); err != nil {
 		return err
 	} else if ok {
 		bestEffortRemoveArtifactDownloadFiles(request.TargetPath)
-		return writeReceipt(request.TargetPath, manifest)
+		return finalizeInstall(ctx, request, manifest)
 	}
 	return downloadAndInstallArtifact(ctx, request, manifest)
 }
@@ -150,7 +170,7 @@ func VerifyInstalled(ctx context.Context, request InstallRequest) (bool, error) 
 	if err := validateInstallRequest(request); err != nil {
 		return false, err
 	}
-	return verifyInstalledReceipt(request, true)
+	return verifyInstalledReceipt(ctx, request)
 }
 
 func BaseURL(env map[string]string) string {
@@ -241,19 +261,14 @@ func fetchVerifiedManifest(ctx context.Context, request InstallRequest) (verifie
 	if err != nil {
 		return verifiedManifest{}, err
 	}
-	trustRootBody, err := attest.MarshalTrustRoot(trustRoot)
-	if err != nil {
-		return verifiedManifest{}, fmt.Errorf("encode trust root: %w", err)
-	}
-	attestation, err := verifyAttestationBytes(ctx, body, filepath.Base(manifestURL), sigBody, trustRoot, request)
-	if err != nil {
+	if err := verifyAttestationBytes(ctx, body, filepath.Base(manifestURL), sigBody, trustRoot, request); err != nil {
 		return verifiedManifest{}, fmt.Errorf("verify model manifest attestation: %w", err)
 	}
 	var manifest Manifest
 	if err := json.Unmarshal(body, &manifest); err != nil {
 		return verifiedManifest{}, fmt.Errorf("decode model manifest: %w", err)
 	}
-	return verifiedManifest{Manifest: manifest, Body: body, Attestation: attestation, AttestationBody: sigBody, TrustRootBody: trustRootBody}, nil
+	return verifiedManifest{Manifest: manifest, Body: body, AttestationBody: sigBody}, nil
 }
 
 func modelManifestURL(baseURL string, modelID string) string {
@@ -347,38 +362,52 @@ func trustRootURL(baseURL string) (string, error) {
 	return parsed.String(), nil
 }
 
-func verifyAttestationBytes(ctx context.Context, body []byte, subjectName string, bundleBody []byte, trustRoot attest.TrustRoot, request InstallRequest) (attest.Bundle, error) {
+func verifyAttestationBytes(ctx context.Context, body []byte, subjectName string, bundleBody []byte, trustRoot attest.TrustRoot, request InstallRequest) error {
 	bundle, err := attest.ParseBundle(bundleBody)
 	if err != nil {
-		return attest.Bundle{}, err
+		return err
 	}
 	subject, err := attest.SubjectFromBytes(subjectName, body)
 	if err != nil {
-		return attest.Bundle{}, err
+		return err
 	}
-	result, err := attest.Verify(ctx, attest.VerifyRequest{Bundle: bundle, Subjects: []attest.Subject{subject}, TrustRoot: trustRoot, ExpectedPredicateKind: attest.PredicateKindRelease, Mode: attestMode(request.Env), Strict: attestStrict(request.Env), Now: time.Now().UTC()})
+	if len(bundle.Envelope.Signatures) != 1 {
+		return fmt.Errorf("model attestation requires exactly one pinned signer")
+	}
+	identity := modelSigningIdentity(bundle.Envelope.Signatures[0].KeyID)
+	now := request.activationTime()
+	if err := validateSigningKeyActivation(trustRoot, identity.KeyID, request, now); err != nil {
+		return err
+	}
+	result, err := attest.Verify(ctx, attest.VerifyRequest{Bundle: bundle, Subjects: []attest.Subject{subject}, TrustRoot: trustRoot, ExpectedIdentity: identity, ExpectedPredicateKind: attest.PredicateKindRelease, Mode: attest.ModeProduction, Strict: true, MaxWitnessAge: attest.DefaultWitnessMaxAge, Now: now})
 	if err != nil {
-		return attest.Bundle{}, err
+		return err
 	}
-	if result.State != attest.StateTrusted {
-		return attest.Bundle{}, fmt.Errorf("attestation state %s", result.State)
+	return attest.ValidateActivationResult(result, now)
+}
+
+func (r InstallRequest) activationTime() time.Time {
+	if r.now != nil {
+		return r.now().UTC()
 	}
-	if err := ensureSigningKeyPinned(trustRoot, result.SigningKeyID, request); err != nil {
-		return attest.Bundle{}, err
-	}
-	return bundle, nil
+	return time.Now().UTC()
+}
+
+func modelSigningIdentity(keyID string) attest.IdentityPolicy {
+	return attest.IdentityPolicy{KeyID: keyID, Issuer: modelSigningIssuer, Subject: modelSigningSubject}
 }
 
 func validateTrustRootPinned(root attest.TrustRoot, request InstallRequest) error {
+	now := request.activationTime()
 	for _, key := range root.SigningKeys {
-		if err := ensureSigningKeyPinned(root, key.KeyID, request); err == nil {
+		if err := validateSigningKeyActivation(root, key.KeyID, request, now); err == nil {
 			return nil
 		}
 	}
-	return fmt.Errorf("trust root contains no pinned Sovereign46 signing key")
+	return fmt.Errorf("trust root contains no pinned Sovereign46 signing identity authorized for activation")
 }
 
-func ensureSigningKeyPinned(root attest.TrustRoot, keyID string, request InstallRequest) error {
+func validateSigningKeyActivation(root attest.TrustRoot, keyID string, request InstallRequest, now time.Time) error {
 	keys, err := trustedKeys(request.Env)
 	if err != nil {
 		return err
@@ -390,68 +419,30 @@ func ensureSigningKeyPinned(root attest.TrustRoot, keyID string, request Install
 	if !ok {
 		return fmt.Errorf("attestation signed by unpinned key %q", keyID)
 	}
-	for _, key := range root.SigningKeys {
-		if key.KeyID != keyID {
-			continue
-		}
-		decoded, err := decodeBase64(key.PublicKey)
-		if err != nil {
-			return err
-		}
-		if string(decoded) == string(pinned) {
-			return nil
-		}
-		return fmt.Errorf("trust root key %q does not match pinned key", keyID)
-	}
-	return fmt.Errorf("trust root does not contain signing key %q", keyID)
+	// This pins the release signer, not the provenance of the full root policy.
+	return attest.ValidateActivationTrust(root, modelSigningIdentity(keyID), encodeBase64(pinned), now)
 }
 
-func attestMode(map[string]string) attest.Mode {
-	return attest.ModeProduction
-}
-
-func attestStrict(map[string]string) bool {
-	return true
-}
-
-func advisoryWarnings(ctx context.Context, request InstallRequest, manifest Manifest) ([]ModelWarning, error) {
+func advisoryWarnings(ctx context.Context, request InstallRequest, manifest Manifest) ([]ModelWarning, SignedMetadata, error) {
 	baseURL := strs.FirstNonEmpty(request.ManifestBaseURL, BaseURL(request.Env))
-	policy, err := newTrustPolicy(baseURL, request.Env)
-	if err != nil {
-		return nil, err
-	}
 	indexURL, err := advisoryIndexURL(baseURL)
 	if err != nil {
+		return nil, SignedMetadata{}, err
+	}
+	metadata, err := fetchSignedIndex(ctx, request, baseURL, indexURL)
+	if err != nil {
+		return nil, SignedMetadata{}, fmt.Errorf("verify advisory index: %w", err)
+	}
+	warnings, err := warningsForManifest(manifest, metadata.Body)
+	return warnings, metadata, err
+}
+
+func warningsForManifest(manifest Manifest, body []byte) ([]ModelWarning, error) {
+	index, err := parseAdvisoryIndex(body)
+	if err != nil {
 		return nil, err
 	}
-	body, err := downloadMetadata(ctx, request.HTTPClient, policy, indexURL)
-	if err != nil {
-		return nil, fmt.Errorf("download advisory index: %w", err)
-	}
-	if sigBody, err := downloadMetadata(ctx, request.HTTPClient, policy, indexURL+".sig"); err == nil {
-		if trustRoot, rootErr := fetchTrustRoot(ctx, request, policy, baseURL); rootErr == nil {
-			if attestErr := verifyCanonicalJSONAttestation(ctx, body, "index.json", sigBody, trustRoot, request); attestErr == nil {
-				goto advisoryVerified
-			}
-		}
-		if err := verifyAdvisoryIndexSignature(body, sigBody, request); err != nil {
-			return nil, err
-		}
-	} else if !metadataNotFound(err) {
-		return nil, fmt.Errorf("download advisory index signature: %w", err)
-	}
-advisoryVerified:
-	var index AdvisoryIndex
-	if err := json.Unmarshal(body, &index); err != nil {
-		return nil, fmt.Errorf("decode advisory index: %w", err)
-	}
-	if index.Schema != SchemaVersion {
-		return nil, fmt.Errorf("unsupported advisory index schema %d", index.Schema)
-	}
-	var warnings []ModelWarning
-	if manifest.Yanked || len(manifest.YankURLs) > 0 {
-		warnings = append(warnings, ModelWarning{Code: "yanked", Message: fmt.Sprintf("model release %s is yanked", manifest.ModelID), URL: firstString(append(manifest.YankURLs, manifest.AdvisoryURLs...)...)})
-	}
+	warnings := manifestWarnings(manifest)
 	for _, advisory := range index.Advisories {
 		if advisoryMatchesManifest(advisory, manifest) {
 			message := fmt.Sprintf("advisory %s applies to %s: %s", advisory.ID, manifest.ModelID, advisory.Title)
@@ -467,6 +458,40 @@ advisoryVerified:
 	return warnings, nil
 }
 
+func manifestWarnings(manifest Manifest) []ModelWarning {
+	if manifest.Yanked || len(manifest.YankURLs) > 0 {
+		return []ModelWarning{{Code: "yanked", Message: fmt.Sprintf("model release %s is yanked", manifest.ModelID), URL: firstString(append(manifest.YankURLs, manifest.AdvisoryURLs...)...)}}
+	}
+	return nil
+}
+
+func requireWarningAllowance(warnings []ModelWarning, allow bool) error {
+	if len(warnings) > 0 && !allow {
+		return WarningsError{Warnings: warnings}
+	}
+	return nil
+}
+
+func parseAdvisoryIndex(body []byte) (AdvisoryIndex, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		return AdvisoryIndex{}, fmt.Errorf("decode advisory index: %w", err)
+	}
+	// All registry indexes use the subject name index.json. Require the
+	// advisory document shape so another signed index cannot replace it.
+	if _, ok := fields["advisories"]; !ok {
+		return AdvisoryIndex{}, fmt.Errorf("advisory index is missing advisories")
+	}
+	var index AdvisoryIndex
+	if err := json.Unmarshal(body, &index); err != nil {
+		return AdvisoryIndex{}, fmt.Errorf("decode advisory index: %w", err)
+	}
+	if index.Schema != SchemaVersion {
+		return AdvisoryIndex{}, fmt.Errorf("unsupported advisory index schema %d", index.Schema)
+	}
+	return index, nil
+}
+
 func advisoryIndexURL(baseURL string) (string, error) {
 	parsed, err := originURL(baseURL)
 	if err != nil {
@@ -476,98 +501,108 @@ func advisoryIndexURL(baseURL string) (string, error) {
 	return parsed.String(), nil
 }
 
-func requirePassedAudit(ctx context.Context, request InstallRequest, manifest Manifest) (AuditRun, error) {
+func requirePassedAudit(ctx context.Context, request InstallRequest, manifest Manifest) (AuditRun, SignedMetadata, error) {
 	baseURL := strs.FirstNonEmpty(request.ManifestBaseURL, BaseURL(request.Env))
-	index, err := fetchVerifiedAuditIndex(ctx, request, baseURL)
-	if err != nil {
-		return AuditRun{}, err
-	}
-	for _, run := range index.Runs {
-		if !auditRunMatchesManifest(run, manifest) {
-			continue
-		}
-		if !auditRunPassed(run) {
-			return AuditRun{}, fmt.Errorf("model audit has not passed for %s %s", manifest.ModelID, manifest.Version)
-		}
-		if strings.TrimSpace(run.RunURL) == "" {
-			return AuditRun{}, fmt.Errorf("model audit for %s %s has no run URL", manifest.ModelID, manifest.Version)
-		}
-		return run, nil
-	}
-	return AuditRun{}, fmt.Errorf("model has no passed audit for %s %s", manifest.ModelID, manifest.Version)
-}
-
-func fetchVerifiedAuditIndex(ctx context.Context, request InstallRequest, baseURL string) (AuditIndex, error) {
-	policy, err := newTrustPolicy(baseURL, request.Env)
-	if err != nil {
-		return AuditIndex{}, err
-	}
 	indexURL, err := auditIndexURL(baseURL)
 	if err != nil {
-		return AuditIndex{}, err
+		return AuditRun{}, SignedMetadata{}, err
+	}
+	metadata, err := fetchSignedIndex(ctx, request, baseURL, indexURL)
+	if err != nil {
+		return AuditRun{}, SignedMetadata{}, fmt.Errorf("verify audit index: %w", err)
+	}
+	run, err := passedAudit(metadata.Body, manifest)
+	return run, metadata, err
+}
+
+func passedAudit(body []byte, manifest Manifest) (AuditRun, error) {
+	var index AuditIndex
+	if err := json.Unmarshal(body, &index); err != nil {
+		return AuditRun{}, fmt.Errorf("decode audit index: %w", err)
+	}
+	if index.Schema != SchemaVersion {
+		return AuditRun{}, fmt.Errorf("unsupported audit index schema %d", index.Schema)
+	}
+	var matched *AuditRun
+	for i := range index.Runs {
+		run := &index.Runs[i]
+		if !auditRunMatchesManifest(*run, manifest) {
+			continue
+		}
+		if matched != nil {
+			return AuditRun{}, auditPolicyError{fmt.Errorf("model audit is ambiguous for %s %s", manifest.ModelID, manifest.Version)}
+		}
+		matched = run
+	}
+	if matched == nil {
+		return AuditRun{}, auditPolicyError{fmt.Errorf("model has no passed audit for %s %s", manifest.ModelID, manifest.Version)}
+	}
+	if !auditRunPassed(*matched) {
+		return AuditRun{}, auditPolicyError{fmt.Errorf("model audit has not passed for %s %s", manifest.ModelID, manifest.Version)}
+	}
+	if strings.TrimSpace(matched.RunURL) == "" {
+		return AuditRun{}, auditPolicyError{fmt.Errorf("model audit for %s %s has no run URL", manifest.ModelID, manifest.Version)}
+	}
+	return *matched, nil
+}
+
+func fetchSignedIndex(ctx context.Context, request InstallRequest, baseURL, indexURL string) (SignedMetadata, error) {
+	policy, err := newTrustPolicy(baseURL, request.Env)
+	if err != nil {
+		return SignedMetadata{}, err
 	}
 	body, err := downloadMetadata(ctx, request.HTTPClient, policy, indexURL)
 	if err != nil {
-		return AuditIndex{}, fmt.Errorf("download audit index: %w", err)
+		return SignedMetadata{}, err
 	}
 	sigBody, err := downloadMetadata(ctx, request.HTTPClient, policy, indexURL+".sig")
 	if err != nil {
-		if metadataNotFound(err) {
-			return AuditIndex{}, fmt.Errorf("audit index is not signed")
-		}
-		return AuditIndex{}, fmt.Errorf("download audit index signature: %w", err)
+		return SignedMetadata{}, fmt.Errorf("download required index attestation: %w", err)
 	}
 	trustRoot, err := fetchTrustRoot(ctx, request, policy, baseURL)
 	if err != nil {
-		return AuditIndex{}, err
+		return SignedMetadata{}, err
 	}
 	if err := verifyCanonicalJSONAttestation(ctx, body, "index.json", sigBody, trustRoot, request); err != nil {
-		return AuditIndex{}, fmt.Errorf("verify audit index attestation: %w", err)
+		return SignedMetadata{}, err
 	}
-	var index AuditIndex
-	if err := json.Unmarshal(body, &index); err != nil {
-		return AuditIndex{}, fmt.Errorf("decode audit index: %w", err)
-	}
-	if index.Schema != SchemaVersion {
-		return AuditIndex{}, fmt.Errorf("unsupported audit index schema %d", index.Schema)
-	}
-	return index, nil
+	return SignedMetadata{Body: body, Attestation: sigBody}, nil
 }
 
 func auditRunMatchesManifest(run AuditRun, manifest Manifest) bool {
 	if run.ModelID != manifest.ModelID || strings.TrimSpace(run.Version) == "" || strings.TrimSpace(manifest.Version) == "" || run.Version != manifest.Version {
 		return false
 	}
-	return auditRunDigestMatchesManifest(run, manifest)
-}
-
-func auditRunDigestMatchesManifest(run AuditRun, manifest Manifest) bool {
+	if !digestStringsEqual(run.ArtifactDigest, manifest.SHA256) {
+		return false
+	}
 	for _, pair := range [][2]string{
 		{run.ArtifactDigest, manifest.ArtifactDigest},
-		{run.ArtifactDigest, manifest.SHA256},
 		{run.BundleDigest, manifest.BundleDigest},
 		{run.ReleaseSignatureSubjectDigest, manifest.ReleaseSignatureSubjectDigest},
 	} {
-		if pair[0] != "" && pair[1] != "" && digestStringsEqual(pair[0], pair[1]) {
-			return true
-		}
-	}
-	return false
-}
-
-func auditRunPassed(run AuditRun) bool {
-	if run.Passed != nil {
-		return *run.Passed
-	}
-	for _, value := range []string{run.Status, run.Result, run.VerificationStatus} {
-		switch strings.ToLower(strings.TrimSpace(value)) {
-		case "green", "pass", "passed", "success", "succeeded", "ok":
-			return true
-		case "yellow", "red", "reviewed", "fail", "failed", "failure", "error", "errored", "refused", "warning":
+		if pair[1] != "" && !digestStringsEqual(pair[0], pair[1]) {
 			return false
 		}
 	}
-	return false
+	return true
+}
+
+func auditRunPassed(run AuditRun) bool {
+	if run.Passed != nil && !*run.Passed {
+		return false
+	}
+	passed := run.Passed != nil && *run.Passed
+	for _, value := range []string{run.Status, run.Result, run.VerificationStatus} {
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "green", "pass", "passed", "success", "succeeded", "ok":
+			passed = true
+		case "":
+		default:
+			return false
+		}
+	}
+	return passed
 }
 
 func auditEvidenceURL(request InstallRequest, run AuditRun, manifest Manifest) string {
@@ -663,76 +698,24 @@ func firstString(values ...string) string {
 }
 
 func verifyCanonicalJSONAttestation(ctx context.Context, body []byte, subjectName string, sigBody []byte, trustRoot attest.TrustRoot, request InstallRequest) error {
-	_, canonicalBody, err := canonicalJSONDigest(body)
+	canonicalBody, err := canonicalJSONBytes(body)
 	if err != nil {
 		return err
 	}
-	_, err = verifyAttestationBytes(ctx, canonicalBody, subjectName, sigBody, trustRoot, request)
-	return err
+	return verifyAttestationBytes(ctx, canonicalBody, subjectName, sigBody, trustRoot, request)
 }
 
-func verifyAdvisoryIndexSignature(body []byte, sigBody []byte, request InstallRequest) error {
-	var signature AdvisorySignature
-	if err := json.Unmarshal(sigBody, &signature); err != nil {
-		return fmt.Errorf("decode advisory index signature: %w", err)
-	}
-	if signature.Schema != SchemaVersion || signature.Algorithm != SignatureAlgorithm || signature.SignedPayload != "canonical-json-v1" {
-		return fmt.Errorf("unsupported advisory index signature metadata")
-	}
-	digest, canonicalBody, err := canonicalJSONDigest(body)
-	if err != nil {
-		return err
-	}
-	if !digestStringsEqual(signature.SubjectDigest, digest) {
-		return fmt.Errorf("advisory index signature subject digest mismatch")
-	}
-	keys, err := trustedKeys(request.Env)
-	if err != nil {
-		return err
-	}
-	for keyID, publicKey := range request.trustedKeys {
-		keys[keyID] = publicKey
-	}
-	publicKey, ok := keys[signature.KeyID]
-	if !ok {
-		return fmt.Errorf("advisory index signed by untrusted key %q", signature.KeyID)
-	}
-	if signature.PublicKey != "" {
-		declared, err := decodeBase64(signature.PublicKey)
-		if err != nil {
-			return fmt.Errorf("decode advisory index public key: %w", err)
-		}
-		if string(declared) != string(publicKey) {
-			return fmt.Errorf("advisory index signature public key does not match trusted key %q", signature.KeyID)
-		}
-	}
-	sig, err := decodeBase64(signature.Signature)
-	if err != nil {
-		return fmt.Errorf("decode advisory index signature: %w", err)
-	}
-	if !ed25519.Verify(publicKey, canonicalBody, sig) {
-		return fmt.Errorf("advisory index signature verification failed")
-	}
-	return nil
-}
-
-func canonicalJSONDigest(body []byte) (string, []byte, error) {
+func canonicalJSONBytes(body []byte) ([]byte, error) {
 	var value any
 	decoder := json.NewDecoder(strings.NewReader(string(body)))
 	decoder.UseNumber()
 	if err := decoder.Decode(&value); err != nil {
-		return "", nil, fmt.Errorf("decode advisory index for signature: %w", err)
+		return nil, fmt.Errorf("decode registry index for signature: %w", err)
 	}
-	canonicalBody, err := json.Marshal(value)
-	if err != nil {
-		return "", nil, err
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		return nil, fmt.Errorf("registry index must contain exactly one JSON value")
 	}
-	sum := sha256.Sum256(canonicalBody)
-	return "sha256:" + hex.EncodeToString(sum[:]), canonicalBody, nil
-}
-
-func metadataNotFound(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "HTTP 404")
+	return json.Marshal(value)
 }
 
 func pathJoinURL(base string, parts ...string) string {
@@ -752,6 +735,9 @@ func digestStringsEqual(left string, right string) bool {
 }
 
 func validateManifest(manifest Manifest, request InstallRequest) error {
+	if err := requireAirplaneFormat(manifest.Format); err != nil {
+		return err
+	}
 	if manifest.Schema != SchemaVersion {
 		return fmt.Errorf("unsupported model manifest schema %d", manifest.Schema)
 	}
@@ -780,6 +766,17 @@ func validateManifest(manifest Manifest, request InstallRequest) error {
 	return nil
 }
 
+func requireAirplaneFormat(format string) error {
+	switch format {
+	case "", "gguf":
+		return nil
+	case "safetensors":
+		return fmt.Errorf("safetensors models are cloud-only and cannot be installed for airplane mode; the signed manifest describes package metadata, not a GGUF or verified checkpoint bytes")
+	default:
+		return fmt.Errorf("unsupported model manifest format %q", format)
+	}
+}
+
 func downloadAndInstallArtifact(ctx context.Context, request InstallRequest, manifest verifiedManifest) error {
 	if err := os.MkdirAll(filepath.Dir(request.TargetPath), 0o700); err != nil {
 		return err
@@ -795,7 +792,62 @@ func downloadAndInstallArtifact(ctx context.Context, request InstallRequest, man
 	if err := downloadArtifact(ctx, request, manifest, policy); err != nil {
 		return err
 	}
+	return finalizeInstall(ctx, request, manifest)
+}
+
+func finalizeInstall(ctx context.Context, request InstallRequest, manifest verifiedManifest) error {
+	// Refresh advisory, audit, and trust state after expensive artifact work,
+	// then reverify retained evidence without hashing artifact bytes again.
+	warnings, advisoryIndex, err := advisoryWarnings(ctx, request, manifest.Manifest)
+	if err != nil {
+		return err
+	}
+	if err := requireWarningAllowance(warnings, request.AllowWarnings); err != nil {
+		return err
+	}
+	manifest.AdvisoryIndex = advisoryIndex
+	audit, auditIndex, err := requirePassedAudit(ctx, request, manifest.Manifest)
+	if err != nil {
+		return err
+	}
+	manifest.Audit = audit
+	manifest.AuditIndex = auditIndex
+	baseURL := strs.FirstNonEmpty(request.ManifestBaseURL, BaseURL(request.Env))
+	policy, err := newTrustPolicy(baseURL, request.Env)
+	if err != nil {
+		return err
+	}
+	root, err := fetchTrustRoot(ctx, request, policy, baseURL)
+	if err != nil {
+		return err
+	}
+	if err := verifyActivationEvidence(ctx, request, manifest, root); err != nil {
+		return err
+	}
+	manifest.TrustRootBody, err = attest.MarshalTrustRoot(root)
+	if err != nil {
+		return err
+	}
 	return writeReceipt(request.TargetPath, manifest)
+}
+
+func verifyActivationEvidence(ctx context.Context, request InstallRequest, manifest verifiedManifest, root attest.TrustRoot) error {
+	if err := verifyAttestationBytes(ctx, manifest.Body, "manifest.json", manifest.AttestationBody, root, request); err != nil {
+		return err
+	}
+	for _, metadata := range []SignedMetadata{manifest.AuditIndex, manifest.AdvisoryIndex} {
+		if err := verifyCanonicalJSONAttestation(ctx, metadata.Body, "index.json", metadata.Attestation, root, request); err != nil {
+			return err
+		}
+	}
+	if _, err := passedAudit(manifest.AuditIndex.Body, manifest.Manifest); err != nil {
+		return err
+	}
+	warnings, err := warningsForManifest(manifest.Manifest, manifest.AdvisoryIndex.Body)
+	if err != nil {
+		return err
+	}
+	return requireWarningAllowance(warnings, request.AllowWarnings)
 }
 
 func verifyExistingArtifact(request InstallRequest, manifest Manifest) (bool, error) {
@@ -886,27 +938,25 @@ func verifyArtifactDigest(size int64, digest []byte, manifest Manifest) error {
 
 func writeReceipt(targetPath string, manifest verifiedManifest) error {
 	receipt := Receipt{
-		Schema:      SchemaVersion,
-		ModelID:     manifest.Manifest.ModelID,
-		Backend:     manifest.Manifest.BackendModel,
-		Filename:    manifest.Manifest.Filename,
-		URL:         manifest.Manifest.URL,
-		Size:        manifest.Manifest.Size,
-		SHA256:      strings.ToLower(manifest.Manifest.SHA256),
-		Manifest:    encodeBase64(manifest.Body),
-		Attestation: json.RawMessage(manifest.AttestationBody),
-		TrustRoot:   encodeBase64(manifest.TrustRootBody),
-		Audit:       manifest.Audit,
-		InstalledAt: time.Now().UTC().Format(time.RFC3339),
+		Schema:        SchemaVersion,
+		ModelID:       manifest.Manifest.ModelID,
+		Backend:       manifest.Manifest.BackendModel,
+		Filename:      manifest.Manifest.Filename,
+		URL:           manifest.Manifest.URL,
+		Size:          manifest.Manifest.Size,
+		SHA256:        strings.ToLower(manifest.Manifest.SHA256),
+		Manifest:      encodeBase64(manifest.Body),
+		Attestation:   json.RawMessage(manifest.AttestationBody),
+		TrustRoot:     encodeBase64(manifest.TrustRootBody),
+		Audit:         manifest.Audit,
+		AuditIndex:    manifest.AuditIndex,
+		AdvisoryIndex: manifest.AdvisoryIndex,
+		InstalledAt:   time.Now().UTC().Format(time.RFC3339),
 	}
 	return config.WriteJSONAtomic(receiptPath(targetPath), receipt, 0o600)
 }
 
-func verifyInstalledReceipt(request InstallRequest, strict bool) (bool, error) {
-	return verifyInstalledReceiptForManifest(request, Manifest{}, strict)
-}
-
-func verifyInstalledReceiptForManifest(request InstallRequest, expected Manifest, strict bool) (bool, error) {
+func verifyInstalledReceipt(ctx context.Context, request InstallRequest) (bool, error) {
 	raw, err := os.ReadFile(receiptPath(request.TargetPath))
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -942,17 +992,18 @@ func verifyInstalledReceiptForManifest(request InstallRequest, expected Manifest
 	if err := validateTrustRootPinned(trustRoot, request); err != nil {
 		return false, nil
 	}
-	if _, err := verifyAttestationBytes(context.Background(), manifestBody, "manifest.json", receipt.Attestation, trustRoot, request); err != nil {
-		return false, nil
-	}
 	var manifest Manifest
 	if err := json.Unmarshal(manifestBody, &manifest); err != nil {
 		return false, nil
 	}
+	if err := validateManifest(manifest, request); err != nil {
+		return false, err
+	}
 	if manifest.ModelID != receipt.ModelID || manifest.BackendModel != receipt.Backend || manifest.Size != receipt.Size || !strings.EqualFold(manifest.SHA256, receipt.SHA256) {
 		return false, nil
 	}
-	if expected.ModelID != "" && !manifestMatches(manifest, expected) {
+	evidence := verifiedManifest{Manifest: manifest, Body: manifestBody, AttestationBody: receipt.Attestation, AuditIndex: receipt.AuditIndex, AdvisoryIndex: receipt.AdvisoryIndex}
+	if err := verifyActivationEvidence(ctx, request, evidence, trustRoot); err != nil {
 		return false, nil
 	}
 	if !auditRunMatchesManifest(receipt.Audit, manifest) || !auditRunPassed(receipt.Audit) || strings.TrimSpace(receipt.Audit.RunURL) == "" {
@@ -968,9 +1019,6 @@ func verifyInstalledReceiptForManifest(request InstallRequest, expected Manifest
 	if info.IsDir() || info.Size() != receipt.Size {
 		return false, nil
 	}
-	if !strict {
-		return true, nil
-	}
 	file, err := os.Open(request.TargetPath)
 	if err != nil {
 		return false, err
@@ -984,11 +1032,39 @@ func verifyInstalledReceiptForManifest(request InstallRequest, expected Manifest
 	if err := verifyArtifactDigest(written, hash.Sum(nil), manifest); err != nil {
 		return false, nil
 	}
+	if err := verifyActivationEvidence(ctx, request, evidence, trustRoot); err != nil {
+		return false, nil
+	}
 	return true, nil
 }
 
-func manifestMatches(got Manifest, want Manifest) bool {
-	return got.ModelID == want.ModelID && got.BackendModel == want.BackendModel && got.Size == want.Size && strings.EqualFold(got.SHA256, want.SHA256) && got.URL == want.URL
+func invalidateRefusedReceipt(request InstallRequest, manifest Manifest) error {
+	path := receiptPath(request.TargetPath)
+	body, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var receipt Receipt
+	if err := json.Unmarshal(body, &receipt); err != nil {
+		return nil // An unreadable receipt cannot authorize cached activation.
+	}
+	previousBody, err := decodeBase64(receipt.Manifest)
+	if err != nil {
+		return nil
+	}
+	var previous Manifest
+	if err := json.Unmarshal(previousBody, &previous); err != nil {
+		return nil
+	}
+	if receipt.ModelID != manifest.ModelID || previous.ModelID != manifest.ModelID || previous.Version != manifest.Version || !digestStringsEqual(previous.SHA256, manifest.SHA256) {
+		return nil
+	}
+	// Preserve artifact bytes and unrelated releases. Only the authorization
+	// receipt for the release just refused by authenticated policy is removed.
+	return config.RemoveIfExists(path)
 }
 
 func receiptPath(targetPath string) string {
