@@ -173,7 +173,7 @@ func TestJohnCLIEndToEndLoginAirplaneAndLocalRun(t *testing.T) {
 			if r.Header.Get("Authorization") != "Bearer john-access" {
 				t.Fatalf("missing auth header: %s", r.Header.Get("Authorization"))
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"name": "@yld/platform", "endpoint": "https://gateway.s46.dev", "region": "EU-OPO", "mode": "cloud", "workerHosts": []string{"worker-yld-01"}, "defaultModel": api.DefaultModel, "models": api.DefaultModelList()})
+			_ = json.NewEncoder(w).Encode(map[string]any{"name": "@yld/platform", "endpoint": "https://gateway.s46.dev", "region": "EU-OPO", "mode": "cloud", "workerHosts": []string{"worker-yld-01"}, "defaultModel": api.DefaultModel, "models": api.DefaultModelList(), "modelMetadata": map[string]api.ModelRuntime{api.DefaultModel: {ContextWindow: 262144, MaxTokens: 32768, Reasoning: true}}})
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.String())
 		}

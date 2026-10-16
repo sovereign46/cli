@@ -118,6 +118,13 @@ func (tc TeamConfig) Clone() TeamConfig {
 func cloneAPITeam(team api.Team) api.Team {
 	team.WorkerHosts = append([]string(nil), team.WorkerHosts...)
 	team.Models = append([]string(nil), team.Models...)
+	if team.ModelMetadata != nil {
+		metadata := make(map[string]api.ModelRuntime, len(team.ModelMetadata))
+		for id, runtime := range team.ModelMetadata {
+			metadata[id] = runtime
+		}
+		team.ModelMetadata = metadata
+	}
 	return team
 }
 
@@ -203,11 +210,12 @@ func TeamConfigFromAPI(team api.Team, harness string, model string, _ string) Te
 
 func (tc TeamConfig) API(name string) api.Team {
 	return api.Team{
-		Name:         name,
-		Endpoint:     tc.Endpoint,
-		Region:       tc.Region,
-		WorkerHosts:  tc.WorkerHosts,
-		DefaultModel: tc.DefaultModel,
-		Models:       tc.Models,
+		Name:          name,
+		Endpoint:      tc.Endpoint,
+		Region:        tc.Region,
+		WorkerHosts:   tc.WorkerHosts,
+		DefaultModel:  tc.DefaultModel,
+		Models:        tc.Models,
+		ModelMetadata: cloneAPITeam(tc.APISnapshot).ModelMetadata,
 	}
 }

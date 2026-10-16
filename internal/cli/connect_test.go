@@ -260,7 +260,7 @@ func TestApplyAtomicConfigAndHarnessRollsBackBoth(t *testing.T) {
 	if err := store.SaveConfig(before); err != nil {
 		t.Fatal(err)
 	}
-	// after: a team is configured (this is the change we'll try to land)
+	// after: a team is configured
 	after := config.DefaultConfig()
 	after.ActiveTeam = "@s46/engineering"
 	after.Teams["@s46/engineering"] = config.TeamConfig{Endpoint: "https://gateway.s46.dev", DefaultHarness: "failing"}

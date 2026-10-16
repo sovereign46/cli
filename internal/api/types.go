@@ -6,7 +6,7 @@ import (
 )
 
 const (
-	DefaultModel        = "s46/devstral-small-2-24b"
+	DefaultModel        = "s46/deepseek-v4-flash-0731"
 	DefaultTeam         = "@s46/engineering"
 	DefaultAccount      = "dscape@s46.dev"
 	DefaultGatewayURL   = "https://gateway.s46.dev"
@@ -97,13 +97,25 @@ type TeamOptions struct {
 	AccessToken  string
 }
 
+type ModelRuntime struct {
+	Engine                 string `json:"engine,omitempty"`
+	Version                string `json:"version,omitempty"`
+	ProfileSHA256          string `json:"profileSha256,omitempty"`
+	ContextWindow          int    `json:"contextWindow,omitempty"`
+	MaxTokens              int    `json:"maxTokens,omitempty"`
+	Reasoning              bool   `json:"reasoning"`
+	MinMemoryBytes         int64  `json:"minMemoryBytes,omitempty"`
+	RecommendedMemoryBytes int64  `json:"recommendedMemoryBytes,omitempty"`
+}
+
 type Team struct {
-	Name         string   `json:"name"`
-	Endpoint     string   `json:"endpoint"`
-	Region       string   `json:"region"`
-	WorkerHosts  []string `json:"workerHosts"`
-	DefaultModel string   `json:"defaultModel"`
-	Models       []string `json:"models"`
+	Name          string                  `json:"name"`
+	Endpoint      string                  `json:"endpoint"`
+	Region        string                  `json:"region"`
+	WorkerHosts   []string                `json:"workerHosts"`
+	DefaultModel  string                  `json:"defaultModel"`
+	Models        []string                `json:"models"`
+	ModelMetadata map[string]ModelRuntime `json:"modelMetadata"`
 }
 
 type Session struct {

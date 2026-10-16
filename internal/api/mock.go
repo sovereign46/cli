@@ -149,12 +149,13 @@ func (c *MockClient) Team(ctx context.Context, name string, opts TeamOptions) (T
 		model = DefaultModel
 	}
 	return Team{
-		Name:         team,
-		Endpoint:     endpoint,
-		Region:       region,
-		WorkerHosts:  append([]string(nil), fixtures.WorkerHosts...),
-		DefaultModel: model,
-		Models:       c.modelList(),
+		Name:          team,
+		Endpoint:      endpoint,
+		Region:        region,
+		WorkerHosts:   append([]string(nil), fixtures.WorkerHosts...),
+		DefaultModel:  model,
+		Models:        c.modelList(),
+		ModelMetadata: map[string]ModelRuntime{DefaultModel: {ContextWindow: 262144, MaxTokens: 32768, Reasoning: true}},
 	}, nil
 }
 

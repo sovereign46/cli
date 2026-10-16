@@ -15,9 +15,9 @@ func TestTeamsListShowsConnectedTeamsAndActiveTeam(t *testing.T) {
 	out := requireOK(t, run(t, env, "teams", "list"))
 	for _, want := range []string{
 		"[s46] connected teams:",
-		"ACTIVE  TEAM              REGION  HARNESS   MODEL                     ENDPOINT",
-		"        @s46/engineering  EU-OPO  standard  s46/devstral-small-2-24b  https://gateway.s46.dev",
-		"*       @s46/research     EU-OPO  standard  s46/devstral-small-2-24b  https://gateway.s46.dev",
+		"ACTIVE  TEAM              REGION  HARNESS   MODEL                       ENDPOINT",
+		"        @s46/engineering  EU-OPO  standard  s46/deepseek-v4-flash-0731  https://gateway.s46.dev",
+		"*       @s46/research     EU-OPO  standard  s46/devstral-small-2-24b    https://gateway.s46.dev",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("teams list missing %q:\n%s", want, out)
