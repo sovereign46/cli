@@ -6,6 +6,10 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Removed
+
+- Removed the unfinished `detach`, `resume`, and `session land` command surfaces.
+
 ## [0.2.5] - 2026-06-15
 
 ### Fixed

@@ -166,7 +166,7 @@ func inferredShareLines(session *sessioncmd.ListedSession) []string {
 		return nil
 	}
 	label := "latest session"
-	if session.Source == api.ResumeTargetLocal {
+	if session.Source == api.SessionSourceLocal {
 		label = "latest local session"
 	}
 	parts := []string{displaySessionID(session.ID)}
@@ -178,7 +178,7 @@ func inferredShareLines(session *sessioncmd.ListedSession) []string {
 	}
 	if task := compactSessionTask(session.Task, 48); task != "" {
 		parts = append(parts, task)
-	} else if session.Source != api.ResumeTargetLocal && session.Location != "" {
+	} else if session.Source != api.SessionSourceLocal && session.Location != "" {
 		parts = append(parts, session.Location)
 	}
 	return []string{fmt.Sprintf("[s46] sharing %s: %s", label, strings.Join(parts, " · "))}

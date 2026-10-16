@@ -97,22 +97,6 @@ Response:
 
 ## Sessions
 
-All session list/action endpoints are authenticated and scoped with `?team=@org/team`.
+Session listing is authenticated and scoped with `?team=@org/team`.
 
 - `GET /v1/sessions?team={team}`
-- `POST /v1/sessions/{sessionId}/detach?team={team}`
-- `POST /v1/sessions/{sessionId}/resume?team={team}`
-- `POST /v1/sessions/{sessionId}/attach?team={team}`
-- `POST /v1/sessions/{sessionId}/land?team={team}`
-
-Detach request:
-
-```json
-{"sessionId":"@dscape/auth-redirect-fix","harness":"claude-code","team":{"name":"@s46/engineering"}}
-```
-
-Attach response:
-
-```json
-{"sessionId":"@dscape/auth-redirect-fix","url":"https://api.s46.dev/v1/sessions/dscape%2Fauth-redirect-fix/stream?team=%40s46%2Fengineering","protocol":"sse"}
-```

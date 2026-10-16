@@ -525,7 +525,7 @@ func titleFor(id string, task string) string {
 
 func statusFor(state string) string {
 	switch strings.ToLower(strings.TrimSpace(state)) {
-	case "", "complete", "completed", "done", "landed", "finished":
+	case "", "complete", "completed", "done", "finished":
 		return "finished"
 	case "failed", "error", "canceled", "cancelled":
 		return strings.ToLower(strings.TrimSpace(state))

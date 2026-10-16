@@ -444,7 +444,7 @@ func TestAirplaneHelpShowsUnavailableCloudCommandsAndModeOff(t *testing.T) {
 		out := requireOK(t, run(t, env, args...))
 		for _, want := range []string{
 			"[s46✈] Airplane mode is on. Local coding commands use the local gateway/model.",
-			"[s46✈] Cloud-only commands are unavailable: login, devices, update, detach, resume, share uploads, session land.",
+			"[s46✈] Cloud-only commands are unavailable: login, devices, update, share uploads.",
 			"[s46✈] Turn airplane mode off with: s46 airplane mode off",
 		} {
 			if !strings.Contains(out, want) {
@@ -465,10 +465,7 @@ func TestAirplaneCloudCommandsFailFast(t *testing.T) {
 		"devices":           {"devices"},
 		"device revocation": {"devices", "delete", "dev-laptop"},
 		"update":            {"update"},
-		"detach":            {"detach", "@dscape/task"},
-		"resume":            {"resume", "@dscape/task"},
 		"share":             {"share", "@dscape/task"},
-		"session land":      {"session", "land", "@dscape/task"},
 	}
 	for feature, args := range commands {
 		result := run(t, env, args...)

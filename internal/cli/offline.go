@@ -65,26 +65,6 @@ func (c offlineSuggestionClient) Sessions(ctx context.Context, team api.Team, ac
 	return result, c.wrap(ctx, err)
 }
 
-func (c offlineSuggestionClient) Detach(ctx context.Context, req api.DetachRequest) (api.Session, error) {
-	result, err := c.delegate.Detach(ctx, req)
-	return result, c.wrap(ctx, err)
-}
-
-func (c offlineSuggestionClient) Resume(ctx context.Context, req api.ResumeRequest) (api.Session, error) {
-	result, err := c.delegate.Resume(ctx, req)
-	return result, c.wrap(ctx, err)
-}
-
-func (c offlineSuggestionClient) Attach(ctx context.Context, req api.AttachRequest) (api.AttachResult, error) {
-	result, err := c.delegate.Attach(ctx, req)
-	return result, c.wrap(ctx, err)
-}
-
-func (c offlineSuggestionClient) Land(ctx context.Context, req api.LandRequest) (api.LandResult, error) {
-	result, err := c.delegate.Land(ctx, req)
-	return result, c.wrap(ctx, err)
-}
-
 func (c offlineSuggestionClient) wrap(ctx context.Context, err error) error {
 	if err == nil {
 		return nil

@@ -246,8 +246,8 @@ func ApplyPlan(env map[string]string, plan Plan) (AppliedPlan, error) {
 		}
 		if err := config.WriteFileAtomic(file.Path, file.Content, mode); err != nil {
 			// Record the (failed) target so the caller can rollback the
-			// backup we just made even though the new content never
-			// landed.
+			// backup we just made even though the new content was never
+			// written.
 			applied.Files = append(applied.Files, AppliedFile{
 				Path:           file.DisplayPath,
 				DisplayPath:    file.DisplayPath,

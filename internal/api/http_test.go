@@ -59,23 +59,6 @@ func TestHTTPClientWireShape(t *testing.T) {
 				t.Fatalf("team query = %q", r.URL.Query().Get("team"))
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"sessions": []Session{{ID: "@dscape/auth-redirect-fix", State: "running", Location: "worker-04.eu-opo.s46.dev"}}})
-		case "/v1/sessions/@dscape/auth-redirect-fix/detach":
-			requireBearer(t, r)
-			requireTeamQuery(t, r, "@s46/engineering")
-			requireSessionActionBody(t, r, "@s46/engineering")
-			_ = json.NewEncoder(w).Encode(Session{ID: "@dscape/auth-redirect-fix", State: "running", Location: "worker-04.eu-opo.s46.dev"})
-		case "/v1/sessions/@dscape/auth-redirect-fix/resume":
-			requireBearer(t, r)
-			requireTeamQuery(t, r, "@s46/engineering")
-			_ = json.NewEncoder(w).Encode(Session{ID: "@dscape/auth-redirect-fix", State: "resumed", Location: "worker-04.eu-opo.s46.dev"})
-		case "/v1/sessions/@dscape/auth-redirect-fix/attach":
-			requireBearer(t, r)
-			requireTeamQuery(t, r, "@s46/engineering")
-			_ = json.NewEncoder(w).Encode(AttachResult{SessionID: "@dscape/auth-redirect-fix", URL: "wss://worker-04.eu-opo.s46.dev/session/auth-redirect-fix", Protocol: "websocket"})
-		case "/v1/sessions/@dscape/auth-redirect-fix/land":
-			requireBearer(t, r)
-			requireTeamQuery(t, r, "@s46/engineering")
-			_ = json.NewEncoder(w).Encode(LandResult{ID: "@dscape/auth-redirect-fix", RanOn: []string{"worker-04.eu-opo.s46.dev"}})
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
@@ -141,34 +124,6 @@ func TestHTTPClientWireShape(t *testing.T) {
 	if len(sessions) != 1 || sessions[0].Location != serverBase.Host {
 		t.Fatalf("sessions = %#v, want local host %q", sessions, serverBase.Host)
 	}
-	detach, err := client.Detach(context.Background(), DetachRequest{SessionID: "@dscape/auth-redirect-fix", Team: team, AccessToken: "access"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if detach.Location != serverBase.Host {
-		t.Fatalf("detach location = %q", detach.Location)
-	}
-	resume, err := client.Resume(context.Background(), ResumeRequest{SessionID: "@dscape/auth-redirect-fix", Team: team, AccessToken: "access"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resume.Location != serverBase.Host {
-		t.Fatalf("resume location = %q", resume.Location)
-	}
-	attach, err := client.Attach(context.Background(), AttachRequest{SessionID: "@dscape/auth-redirect-fix", Team: team, AccessToken: "access"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if attach.URL != "ws://"+serverBase.Host+"/session/auth-redirect-fix" {
-		t.Fatalf("attach URL = %q", attach.URL)
-	}
-	land, err := client.Land(context.Background(), LandRequest{SessionID: "@dscape/auth-redirect-fix", Team: team, AccessToken: "access"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(land.RanOn) != 1 || land.RanOn[0] != serverBase.Host {
-		t.Fatalf("land = %#v", land)
-	}
 }
 
 func requireBearer(t *testing.T, r *http.Request) {
@@ -182,21 +137,6 @@ func requireTeamQuery(t *testing.T, r *http.Request, team string) {
 	t.Helper()
 	if got := r.URL.Query().Get("team"); got != team {
 		t.Fatalf("team query = %q, want %q", got, team)
-	}
-}
-
-func requireSessionActionBody(t *testing.T, r *http.Request, team string) {
-	t.Helper()
-	var body map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := body["accessToken"]; ok {
-		t.Fatalf("access token leaked into request body: %#v", body)
-	}
-	teamBody, ok := body["team"].(map[string]any)
-	if !ok || teamBody["name"] != team {
-		t.Fatalf("request body team = %#v, want %q", body["team"], team)
 	}
 }
 
