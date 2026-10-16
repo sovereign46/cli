@@ -6,7 +6,7 @@ This repository implements the client-side command surface described on sovereig
 
 ## Development
 
-Requires Go 1.25+.
+Requires Go 1.26.9+.
 
 ```sh
 go run ./cmd/s46 --help
