@@ -1,6 +1,6 @@
 # s46 API contract
 
-This is the server contract exercised by `s46-cli/internal/api`.
+This is the current source contract exercised by `s46-cli/internal/api`, not a statement of deployed or stable-release readiness. See [candidate testing](testing-candidate.md) for qualification prerequisites.
 
 ## Conventions
 
@@ -78,9 +78,13 @@ Response:
 
 Path-escape the team id: `@s46/engineering` becomes `%40s46%2Fengineering`.
 
-Optional query parameters: `endpoint`, `region`, `defaultModel`.
+Optional query parameters sent by the CLI: `endpoint`, `region`, `defaultModel`. These override settings in this response only; they do not persist team configuration or grant model access. In particular, requesting `defaultModel` does not add it to `models`.
 
-Response:
+For cloud teams, `models` is the authoritative list of currently servable catalog entries allowed by team policy. `modelMetadata` is keyed by those exact public model IDs. Do not invent fallback models or infer runtime limits from model names. `defaultModel` is the configured/requested selection, not proof of authorization; it can be absent from `models`. Cloud `connect` refuses a selected model absent from that list before changing configuration; choose an allowed `--model` or ask an administrator to enable it. Gateway requests still require model authorization.
+
+Pi requires metadata for every listed cloud model: positive `contextWindow` and `maxTokens`, with `maxTokens <= contextWindow`. `reasoning` controls reasoning support; `engine` and `version` identify the runtime. Optional metadata also includes `profileSha256`, `minMemoryBytes`, and `recommendedMemoryBytes`.
+
+Illustrative response (not evidence that this model is deployed or authorized for your team):
 
 ```json
 {
@@ -90,10 +94,21 @@ Response:
   "endpoint": "https://gateway.s46.dev",
   "region": "EU-OPO",
   "workerHosts": [],
-  "defaultModel": "s46/devstral-small-2-24b",
-  "models": ["s46/devstral-small-2-24b"]
+  "defaultModel": "s46/deepseek-v4-flash-0731",
+  "models": ["s46/deepseek-v4-flash-0731"],
+  "modelMetadata": {
+    "s46/deepseek-v4-flash-0731": {
+      "engine": "vllm",
+      "version": "0.31.0",
+      "contextWindow": 262144,
+      "maxTokens": 32768,
+      "reasoning": true
+    }
+  }
 }
 ```
+
+The exact Pi thinking-level mapping and separate Devstral airplane behavior are described in the [candidate request contract](testing-candidate.md#pi-request-contract).
 
 ## Sessions
 

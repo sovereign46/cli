@@ -8,7 +8,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
-- Changed cloud model selection and Pi runtime limits to use the authorized team catalog instead of client-side defaults.
+- Changed cloud model selection and Pi runtime limits to use the authorized team catalog instead of client-side defaults; `connect` refuses unavailable selections before changing configuration, without silently switching models.
 - Changed Pi thinking `off` to send an explicit disable value for DeepSeek V4 Flash-0731 on vLLM 0.31.0, without changing other models or airplane mode.
 
 ### Fixed
@@ -17,7 +17,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Security
 
-- **Breaking:** Model installation and cached verification now require signed advisory evidence and current activation checks; old receipts must refresh their verification evidence.
+- **Breaking:** Model installation and cached verification require an independently approved complete policy bundled with the CLI, signed advisory evidence, and current activation checks. No production policy is approved yet, so both paths fail closed; registry and receipt roots cannot authorize activation.
 - Recheck signed audits and advisories after artifact verification, and invalidate matching cached receipts after an authenticated policy refusal.
 - Reject native safetensors packages before downloading them through the GGUF-only airplane installer.
 
