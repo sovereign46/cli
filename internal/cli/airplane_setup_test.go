@@ -215,8 +215,8 @@ func TestAirplaneSetupShowsManualModelInstructionsWhenDownloadIsSkipped(t *testi
 	for _, want := range []string{
 		"[s46] Model download skipped.",
 		"[s46] Download metadata: https://models.s46.dev/models/v1/s46/devstral-small-2-24b/manifest.json",
-		"[s46] Automatic setup verifies the s46-attest manifest attestation, trust root, signed passed audit, advisory index, and model checksum before writing or trusting:",
-		"[s46] Audit evidence and trust metadata: https://models.s46.dev/audit/v1/ and https://models.s46.dev/trust/v1/root.json",
+		"[s46] Automatic setup requires independent bundled policy and verifies the s46-attest manifest attestation, signed passed audit, advisory index, and model checksum before writing or trusting:",
+		"[s46] Audit evidence: https://models.s46.dev/audit/v1/; registry and receipt roots cannot replace the required bundled policy.",
 		"[s46] Or set S46_LOCAL_MODEL_PATH=/path/to/Devstral-Small-2-24B-Instruct-2512-Q4_K_M.gguf",
 	} {
 		if !strings.Contains(out, want) {

@@ -205,11 +205,10 @@ func TestCachedReceiptRequiresCurrentAuthenticatedEvidence(t *testing.T) {
 			if err := json.Unmarshal(original, &receipt); err != nil {
 				t.Fatal(err)
 			}
-			root, err := decodeBase64(receipt.TrustRoot)
-			if err != nil {
-				t.Fatal(err)
-			}
-			receipt.TrustRoot = encodeBase64(activationIncidentRoot(t, root, failure, time.Now().UTC()))
+			request := request
+			request.trustedPolicy = activationIncidentRoot(t, fixture.trustRootJSON, failure, time.Now().UTC())
+			// An old receipt must not override current independent revocations.
+			receipt.TrustRoot = encodeBase64(fixture.trustRootJSON)
 			switch failure {
 			case "missing audit":
 				receipt.AuditIndex = SignedMetadata{}
@@ -245,7 +244,9 @@ func TestCachedReceiptRequiresCurrentAuthenticatedEvidence(t *testing.T) {
 				}
 			}
 			writeActivationReceipt(t, request.TargetPath, receipt)
-			if ok, err := VerifyInstalled(context.Background(), request); err != nil || ok {
+			ok, err := VerifyInstalled(context.Background(), request)
+			policyIncident := failure == "revoked identity" || failure == "compromised transparency" || failure == "expired root"
+			if ok || (!policyIncident && err != nil) {
 				t.Fatalf("invalid cached activation should return false: ok=%v err=%v", ok, err)
 			}
 		})
@@ -301,7 +302,7 @@ func TestInstallRefreshesReceiptWithoutRedownloading(t *testing.T) {
 
 func TestInstallRechecksActivationAfterArtifactWork(t *testing.T) {
 	for _, existing := range []bool{false, true} {
-		for _, failure := range []string{"expired witness", "revoked identity"} {
+		for _, failure := range []string{"expired witness", "revoked identity", "expired root"} {
 			name := "download/" + failure
 			if existing {
 				name = "checksum/" + failure
@@ -316,6 +317,11 @@ func TestInstallRechecksActivationAfterArtifactWork(t *testing.T) {
 				request := activationRequest(t, fixture, server.URL)
 				now := time.Now().UTC()
 				request.now = func() time.Time { return now }
+				if failure != "expired witness" {
+					// Independent policy expires or a scheduled revocation becomes
+					// effective during artifact work, even if the origin omits it.
+					request.trustedPolicy = activationIncidentRoot(t, fixture.trustRootJSON, failure, now.Add(2*time.Hour))
+				}
 				completed := 0
 				request.Progress = func(progress InstallProgress) {
 					if !progress.Done {
@@ -325,7 +331,7 @@ func TestInstallRechecksActivationAfterArtifactWork(t *testing.T) {
 					if failure == "expired witness" {
 						now = now.Add(48 * time.Hour)
 					} else {
-						overrides["/trust/v1/root.json"] = activationIncidentRoot(t, fixture.trustRootJSON, failure, now)
+						now = now.Add(2 * time.Hour)
 					}
 				}
 				if existing {
@@ -376,7 +382,7 @@ func activationRequest(t *testing.T, fixture *modelFixture, baseURL string) Inst
 	t.Helper()
 	env := fixture.env(baseURL)
 	env["S46_MODELS_DOWNLOAD_PARALLELISM"] = "0"
-	return InstallRequest{Env: env, ModelID: fixture.manifest.ModelID, BackendModel: fixture.manifest.BackendModel, ManifestBaseURL: baseURL + "/models/v1", TargetPath: filepath.Join(t.TempDir(), "model.gguf"), trustedKeys: fixture.trustedKeys()}
+	return InstallRequest{Env: env, ModelID: fixture.manifest.ModelID, BackendModel: fixture.manifest.BackendModel, ManifestBaseURL: baseURL + "/models/v1", TargetPath: filepath.Join(t.TempDir(), "model.gguf"), trustedKeys: fixture.trustedKeys(), trustedPolicy: fixture.trustRootJSON}
 }
 
 func activationIncidentRoot(t *testing.T, body []byte, incident string, now time.Time) []byte {

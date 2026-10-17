@@ -36,9 +36,9 @@ const (
 )
 
 // InstallRequest configures a model install or verification. Production
-// callers rely on built-in trusted keys. Cross-package tests in non-release
-// builds can inject ephemeral signing keys through S46_MODELS_KEY_ID and
-// S46_MODELS_PUBLIC_KEY; release builds intentionally ignore those overrides.
+// callers rely on the independently approved bundled complete policy and signer
+// pins. Non-release builds also support public fixture policy/key overrides;
+// release builds intentionally ignore those environment overrides.
 type InstallRequest struct {
 	Env             map[string]string
 	ModelID         string
@@ -50,6 +50,9 @@ type InstallRequest struct {
 	AllowWarnings   bool
 	OnResolve       func(InstallResolution)
 	trustedKeys     map[string]ed25519.PublicKey
+	trustedPolicy   []byte
+	activationRoot  attest.TrustRoot
+	activationTime  func() (time.Time, error)
 	now             func() time.Time
 }
 
@@ -107,7 +110,6 @@ type verifiedManifest struct {
 	Manifest        Manifest
 	Body            []byte
 	AttestationBody []byte
-	TrustRootBody   []byte
 	Audit           AuditRun
 	AuditIndex      SignedMetadata
 	AdvisoryIndex   SignedMetadata
@@ -115,6 +117,10 @@ type verifiedManifest struct {
 
 func Install(ctx context.Context, request InstallRequest) (resultErr error) {
 	if err := validateModelRequest(request); err != nil {
+		return err
+	}
+	request, err := prepareActivation(request)
+	if err != nil {
 		return err
 	}
 	manifest, err := fetchVerifiedManifest(ctx, request)
@@ -168,6 +174,10 @@ func Install(ctx context.Context, request InstallRequest) (resultErr error) {
 
 func VerifyInstalled(ctx context.Context, request InstallRequest) (bool, error) {
 	if err := validateInstallRequest(request); err != nil {
+		return false, err
+	}
+	request, err := prepareActivation(request)
+	if err != nil {
 		return false, err
 	}
 	return verifyInstalledReceipt(ctx, request)
@@ -257,11 +267,7 @@ func fetchVerifiedManifest(ctx context.Context, request InstallRequest) (verifie
 	if err != nil {
 		return verifiedManifest{}, fmt.Errorf("download model manifest attestation: %w", err)
 	}
-	trustRoot, err := fetchTrustRoot(ctx, request, policy, baseURL)
-	if err != nil {
-		return verifiedManifest{}, err
-	}
-	if err := verifyAttestationBytes(ctx, body, filepath.Base(manifestURL), sigBody, trustRoot, request); err != nil {
+	if err := verifyAttestationBytes(ctx, body, filepath.Base(manifestURL), sigBody, request); err != nil {
 		return verifiedManifest{}, fmt.Errorf("verify model manifest attestation: %w", err)
 	}
 	var manifest Manifest
@@ -328,41 +334,7 @@ func readMetadataSnippet(body io.Reader) (string, error) {
 	return strings.TrimSpace(string(raw)), nil
 }
 
-func fetchTrustRoot(ctx context.Context, request InstallRequest, policy trustPolicy, baseURL string) (attest.TrustRoot, error) {
-	rootURL, err := trustRootURL(baseURL)
-	if err != nil {
-		return attest.TrustRoot{}, err
-	}
-	body, err := downloadMetadata(ctx, request.HTTPClient, policy, rootURL)
-	if err != nil {
-		return attest.TrustRoot{}, fmt.Errorf("download trust root: %w", err)
-	}
-	root, err := attest.ParseTrustRoot(body)
-	if err != nil {
-		return attest.TrustRoot{}, fmt.Errorf("decode trust root: %w", err)
-	}
-	if err := validateTrustRootPinned(root, request); err != nil {
-		return attest.TrustRoot{}, err
-	}
-	return root, nil
-}
-
-func trustRootURL(baseURL string) (string, error) {
-	parsed, err := url.Parse(strings.TrimSpace(baseURL))
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return "", fmt.Errorf("invalid model registry URL %q", baseURL)
-	}
-	basePath := strings.TrimRight(parsed.Path, "/")
-	if strings.HasSuffix(basePath, "/models/v1") {
-		basePath = strings.TrimSuffix(basePath, "/models/v1")
-	}
-	parsed.Path = pathJoinURL(basePath, "trust", "v1", "root.json")
-	parsed.RawQuery = ""
-	parsed.Fragment = ""
-	return parsed.String(), nil
-}
-
-func verifyAttestationBytes(ctx context.Context, body []byte, subjectName string, bundleBody []byte, trustRoot attest.TrustRoot, request InstallRequest) error {
+func verifyAttestationBytes(ctx context.Context, body []byte, subjectName string, bundleBody []byte, request InstallRequest) error {
 	bundle, err := attest.ParseBundle(bundleBody)
 	if err != nil {
 		return err
@@ -375,22 +347,18 @@ func verifyAttestationBytes(ctx context.Context, body []byte, subjectName string
 		return fmt.Errorf("model attestation requires exactly one pinned signer")
 	}
 	identity := modelSigningIdentity(bundle.Envelope.Signatures[0].KeyID)
-	now := request.activationTime()
-	if err := validateSigningKeyActivation(trustRoot, identity.KeyID, request, now); err != nil {
+	now, err := request.activationTime()
+	if err != nil {
 		return err
 	}
-	result, err := attest.Verify(ctx, attest.VerifyRequest{Bundle: bundle, Subjects: []attest.Subject{subject}, TrustRoot: trustRoot, ExpectedIdentity: identity, ExpectedPredicateKind: attest.PredicateKindRelease, Mode: attest.ModeProduction, Strict: true, MaxWitnessAge: attest.DefaultWitnessMaxAge, Now: now})
+	if err := validateSigningKeyActivation(request.activationRoot, identity.KeyID, request, now); err != nil {
+		return err
+	}
+	result, err := attest.Verify(ctx, attest.VerifyRequest{Bundle: bundle, Subjects: []attest.Subject{subject}, TrustRoot: request.activationRoot, ExpectedIdentity: identity, ExpectedPredicateKind: attest.PredicateKindRelease, Mode: attest.ModeProduction, Strict: true, MaxWitnessAge: attest.DefaultWitnessMaxAge, Now: now})
 	if err != nil {
 		return err
 	}
 	return attest.ValidateActivationResult(result, now)
-}
-
-func (r InstallRequest) activationTime() time.Time {
-	if r.now != nil {
-		return r.now().UTC()
-	}
-	return time.Now().UTC()
 }
 
 func modelSigningIdentity(keyID string) attest.IdentityPolicy {
@@ -398,7 +366,10 @@ func modelSigningIdentity(keyID string) attest.IdentityPolicy {
 }
 
 func validateTrustRootPinned(root attest.TrustRoot, request InstallRequest) error {
-	now := request.activationTime()
+	now, err := request.activationTime()
+	if err != nil {
+		return err
+	}
 	for _, key := range root.SigningKeys {
 		if err := validateSigningKeyActivation(root, key.KeyID, request, now); err == nil {
 			return nil
@@ -408,18 +379,11 @@ func validateTrustRootPinned(root attest.TrustRoot, request InstallRequest) erro
 }
 
 func validateSigningKeyActivation(root attest.TrustRoot, keyID string, request InstallRequest, now time.Time) error {
-	keys, err := trustedKeys(request.Env)
-	if err != nil {
-		return err
-	}
-	for id, publicKey := range request.trustedKeys {
-		keys[id] = publicKey
-	}
-	pinned, ok := keys[keyID]
+	pinned, ok := request.trustedKeys[keyID]
 	if !ok {
 		return fmt.Errorf("attestation signed by unpinned key %q", keyID)
 	}
-	// This pins the release signer, not the provenance of the full root policy.
+	// The complete root is independently loaded before any evidence is read.
 	return attest.ValidateActivationTrust(root, modelSigningIdentity(keyID), encodeBase64(pinned), now)
 }
 
@@ -559,11 +523,7 @@ func fetchSignedIndex(ctx context.Context, request InstallRequest, baseURL, inde
 	if err != nil {
 		return SignedMetadata{}, fmt.Errorf("download required index attestation: %w", err)
 	}
-	trustRoot, err := fetchTrustRoot(ctx, request, policy, baseURL)
-	if err != nil {
-		return SignedMetadata{}, err
-	}
-	if err := verifyCanonicalJSONAttestation(ctx, body, "index.json", sigBody, trustRoot, request); err != nil {
+	if err := verifyCanonicalJSONAttestation(ctx, body, "index.json", sigBody, request); err != nil {
 		return SignedMetadata{}, err
 	}
 	return SignedMetadata{Body: body, Attestation: sigBody}, nil
@@ -697,12 +657,12 @@ func firstString(values ...string) string {
 	return ""
 }
 
-func verifyCanonicalJSONAttestation(ctx context.Context, body []byte, subjectName string, sigBody []byte, trustRoot attest.TrustRoot, request InstallRequest) error {
+func verifyCanonicalJSONAttestation(ctx context.Context, body []byte, subjectName string, sigBody []byte, request InstallRequest) error {
 	canonicalBody, err := canonicalJSONBytes(body)
 	if err != nil {
 		return err
 	}
-	return verifyAttestationBytes(ctx, canonicalBody, subjectName, sigBody, trustRoot, request)
+	return verifyAttestationBytes(ctx, canonicalBody, subjectName, sigBody, request)
 }
 
 func canonicalJSONBytes(body []byte) ([]byte, error) {
@@ -796,8 +756,9 @@ func downloadAndInstallArtifact(ctx context.Context, request InstallRequest, man
 }
 
 func finalizeInstall(ctx context.Context, request InstallRequest, manifest verifiedManifest) error {
-	// Refresh advisory, audit, and trust state after expensive artifact work,
-	// then reverify retained evidence without hashing artifact bytes again.
+	// Refresh advisory and audit evidence after expensive artifact work, then
+	// recheck current trust and freshness against the invocation's bundled policy
+	// without hashing artifact bytes again.
 	warnings, advisoryIndex, err := advisoryWarnings(ctx, request, manifest.Manifest)
 	if err != nil {
 		return err
@@ -812,31 +773,18 @@ func finalizeInstall(ctx context.Context, request InstallRequest, manifest verif
 	}
 	manifest.Audit = audit
 	manifest.AuditIndex = auditIndex
-	baseURL := strs.FirstNonEmpty(request.ManifestBaseURL, BaseURL(request.Env))
-	policy, err := newTrustPolicy(baseURL, request.Env)
-	if err != nil {
-		return err
-	}
-	root, err := fetchTrustRoot(ctx, request, policy, baseURL)
-	if err != nil {
-		return err
-	}
-	if err := verifyActivationEvidence(ctx, request, manifest, root); err != nil {
-		return err
-	}
-	manifest.TrustRootBody, err = attest.MarshalTrustRoot(root)
-	if err != nil {
+	if err := verifyActivationEvidence(ctx, request, manifest); err != nil {
 		return err
 	}
 	return writeReceipt(request.TargetPath, manifest)
 }
 
-func verifyActivationEvidence(ctx context.Context, request InstallRequest, manifest verifiedManifest, root attest.TrustRoot) error {
-	if err := verifyAttestationBytes(ctx, manifest.Body, "manifest.json", manifest.AttestationBody, root, request); err != nil {
+func verifyActivationEvidence(ctx context.Context, request InstallRequest, manifest verifiedManifest) error {
+	if err := verifyAttestationBytes(ctx, manifest.Body, "manifest.json", manifest.AttestationBody, request); err != nil {
 		return err
 	}
 	for _, metadata := range []SignedMetadata{manifest.AuditIndex, manifest.AdvisoryIndex} {
-		if err := verifyCanonicalJSONAttestation(ctx, metadata.Body, "index.json", metadata.Attestation, root, request); err != nil {
+		if err := verifyCanonicalJSONAttestation(ctx, metadata.Body, "index.json", metadata.Attestation, request); err != nil {
 			return err
 		}
 	}
@@ -947,7 +895,6 @@ func writeReceipt(targetPath string, manifest verifiedManifest) error {
 		SHA256:        strings.ToLower(manifest.Manifest.SHA256),
 		Manifest:      encodeBase64(manifest.Body),
 		Attestation:   json.RawMessage(manifest.AttestationBody),
-		TrustRoot:     encodeBase64(manifest.TrustRootBody),
 		Audit:         manifest.Audit,
 		AuditIndex:    manifest.AuditIndex,
 		AdvisoryIndex: manifest.AdvisoryIndex,
@@ -978,18 +925,8 @@ func verifyInstalledReceipt(ctx context.Context, request InstallRequest) (bool, 
 	if err != nil {
 		return false, nil
 	}
-	if len(receipt.Attestation) == 0 || strings.TrimSpace(receipt.TrustRoot) == "" {
-		return false, nil
-	}
-	trustRootBody, err := decodeBase64(receipt.TrustRoot)
-	if err != nil {
-		return false, nil
-	}
-	trustRoot, err := attest.ParseTrustRoot(trustRootBody)
-	if err != nil {
-		return false, nil
-	}
-	if err := validateTrustRootPinned(trustRoot, request); err != nil {
+	// Receipt.TrustRoot is untrusted historical data, never activation authority.
+	if len(receipt.Attestation) == 0 {
 		return false, nil
 	}
 	var manifest Manifest
@@ -1003,7 +940,7 @@ func verifyInstalledReceipt(ctx context.Context, request InstallRequest) (bool, 
 		return false, nil
 	}
 	evidence := verifiedManifest{Manifest: manifest, Body: manifestBody, AttestationBody: receipt.Attestation, AuditIndex: receipt.AuditIndex, AdvisoryIndex: receipt.AdvisoryIndex}
-	if err := verifyActivationEvidence(ctx, request, evidence, trustRoot); err != nil {
+	if err := verifyActivationEvidence(ctx, request, evidence); err != nil {
 		return false, nil
 	}
 	if !auditRunMatchesManifest(receipt.Audit, manifest) || !auditRunPassed(receipt.Audit) || strings.TrimSpace(receipt.Audit.RunURL) == "" {
@@ -1032,7 +969,7 @@ func verifyInstalledReceipt(ctx context.Context, request InstallRequest) (bool, 
 	if err := verifyArtifactDigest(written, hash.Sum(nil), manifest); err != nil {
 		return false, nil
 	}
-	if err := verifyActivationEvidence(ctx, request, evidence, trustRoot); err != nil {
+	if err := verifyActivationEvidence(ctx, request, evidence); err != nil {
 		return false, nil
 	}
 	return true, nil

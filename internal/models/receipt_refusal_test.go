@@ -162,7 +162,7 @@ func TestSignedManifestYankInvalidatesBeforeOtherMetadataFetches(t *testing.T) {
 
 func TestUnverifiedOnlineFailuresPreserveExistingReceipt(t *testing.T) {
 	for _, phase := range []string{"initial", "after checksum"} {
-		for _, failure := range []string{"offline", "missing advisory signature", "bad advisory signature", "unsigned advisory change", "invalid origin root"} {
+		for _, failure := range []string{"offline", "missing advisory signature", "bad advisory signature", "unsigned advisory change"} {
 			t.Run(phase+"/"+failure, func(t *testing.T) {
 				overrides := map[string][]byte{}
 				fixture, server, request := installedReceiptFixture(t, overrides)
@@ -181,8 +181,6 @@ func TestUnverifiedOnlineFailuresPreserveExistingReceipt(t *testing.T) {
 					case "unsigned advisory change":
 						metadata := signedAdvisoryMetadata(t, fixture, applicableAdvisoryIndex(fixture.manifest, "yank"))
 						overrides["/advisories/v1/index.json"] = metadata.Body
-					case "invalid origin root":
-						overrides["/trust/v1/root.json"] = []byte(`{}`)
 					}
 				}
 				if phase == "initial" {

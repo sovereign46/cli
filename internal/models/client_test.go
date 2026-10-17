@@ -61,7 +61,7 @@ func TestInstallDownloadsSignedModelAndWritesReceipt(t *testing.T) {
 
 	target := filepath.Join(t.TempDir(), "model.gguf")
 	env := fixture.env(server.URL)
-	if err := Install(context.Background(), InstallRequest{Env: env, ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, BackendModel: fixture.manifest.BackendModel, TargetPath: target, HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys()}); err != nil {
+	if err := Install(context.Background(), InstallRequest{Env: env, ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, BackendModel: fixture.manifest.BackendModel, TargetPath: target, HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys(), trustedPolicy: fixture.trustRootJSON}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(target)
@@ -74,7 +74,7 @@ func TestInstallDownloadsSignedModelAndWritesReceipt(t *testing.T) {
 	if _, err := os.Stat(receiptPath(target)); err != nil {
 		t.Fatal(err)
 	}
-	ok, err := VerifyInstalled(context.Background(), InstallRequest{Env: env, ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, BackendModel: fixture.manifest.BackendModel, TargetPath: target, trustedKeys: fixture.trustedKeys()})
+	ok, err := VerifyInstalled(context.Background(), InstallRequest{Env: env, ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, BackendModel: fixture.manifest.BackendModel, TargetPath: target, trustedKeys: fixture.trustedKeys(), trustedPolicy: fixture.trustRootJSON})
 	if err != nil || !ok {
 		t.Fatalf("VerifyInstalled ok=%v err=%v", ok, err)
 	}
@@ -97,6 +97,7 @@ func TestInstallReportsDownloadProgress(t *testing.T) {
 		TargetPath:      target,
 		HTTPClient:      server.Client(),
 		trustedKeys:     fixture.trustedKeys(),
+		trustedPolicy:   fixture.trustRootJSON,
 		Progress: func(event InstallProgress) {
 			events = append(events, event)
 		},
@@ -149,7 +150,7 @@ func TestInstallDownloadsArtifactWithParallelRanges(t *testing.T) {
 	env := fixture.env(server.URL)
 	env["S46_MODELS_DOWNLOAD_PARALLELISM"] = "4"
 	env["S46_MODELS_DOWNLOAD_CHUNK_BYTES"] = fmt.Sprint(minArtifactDownloadChunkSize)
-	if err := Install(context.Background(), InstallRequest{Env: env, ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, BackendModel: fixture.manifest.BackendModel, TargetPath: target, HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys()}); err != nil {
+	if err := Install(context.Background(), InstallRequest{Env: env, ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, BackendModel: fixture.manifest.BackendModel, TargetPath: target, HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys(), trustedPolicy: fixture.trustRootJSON}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(target)
@@ -186,7 +187,7 @@ func TestInstallRangeDownloadsUseHTTP11(t *testing.T) {
 	env := fixture.env(server.URL)
 	env["S46_MODELS_DOWNLOAD_PARALLELISM"] = "2"
 	env["S46_MODELS_DOWNLOAD_CHUNK_BYTES"] = fmt.Sprint(minArtifactDownloadChunkSize)
-	if err := Install(context.Background(), InstallRequest{Env: env, ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, BackendModel: fixture.manifest.BackendModel, TargetPath: target, HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys()}); err != nil {
+	if err := Install(context.Background(), InstallRequest{Env: env, ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, BackendModel: fixture.manifest.BackendModel, TargetPath: target, HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys(), trustedPolicy: fixture.trustRootJSON}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -235,7 +236,7 @@ func TestInstallResumesCompletedRangeChunks(t *testing.T) {
 	env := fixture.env(server.URL)
 	env["S46_MODELS_DOWNLOAD_PARALLELISM"] = "3"
 	env["S46_MODELS_DOWNLOAD_CHUNK_BYTES"] = fmt.Sprint(chunkSize)
-	if err := Install(context.Background(), InstallRequest{Env: env, ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, BackendModel: fixture.manifest.BackendModel, TargetPath: target, HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys()}); err != nil {
+	if err := Install(context.Background(), InstallRequest{Env: env, ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, BackendModel: fixture.manifest.BackendModel, TargetPath: target, HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys(), trustedPolicy: fixture.trustRootJSON}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(target)
@@ -268,7 +269,7 @@ func TestInstallRejectsBadSignature(t *testing.T) {
 	fixture.sign(t)
 	fixture.body = []byte(strings.Replace(string(fixture.body), "test-backend", "tampered-backend", 1))
 
-	err := Install(context.Background(), InstallRequest{Env: fixture.env(server.URL), ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, TargetPath: filepath.Join(t.TempDir(), "model.gguf"), HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys()})
+	err := Install(context.Background(), InstallRequest{Env: fixture.env(server.URL), ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, TargetPath: filepath.Join(t.TempDir(), "model.gguf"), HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys(), trustedPolicy: fixture.trustRootJSON})
 	if err == nil || !strings.Contains(err.Error(), "attestation") {
 		t.Fatalf("expected attestation failure, got %v", err)
 	}
@@ -281,7 +282,7 @@ func TestInstallRejectsUntrustedArtifactHost(t *testing.T) {
 	fixture.manifest.URL = "https://evil.example/model.gguf"
 	fixture.sign(t)
 
-	err := Install(context.Background(), InstallRequest{Env: fixture.env(server.URL), ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, TargetPath: filepath.Join(t.TempDir(), "model.gguf"), HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys()})
+	err := Install(context.Background(), InstallRequest{Env: fixture.env(server.URL), ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, TargetPath: filepath.Join(t.TempDir(), "model.gguf"), HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys(), trustedPolicy: fixture.trustRootJSON})
 	if err == nil || !strings.Contains(err.Error(), "untrusted host") {
 		t.Fatalf("expected untrusted host failure, got %v", err)
 	}
@@ -298,7 +299,7 @@ func TestInstallRejectsModelWithoutPassedAudit(t *testing.T) {
 	fixture.manifest.URL = server.URL + "/artifacts/model.gguf"
 	fixture.sign(t)
 
-	err := Install(context.Background(), InstallRequest{Env: fixture.env(server.URL), ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, TargetPath: filepath.Join(t.TempDir(), "model.gguf"), HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys()})
+	err := Install(context.Background(), InstallRequest{Env: fixture.env(server.URL), ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, TargetPath: filepath.Join(t.TempDir(), "model.gguf"), HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys(), trustedPolicy: fixture.trustRootJSON})
 	if err == nil || !strings.Contains(err.Error(), "no passed audit") {
 		t.Fatalf("expected missing audit failure, got %v", err)
 	}
@@ -315,7 +316,7 @@ func TestInstallRejectsModelAuditThatDidNotPass(t *testing.T) {
 	fixture.manifest.URL = server.URL + "/artifacts/model.gguf"
 	fixture.sign(t)
 
-	err := Install(context.Background(), InstallRequest{Env: fixture.env(server.URL), ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, TargetPath: filepath.Join(t.TempDir(), "model.gguf"), HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys()})
+	err := Install(context.Background(), InstallRequest{Env: fixture.env(server.URL), ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, TargetPath: filepath.Join(t.TempDir(), "model.gguf"), HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys(), trustedPolicy: fixture.trustRootJSON})
 	if err == nil || !strings.Contains(err.Error(), "audit has not passed") {
 		t.Fatalf("expected failed audit rejection, got %v", err)
 	}
@@ -332,7 +333,7 @@ func TestInstallAcceptsGreenVerificationStatusAudit(t *testing.T) {
 	overrides["/audit/v1/index.json"] = greenAuditIndex
 	overrides["/audit/v1/index.json.sig"] = fixture.signCanonicalJSONBody(t, "index.json", greenAuditIndex)
 
-	if err := Install(context.Background(), InstallRequest{Env: fixture.env(server.URL), ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, TargetPath: filepath.Join(t.TempDir(), "model.gguf"), HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys()}); err != nil {
+	if err := Install(context.Background(), InstallRequest{Env: fixture.env(server.URL), ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, TargetPath: filepath.Join(t.TempDir(), "model.gguf"), HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys(), trustedPolicy: fixture.trustRootJSON}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -350,7 +351,7 @@ func TestInstallRequiresAllowanceForYankedAdvisoryIndex(t *testing.T) {
 	fixture.sign(t)
 
 	target := filepath.Join(t.TempDir(), "model.gguf")
-	err := Install(context.Background(), InstallRequest{Env: fixture.env(server.URL), ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, TargetPath: target, HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys()})
+	err := Install(context.Background(), InstallRequest{Env: fixture.env(server.URL), ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, TargetPath: target, HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys(), trustedPolicy: fixture.trustRootJSON})
 	var warningsErr WarningsError
 	if !errors.As(err, &warningsErr) || len(warningsErr.Warnings) == 0 || !strings.Contains(err.Error(), "yanked") {
 		t.Fatalf("expected yanked warning failure, got %v", err)
@@ -358,7 +359,7 @@ func TestInstallRequiresAllowanceForYankedAdvisoryIndex(t *testing.T) {
 	if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
 		t.Fatalf("artifact should not download before warning acceptance, stat err=%v", statErr)
 	}
-	if err := Install(context.Background(), InstallRequest{Env: fixture.env(server.URL), ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, TargetPath: target, HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys(), AllowWarnings: true}); err != nil {
+	if err := Install(context.Background(), InstallRequest{Env: fixture.env(server.URL), ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, TargetPath: target, HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys(), trustedPolicy: fixture.trustRootJSON, AllowWarnings: true}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -374,7 +375,7 @@ func TestInstallResolutionIncludesSignedRunURLAndDefaultPath(t *testing.T) {
 	env := fixture.env(server.URL)
 	targetBase := t.TempDir()
 	env["XDG_DATA_HOME"] = targetBase
-	if err := Install(context.Background(), InstallRequest{Env: env, ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys(), OnResolve: func(value InstallResolution) { resolution = value }}); err != nil {
+	if err := Install(context.Background(), InstallRequest{Env: env, ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys(), trustedPolicy: fixture.trustRootJSON, OnResolve: func(value InstallResolution) { resolution = value }}); err != nil {
 		t.Fatal(err)
 	}
 	if resolution.TargetPath == "" || !strings.HasPrefix(resolution.TargetPath, filepath.Join(targetBase, "s46", "models")) {
@@ -392,7 +393,7 @@ func TestInstallRejectsArtifactChecksumMismatch(t *testing.T) {
 	fixture.manifest.URL = server.URL + "/artifacts/model.gguf"
 	fixture.sign(t)
 
-	err := Install(context.Background(), InstallRequest{Env: fixture.env(server.URL), ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, TargetPath: filepath.Join(t.TempDir(), "model.gguf"), HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys()})
+	err := Install(context.Background(), InstallRequest{Env: fixture.env(server.URL), ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, TargetPath: filepath.Join(t.TempDir(), "model.gguf"), HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys(), trustedPolicy: fixture.trustRootJSON})
 	if err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
 		t.Fatalf("expected checksum failure, got %v", err)
 	}
@@ -405,7 +406,7 @@ func TestInstallRejectsRedirectToUntrustedHost(t *testing.T) {
 	fixture.manifest.URL = server.URL + "/redirect"
 	fixture.sign(t)
 
-	err := Install(context.Background(), InstallRequest{Env: fixture.env(server.URL), ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, TargetPath: filepath.Join(t.TempDir(), "model.gguf"), HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys()})
+	err := Install(context.Background(), InstallRequest{Env: fixture.env(server.URL), ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, TargetPath: filepath.Join(t.TempDir(), "model.gguf"), HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys(), trustedPolicy: fixture.trustRootJSON})
 	if err == nil || !strings.Contains(err.Error(), "untrusted host") {
 		t.Fatalf("expected redirect trust failure, got %v", err)
 	}
@@ -419,17 +420,17 @@ func TestVerifyInstalledDetectsTampering(t *testing.T) {
 	fixture.sign(t)
 	target := filepath.Join(t.TempDir(), "model.gguf")
 	env := fixture.env(server.URL)
-	if err := Install(context.Background(), InstallRequest{Env: env, ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, TargetPath: target, HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys()}); err != nil {
+	if err := Install(context.Background(), InstallRequest{Env: env, ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, TargetPath: target, HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys(), trustedPolicy: fixture.trustRootJSON}); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(target, []byte("xxxxx"), 0o600); err != nil { // same size as "model"
 		t.Fatal(err)
 	}
-	ok, err := VerifyInstalled(context.Background(), InstallRequest{Env: env, ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, TargetPath: target, trustedKeys: fixture.trustedKeys()})
+	ok, err := VerifyInstalled(context.Background(), InstallRequest{Env: env, ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, TargetPath: target, trustedKeys: fixture.trustedKeys(), trustedPolicy: fixture.trustRootJSON})
 	if err != nil || ok {
 		t.Fatalf("verification should fail: ok=%v err=%v", ok, err)
 	}
-	if err := Install(context.Background(), InstallRequest{Env: env, ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, TargetPath: target, HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys()}); err != nil {
+	if err := Install(context.Background(), InstallRequest{Env: env, ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, TargetPath: target, HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys(), trustedPolicy: fixture.trustRootJSON}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(target)
@@ -449,7 +450,7 @@ func TestVerifyInstalledRequiresAuditedReceipt(t *testing.T) {
 	fixture.sign(t)
 	target := filepath.Join(t.TempDir(), "model.gguf")
 	env := fixture.env(server.URL)
-	request := InstallRequest{Env: env, ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, TargetPath: target, HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys()}
+	request := InstallRequest{Env: env, ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, TargetPath: target, HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys(), trustedPolicy: fixture.trustRootJSON}
 	if err := Install(context.Background(), request); err != nil {
 		t.Fatal(err)
 	}
@@ -628,6 +629,9 @@ func (f *modelFixture) signCanonicalJSONBody(t *testing.T, name string, body []b
 func (f *modelFixture) server(t *testing.T, overrides map[string][]byte) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/trust/v1/root.json" {
+			t.Error("origin trust root must never be requested")
+		}
 		if r.URL.Path == "/redirect" {
 			http.Redirect(w, r, "https://evil.example/model.gguf", http.StatusFound)
 			return
@@ -679,6 +683,9 @@ func (f *modelFixture) rangeTLSServer(t *testing.T, onArtifact func(*http.Reques
 
 func (f *modelFixture) rangeHandler(t *testing.T, onArtifact func(*http.Request)) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/trust/v1/root.json" {
+			t.Error("origin trust root must never be requested")
+		}
 		switch r.URL.Path {
 		case "/models/v1/s46/test-model/manifest.json":
 			requireModelJSONHeaders(t, r)

@@ -24,8 +24,12 @@ func TestSignedManifestFormatsDoNotInstallNativePackageAsGGUF(t *testing.T) {
 			fixture.manifest.URL = server.URL + "/artifacts/model.gguf"
 			fixture.sign(t)
 			target := filepath.Join(t.TempDir(), "model.gguf")
-			request := InstallRequest{Env: fixture.env(server.URL), ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, TargetPath: target, HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys()}
-			decoded, err := fetchVerifiedManifest(context.Background(), request)
+			request := InstallRequest{Env: fixture.env(server.URL), ManifestBaseURL: server.URL + "/models/v1", ModelID: fixture.manifest.ModelID, TargetPath: target, HTTPClient: server.Client(), trustedKeys: fixture.trustedKeys(), trustedPolicy: fixture.trustRootJSON}
+			prepared, err := prepareActivation(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			decoded, err := fetchVerifiedManifest(context.Background(), prepared)
 			if err != nil {
 				t.Fatal(err)
 			}
