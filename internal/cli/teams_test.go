@@ -4,11 +4,14 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/sovereign46/cli/internal/api"
 )
 
 func TestTeamsListShowsConnectedTeamsAndActiveTeam(t *testing.T) {
 	env := testEnv(t)
 	requireOK(t, run(t, env, "login", "--email", "dscape@s46.dev"))
+	serveConnectCatalog(t, env, []string{api.DefaultModel, "s46/devstral-small-2-24b"})
 	requireOK(t, run(t, env, "connect", "@s46/engineering", "--harness=standard"))
 	requireOK(t, run(t, env, "connect", "@s46/research", "--harness=standard", "--model=s46/devstral-small-2-24b"))
 
@@ -16,8 +19,8 @@ func TestTeamsListShowsConnectedTeamsAndActiveTeam(t *testing.T) {
 	for _, want := range []string{
 		"[s46] connected teams:",
 		"ACTIVE  TEAM              REGION  HARNESS   MODEL                       ENDPOINT",
-		"        @s46/engineering  EU-OPO  standard  s46/deepseek-v4-flash-0731  https://gateway.s46.dev",
-		"*       @s46/research     EU-OPO  standard  s46/devstral-small-2-24b    https://gateway.s46.dev",
+		"        @s46/engineering  EU-OPO  standard  s46/deepseek-v4-flash-0731  " + env["S46_API_BASE_URL"],
+		"*       @s46/research     EU-OPO  standard  s46/devstral-small-2-24b    " + env["S46_API_BASE_URL"],
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("teams list missing %q:\n%s", want, out)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -107,6 +108,9 @@ func runConnect(ctx context.Context, app *app, req connectRequest) error {
 	selectedModel := strs.FirstNonEmpty(req.Model, team.DefaultModel)
 	if selectedModel == "" {
 		return fmt.Errorf("team returned no default model; select an allowed model with --model")
+	}
+	if targetMode == config.ModeCloud && !slices.Contains(team.Models, selectedModel) {
+		return fmt.Errorf("model %q is not in the team's authorized model catalog; select an allowed model with --model or ask an administrator to enable it", selectedModel)
 	}
 	plan, err := adapter.PlanConnect(ctx, harness.ConnectRequest{Env: app.runtime.Env, Team: team, Model: selectedModel, Mode: targetMode, Scope: req.Scope})
 	if err != nil {

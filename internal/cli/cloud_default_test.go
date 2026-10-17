@@ -13,7 +13,7 @@ import (
 func TestCloudConnectUsesServerDefaultNotCachedOrInventedModel(t *testing.T) {
 	env := testEnv(t)
 	requireOK(t, run(t, env, "login", "--email", "dscape@s46.dev"))
-	requireOK(t, run(t, env, "connect", api.DefaultTeam, "--harness=standard", "--model=s46/devstral-small-2-24b"))
+	requireOK(t, run(t, env, "connect", api.DefaultTeam, "--harness=standard", "--model="+api.DefaultModel))
 	requested := make(chan string, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/teams/"+api.DefaultTeam {
