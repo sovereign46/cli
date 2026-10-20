@@ -1,8 +1,9 @@
+//go:build !release
+
 package session
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,60 +41,6 @@ func TestRunStoresSessionAndListReturnsLocalState(t *testing.T) {
 	if len(listed) != 1 || listed[0].ID != run.ID || listed[0].Harness != "s46" {
 		t.Fatalf("listed = %#v", listed)
 	}
-}
-
-func TestDetachAndResumePersistSessionState(t *testing.T) {
-	service, store := newTestService(t, api.Team{Name: "s46", Endpoint: "https://s46.s46.dev", Region: "EU-OPO", DefaultModel: api.DefaultModel}, config.ModeCloud, nil)
-
-	detached, err := service.Detach(context.Background(), "@nunojob/task", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if detached.State != "queued" || detached.Harness != "standard" || detached.Location != "scheduler:job_mock" {
-		t.Fatalf("detached = %#v", detached)
-	}
-	resumed, previous, err := service.Resume(context.Background(), detached.ID, api.ResumeTargetLocal)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if previous == "" || resumed.State != "resumed" || resumed.Location != "localhost" {
-		t.Fatalf("resumed = %#v previous=%q", resumed, previous)
-	}
-	state, err := store.LoadState()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if state.Sessions[detached.ID].State != "resumed" {
-		t.Fatalf("state session = %#v", state.Sessions[detached.ID])
-	}
-}
-
-func TestLandReturnsAPIErrorUnchanged(t *testing.T) {
-	home := t.TempDir()
-	env := map[string]string{
-		"HOME":            home,
-		"XDG_CONFIG_HOME": home + "/.config",
-		"XDG_DATA_HOME":   home + "/.data",
-	}
-	store := config.NewStore(env, "")
-	team := api.Team{Name: "s46", Endpoint: "https://s46.s46.dev", Region: "EU-OPO", DefaultModel: api.DefaultModel}
-	if err := store.SaveConfig(config.Config{ActiveTeam: "s46", Teams: map[string]config.TeamConfig{"s46": config.TeamConfigFromAPI(team, "standard", api.DefaultModel, config.ModeCloud)}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.SaveState(config.State{Authenticated: true, CurrentUser: "nunojob@icloud.com"}); err != nil {
-		t.Fatal(err)
-	}
-	svc := Service{API: errLandAPI{MockClient: api.NewMockClient()}, Config: store}
-	_, err := svc.Land(context.Background(), "@nunojob/task", "Fix X")
-	if err == nil || !strings.Contains(err.Error(), "boom") {
-		t.Fatalf("expected propagated error, got %v", err)
-	}
-}
-
-type errLandAPI struct{ *api.MockClient }
-
-func (errLandAPI) Land(ctx context.Context, req api.LandRequest) (api.LandResult, error) {
-	return api.LandResult{}, errors.New("boom")
 }
 
 func newTestService(t *testing.T, team api.Team, mode string, extraEnv map[string]string) (Service, *config.Store) {

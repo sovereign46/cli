@@ -80,10 +80,7 @@ func NewRootCommand(runtime Runtime) *cobra.Command {
 	root.AddCommand(teamsCommand(runtime, opts))
 	root.AddCommand(statusCommand(runtime, opts))
 	root.AddCommand(sessionsCommand(runtime, opts))
-	root.AddCommand(detachCommand(runtime, opts))
-	root.AddCommand(resumeCommand(runtime, opts))
 	root.AddCommand(shareCommand(runtime, opts))
-	root.AddCommand(sessionCommand(runtime, opts))
 	root.AddCommand(modeCommand(runtime, opts))
 	root.AddCommand(airplaneCommand(runtime, opts))
 	root.AddCommand(modelsCommand(runtime, opts))
@@ -108,7 +105,7 @@ func airplaneHelpActive(env map[string]string, configPath string) bool {
 func airplaneHelpNotice() string {
 	return strings.Join([]string{
 		"[s46✈] Airplane mode is on. Local coding commands use the local gateway/model.",
-		"[s46✈] Cloud-only commands are unavailable: login, devices, update, detach, resume, share uploads, session land.",
+		"[s46✈] Cloud-only commands are unavailable: login, devices, update, share uploads.",
 		"[s46✈] Turn airplane mode off with: s46 airplane mode off",
 	}, "\n")
 }

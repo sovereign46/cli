@@ -7,12 +7,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"net/url"
 	"regexp"
 	"strings"
 	"time"
-
-	"github.com/sovereign46/cli/internal/strs"
 )
 
 type MockFixtures struct {
@@ -152,12 +149,13 @@ func (c *MockClient) Team(ctx context.Context, name string, opts TeamOptions) (T
 		model = DefaultModel
 	}
 	return Team{
-		Name:         team,
-		Endpoint:     endpoint,
-		Region:       region,
-		WorkerHosts:  append([]string(nil), fixtures.WorkerHosts...),
-		DefaultModel: model,
-		Models:       c.modelList(),
+		Name:          team,
+		Endpoint:      endpoint,
+		Region:        region,
+		WorkerHosts:   append([]string(nil), fixtures.WorkerHosts...),
+		DefaultModel:  model,
+		Models:        c.modelList(),
+		ModelMetadata: map[string]ModelRuntime{DefaultModel: {ContextWindow: 262144, MaxTokens: 32768, Reasoning: true}},
 	}, nil
 }
 
@@ -175,96 +173,6 @@ func (c *MockClient) Sessions(ctx context.Context, team Team, accessToken string
 		session.Location = fixtures.DefaultBox
 	}
 	return []Session{session}, nil
-}
-
-func (c *MockClient) Detach(ctx context.Context, req DetachRequest) (Session, error) {
-	harness := req.Harness
-	if harness == "" {
-		harness = "claude-code"
-	}
-	return Session{
-		ID:       req.SessionID,
-		State:    "queued",
-		Harness:  harness,
-		Location: "scheduler:job_mock",
-		Region:   req.Team.Region,
-		Model:    req.Team.DefaultModel,
-		Age:      "0m",
-		Spent:    "€0.00",
-	}, nil
-}
-
-func (c *MockClient) Resume(ctx context.Context, req ResumeRequest) (Session, error) {
-	target := strings.ToLower(strings.TrimSpace(req.Target))
-	if target == "" {
-		target = ResumeTargetRemote
-	}
-	if target != ResumeTargetRemote && target != ResumeTargetLocal {
-		return Session{}, Error{Code: "invalid_request", Message: "invalid request", StatusCode: 400}
-	}
-	session := req.Session
-	session.ID = req.SessionID
-	if target == ResumeTargetLocal {
-		session.State = "resumed"
-		session.Location = "localhost"
-	} else {
-		session.State = "queued"
-		session.Location = "scheduler"
-	}
-	session.Age = "0m"
-	return session, nil
-}
-
-func (c *MockClient) Attach(ctx context.Context, req AttachRequest) (AttachResult, error) {
-	fixtures := c.fixtures()
-	scheme := "wss"
-	host := fixtures.DefaultBox
-	if fixtures.Endpoint != "" {
-		parsed, err := url.Parse(fixtures.Endpoint)
-		if err == nil && parsed.Host != "" {
-			host = parsed.Host
-			if parsed.Scheme == "http" {
-				scheme = "ws"
-			}
-		}
-	}
-	return AttachResult{SessionID: req.SessionID, URL: fmt.Sprintf("%s://%s/session/%s", scheme, host, strings.TrimPrefix(req.SessionID, "@")), Protocol: "websocket"}, nil
-}
-
-func (c *MockClient) Land(ctx context.Context, req LandRequest) (LandResult, error) {
-	title := req.Title
-	fixtures := c.fixtures()
-	if title == "" {
-		title = fixtures.DefaultTask
-	}
-	session := req.Session
-	if session.Harness == "" {
-		session.Harness = req.Team.DefaultHarness()
-	}
-	if session.Model == "" {
-		session.Model = req.Team.DefaultModel
-	}
-	if session.Spent == "" {
-		session.Spent = fixtures.DefaultSpend
-	}
-	branchSlug := strings.TrimPrefix(req.SessionID, "@")
-	branchSlug = strings.ReplaceAll(branchSlug, "/", "-")
-	return LandResult{
-		ID:            req.SessionID,
-		Title:         title,
-		Branch:        "s46/" + branchSlug,
-		RanOn:         []string{"localhost", strs.FirstNonEmpty(session.Location, fixtures.DefaultBox), "localhost"},
-		Harness:       session.Harness,
-		Model:         session.Model,
-		Cost:          session.Spent,
-		Status:        "blocked",
-		BlockedReason: "github_repository_not_configured",
-		Review: ReviewPacket{
-			Summary:           fmt.Sprintf("%s. Prepared from %s for policy-gated review.", title, req.SessionID),
-			Checklist:         []string{"inspect git diff", "run tests", "run /review", "connect a GitHub App repository"},
-			SuggestedCommands: []string{"git diff", "git status", "s46 session land --json"},
-		},
-	}, nil
 }
 
 func defaultMockSession(team Team) Session {

@@ -40,69 +40,6 @@ type RunResult struct {
 	Region   string `json:"region"`
 }
 
-func (s Service) Detach(ctx context.Context, sessionID string, harness string) (api.Session, error) {
-	ctxState, err := s.contextState()
-	if err != nil {
-		return api.Session{}, fmt.Errorf("resolve workspace: %w", err)
-	}
-	existing := findOrDefault(ctxState.State, sessionID, ctxState.Team, ctxState.TeamConfig)
-	if harness == "" {
-		harness = existing.Harness
-	}
-	accessToken, tokenErr := s.accessToken(ctx, ctxState)
-	if tokenErr != nil {
-		return api.Session{}, fmt.Errorf("could not obtain s46 access token: %w; run `s46 login` if your session expired", tokenErr)
-	}
-	result, err := s.API.Detach(ctx, api.DetachRequest{SessionID: sessionID, Harness: harness, Team: ctxState.Team, AccessToken: accessToken})
-	if err != nil {
-		return api.Session{}, fmt.Errorf("detach session %s: %w", sessionID, err)
-	}
-	ctxState.State.Sessions[sessionID] = result
-	if err := s.Config.SaveState(ctxState.State); err != nil {
-		return api.Session{}, err
-	}
-	return result, nil
-}
-
-func (s Service) Resume(ctx context.Context, sessionID string, target string) (api.Session, string, error) {
-	ctxState, err := s.contextState()
-	if err != nil {
-		return api.Session{}, "", fmt.Errorf("resolve workspace: %w", err)
-	}
-	existing := findOrDefault(ctxState.State, sessionID, ctxState.Team, ctxState.TeamConfig)
-	previous := existing.Location
-	accessToken, tokenErr := s.accessToken(ctx, ctxState)
-	if tokenErr != nil {
-		return api.Session{}, "", fmt.Errorf("could not obtain s46 access token: %w; run `s46 login` if your session expired", tokenErr)
-	}
-	result, err := s.API.Resume(ctx, api.ResumeRequest{SessionID: sessionID, Session: existing, Team: ctxState.Team, Target: target, AccessToken: accessToken})
-	if err != nil {
-		return api.Session{}, "", fmt.Errorf("resume session %s: %w", sessionID, err)
-	}
-	ctxState.State.Sessions[sessionID] = result
-	if err := s.Config.SaveState(ctxState.State); err != nil {
-		return api.Session{}, "", err
-	}
-	return result, previous, nil
-}
-
-func (s Service) Land(ctx context.Context, sessionID string, title string) (api.LandResult, error) {
-	ctxState, err := s.contextState()
-	if err != nil {
-		return api.LandResult{}, fmt.Errorf("resolve workspace: %w", err)
-	}
-	session := findOrDefault(ctxState.State, sessionID, ctxState.Team, ctxState.TeamConfig)
-	accessToken, tokenErr := s.accessToken(ctx, ctxState)
-	if tokenErr != nil {
-		return api.LandResult{}, fmt.Errorf("could not obtain s46 access token: %w; run `s46 login` if your session expired", tokenErr)
-	}
-	result, err := s.API.Land(ctx, api.LandRequest{SessionID: sessionID, Session: session, Team: ctxState.Team, Title: title, AccessToken: accessToken})
-	if err != nil {
-		return api.LandResult{}, fmt.Errorf("land session %s: %w", sessionID, err)
-	}
-	return enrichLandWithGit(ctx, result), nil
-}
-
 func (s Service) Run(ctx context.Context, task string, model string, sessionID string) (RunResult, error) {
 	ctxState, err := s.contextState()
 	if err != nil {

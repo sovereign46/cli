@@ -22,7 +22,7 @@ type Artifact struct {
 	Session ArtifactSession `json:"session"`
 	Steps   []Step          `json:"steps,omitempty"`
 	Files   []File          `json:"files,omitempty"`
-	Review  *ReviewPacket   `json:"review,omitempty"`
+	Review  *ReviewSummary  `json:"review,omitempty"`
 }
 
 type ArtifactSession struct {
@@ -105,7 +105,7 @@ type File struct {
 	Removed int    `json:"removed"`
 }
 
-type ReviewPacket struct {
+type ReviewSummary struct {
 	Summary           string   `json:"summary"`
 	Checklist         []string `json:"checklist,omitempty"`
 	SuggestedCommands []string `json:"suggestedCommands,omitempty"`
@@ -167,7 +167,7 @@ func titleFor(session api.Session) string {
 
 func statusFor(state string) string {
 	switch strings.ToLower(strings.TrimSpace(state)) {
-	case "", "complete", "completed", "done", "landed", "finished":
+	case "", "complete", "completed", "done", "finished":
 		return "finished"
 	case "failed", "error", "canceled", "cancelled":
 		return strings.ToLower(strings.TrimSpace(state))

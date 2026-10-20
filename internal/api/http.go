@@ -169,44 +169,8 @@ func (c *HTTPClient) Sessions(ctx context.Context, team Team, accessToken string
 	return response.Sessions, err
 }
 
-func (c *HTTPClient) Detach(ctx context.Context, req DetachRequest) (Session, error) {
-	var session Session
-	err := c.do(ctx, http.MethodPost, sessionActionEndpoint(req.SessionID, "detach", req.Team.Name), req.AccessToken, req, &session)
-	c.normalizeSession(&session)
-	return session, err
-}
-
-func (c *HTTPClient) Resume(ctx context.Context, req ResumeRequest) (Session, error) {
-	var session Session
-	err := c.do(ctx, http.MethodPost, sessionActionEndpoint(req.SessionID, "resume", req.Team.Name), req.AccessToken, req, &session)
-	c.normalizeSession(&session)
-	return session, err
-}
-
-func (c *HTTPClient) Attach(ctx context.Context, req AttachRequest) (AttachResult, error) {
-	var result AttachResult
-	err := c.do(ctx, http.MethodPost, sessionActionEndpoint(req.SessionID, "attach", req.Team.Name), req.AccessToken, req, &result)
-	result.URL = c.rewriteS46URL(result.URL)
-	return result, err
-}
-
-func (c *HTTPClient) Land(ctx context.Context, req LandRequest) (LandResult, error) {
-	var result LandResult
-	endpoint := addTeamQuery("/v1/sessions/"+url.PathEscape(req.SessionID)+"/land", req.Team.Name)
-	err := c.do(ctx, http.MethodPost, endpoint, req.AccessToken, req, &result)
-	for i := range result.RanOn {
-		result.RanOn[i] = c.rewriteS46Location(result.RanOn[i])
-	}
-	return result, err
-}
-
 func sessionListEndpoint(teamName string) string {
 	return addTeamQuery("/v1/sessions", teamName)
-}
-
-func sessionActionEndpoint(sessionID string, action string, teamName string) string {
-	endpoint := "/v1/sessions/" + url.PathEscape(sessionID) + "/" + action
-	return addTeamQuery(endpoint, teamName)
 }
 
 func addTeamQuery(endpoint string, teamName string) string {

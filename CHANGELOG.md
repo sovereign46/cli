@@ -6,6 +6,25 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- Changed cloud model selection and Pi runtime limits to use the authorized team catalog instead of client-side defaults; `connect` refuses unavailable selections before changing configuration, without silently switching models.
+- Changed Pi thinking `off` to send an explicit disable value for DeepSeek V4 Flash-0731 on vLLM 0.31.0, without changing other models or airplane mode.
+
+### Fixed
+
+- Fixed airplane-mode round trips to preserve every selected cloud default, including Devstral served from a cloud endpoint.
+
+### Security
+
+- **Breaking:** Model installation and cached verification require an independently approved complete policy bundled with the CLI, signed advisory evidence, and current activation checks. No production policy is approved yet, so both paths fail closed; registry and receipt roots cannot authorize activation.
+- Recheck signed audits and advisories after artifact verification, and invalidate matching cached receipts after an authenticated policy refusal.
+- Reject native safetensors packages before downloading them through the GGUF-only airplane installer.
+
+### Removed
+
+- Removed the unfinished `detach`, `resume`, and `session land` command surfaces.
+
 ## [0.2.5] - 2026-06-15
 
 ### Fixed

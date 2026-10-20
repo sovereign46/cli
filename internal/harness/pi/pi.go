@@ -7,9 +7,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 
 	"github.com/sovereign46/cli/internal/airplane"
+	"github.com/sovereign46/cli/internal/api"
 	"github.com/sovereign46/cli/internal/config"
 	"github.com/sovereign46/cli/internal/harness"
 )
@@ -70,12 +70,16 @@ func (a Adapter) PlanConnect(ctx context.Context, req harness.ConnectRequest) (h
 	if providers == nil {
 		providers = map[string]any{}
 	}
+	models, err := piModels(req.Team, req.Mode, req.Env)
+	if err != nil {
+		return harness.Plan{}, err
+	}
 	providers["s46"] = map[string]any{
 		"baseUrl":    req.Team.Endpoint + "/v1",
 		"api":        "openai-completions",
 		"apiKey":     "!s46 token --refresh",
 		"authHeader": true,
-		"models":     piModels(req.Team.Models, req.Mode, req.Env),
+		"models":     models,
 	}
 	existing["providers"] = providers
 	content, err := json.MarshalIndent(existing, "", "  ")
@@ -213,31 +217,36 @@ func (a Adapter) Status(ctx context.Context, req harness.StatusRequest) []harnes
 	}
 }
 
-func piModels(ids []string, mode string, env map[string]string) []map[string]any {
-	contextWindow := 128000
-	maxTokens := 32000
-	if mode == airplane.ModeAirplane {
-		contextWindow = airplane.ContextWindow(env)
-		maxTokens = airplane.MaxTokens(env)
-	}
-	models := make([]map[string]any, 0, len(ids))
-	for _, id := range ids {
-		models = append(models, map[string]any{
+func piModels(team api.Team, mode string, env map[string]string) ([]map[string]any, error) {
+	models := make([]map[string]any, 0, len(team.Models))
+	for _, id := range team.Models {
+		metadata, ok := team.ModelMetadata[id]
+		if mode == airplane.ModeAirplane {
+			metadata = api.ModelRuntime{ContextWindow: airplane.ContextWindow(env), MaxTokens: airplane.MaxTokens(env)}
+		} else if !ok || metadata.ContextWindow <= 0 || metadata.MaxTokens <= 0 || metadata.MaxTokens > metadata.ContextWindow {
+			return nil, fmt.Errorf("team returned no valid runtime metadata for %s; refresh the verified model catalog", id)
+		}
+		model := map[string]any{
 			"id":            id,
 			"name":          modelName(id),
-			"reasoning":     strings.Contains(id, "kimi") || strings.Contains(id, "deepseek") || strings.Contains(id, "qwen"),
+			"reasoning":     metadata.Reasoning,
 			"input":         []string{"text"},
-			"contextWindow": contextWindow,
-			"maxTokens":     maxTokens,
+			"contextWindow": metadata.ContextWindow,
+			"maxTokens":     metadata.MaxTokens,
 			"cost": map[string]float64{
 				"input":      0,
 				"output":     0,
 				"cacheRead":  0,
 				"cacheWrite": 0,
 			},
-		})
+		}
+		if mode != airplane.ModeAirplane && id == "s46/deepseek-v4-flash-0731" && metadata.Engine == "vllm" && metadata.Version == "0.31.0" && metadata.Reasoning {
+			// This runtime defaults to thinking when reasoning_effort is omitted.
+			model["thinkingLevelMap"] = map[string]string{"off": "none"}
+		}
+		models = append(models, model)
 	}
-	return models
+	return models, nil
 }
 
 func modelName(id string) string {

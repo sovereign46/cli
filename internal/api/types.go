@@ -6,12 +6,12 @@ import (
 )
 
 const (
-	DefaultModel       = "s46/devstral-small-2-24b"
-	DefaultTeam        = "@s46/engineering"
-	DefaultAccount     = "dscape@s46.dev"
-	DefaultGatewayURL  = "https://gateway.s46.dev"
-	ResumeTargetLocal  = "local"
-	ResumeTargetRemote = "remote"
+	DefaultModel        = "s46/deepseek-v4-flash-0731"
+	DefaultTeam         = "@s46/engineering"
+	DefaultAccount      = "dscape@s46.dev"
+	DefaultGatewayURL   = "https://gateway.s46.dev"
+	SessionSourceLocal  = "local"
+	SessionSourceRemote = "remote"
 )
 
 func DefaultModelList() []string {
@@ -37,13 +37,9 @@ type TeamAPI interface {
 	Team(ctx context.Context, name string, opts TeamOptions) (Team, error)
 }
 
-// SessionAPI covers lifecycle operations on coding-agent sessions.
+// SessionAPI covers listing coding-agent sessions.
 type SessionAPI interface {
 	Sessions(ctx context.Context, team Team, accessToken string) ([]Session, error)
-	Detach(ctx context.Context, req DetachRequest) (Session, error)
-	Resume(ctx context.Context, req ResumeRequest) (Session, error)
-	Attach(ctx context.Context, req AttachRequest) (AttachResult, error)
-	Land(ctx context.Context, req LandRequest) (LandResult, error)
 }
 
 // Client is the umbrella API used by application services that span
@@ -101,13 +97,25 @@ type TeamOptions struct {
 	AccessToken  string
 }
 
+type ModelRuntime struct {
+	Engine                 string `json:"engine,omitempty"`
+	Version                string `json:"version,omitempty"`
+	ProfileSHA256          string `json:"profileSha256,omitempty"`
+	ContextWindow          int    `json:"contextWindow,omitempty"`
+	MaxTokens              int    `json:"maxTokens,omitempty"`
+	Reasoning              bool   `json:"reasoning"`
+	MinMemoryBytes         int64  `json:"minMemoryBytes,omitempty"`
+	RecommendedMemoryBytes int64  `json:"recommendedMemoryBytes,omitempty"`
+}
+
 type Team struct {
-	Name         string   `json:"name"`
-	Endpoint     string   `json:"endpoint"`
-	Region       string   `json:"region"`
-	WorkerHosts  []string `json:"workerHosts"`
-	DefaultModel string   `json:"defaultModel"`
-	Models       []string `json:"models"`
+	Name          string                  `json:"name"`
+	Endpoint      string                  `json:"endpoint"`
+	Region        string                  `json:"region"`
+	WorkerHosts   []string                `json:"workerHosts"`
+	DefaultModel  string                  `json:"defaultModel"`
+	Models        []string                `json:"models"`
+	ModelMetadata map[string]ModelRuntime `json:"modelMetadata"`
 }
 
 type Session struct {
@@ -120,59 +128,4 @@ type Session struct {
 	Age      string `json:"age"`
 	Spent    string `json:"spent"`
 	Task     string `json:"task,omitempty"`
-}
-
-type DetachRequest struct {
-	SessionID   string `json:"sessionId"`
-	Harness     string `json:"harness"`
-	Team        Team   `json:"team"`
-	AccessToken string `json:"-"`
-}
-
-type ResumeRequest struct {
-	SessionID   string  `json:"sessionId"`
-	Session     Session `json:"session"`
-	Team        Team    `json:"team"`
-	Target      string  `json:"target,omitempty"`
-	AccessToken string  `json:"-"`
-}
-
-type AttachRequest struct {
-	SessionID   string `json:"sessionId"`
-	Team        Team   `json:"team"`
-	AccessToken string `json:"-"`
-}
-
-type AttachResult struct {
-	SessionID string `json:"sessionId"`
-	URL       string `json:"url"`
-	Protocol  string `json:"protocol"`
-}
-
-type LandRequest struct {
-	SessionID   string  `json:"sessionId"`
-	Session     Session `json:"session"`
-	Team        Team    `json:"team"`
-	Title       string  `json:"title"`
-	AccessToken string  `json:"-"`
-}
-
-type LandResult struct {
-	ID             string       `json:"id"`
-	Title          string       `json:"title"`
-	Branch         string       `json:"branch"`
-	RanOn          []string     `json:"ranOn"`
-	Harness        string       `json:"harness"`
-	Model          string       `json:"model"`
-	Cost           string       `json:"cost"`
-	Status         string       `json:"status"`
-	PullRequestURL string       `json:"pullRequestUrl,omitempty"`
-	BlockedReason  string       `json:"blockedReason,omitempty"`
-	Review         ReviewPacket `json:"review"`
-}
-
-type ReviewPacket struct {
-	Summary           string   `json:"summary"`
-	Checklist         []string `json:"checklist"`
-	SuggestedCommands []string `json:"suggestedCommands"`
 }

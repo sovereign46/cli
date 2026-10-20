@@ -451,7 +451,7 @@ func cloudTeamSnapshot(teamName string, teamConfig config.TeamConfig) (api.Team,
 	if snapshot.Region == "" {
 		snapshot.Region = teamConfig.Region
 	}
-	if snapshot.DefaultModel == "" || snapshot.DefaultModel == airplane.LocalModelID {
+	if snapshot.DefaultModel == "" {
 		snapshot.DefaultModel = api.DefaultModel
 	}
 	if len(snapshot.Models) == 0 {

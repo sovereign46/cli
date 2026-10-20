@@ -143,7 +143,7 @@ func (s Service) remoteSessionEntries(ctx context.Context, ctxState workspaceCon
 		if ctxState.TeamConfig.DefaultHarness != "" {
 			session.Harness = ctxState.TeamConfig.DefaultHarness
 		}
-		entries = append(entries, ListedSession{Session: session, Source: api.ResumeTargetRemote})
+		entries = append(entries, ListedSession{Session: session, Source: api.SessionSourceRemote})
 	}
 	return remoteSessionEntriesResult{entries: entries, accessToken: accessToken}
 }
@@ -202,7 +202,7 @@ func (s Service) localSessionEntries(ctx context.Context, ctxState workspaceCont
 				Spent:    formatCostUSD(local.CostUSD),
 				Task:     local.Task,
 			},
-			Source:         api.ResumeTargetLocal,
+			Source:         api.SessionSourceLocal,
 			TranscriptPath: config.DisplayPath(local.Path, s.Config.Env),
 			updatedAt:      updatedAt,
 		}
@@ -329,11 +329,11 @@ func listedSessionPreferred(candidate, existing ListedSession) bool {
 
 func sessionSourceRank(source string) int {
 	switch source {
-	case api.ResumeTargetLocal:
+	case api.SessionSourceLocal:
 		return 3
 	case "state":
 		return 2
-	case api.ResumeTargetRemote:
+	case api.SessionSourceRemote:
 		return 1
 	default:
 		return 0

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sovereign46/cli/internal/api"
 	"github.com/sovereign46/cli/internal/config"
 	"github.com/sovereign46/cli/internal/harness"
 	"github.com/sovereign46/cli/internal/share"
@@ -174,6 +175,7 @@ func TestConnectCodexAndPi(t *testing.T) {
 func TestBackupsBeforeOverwriteAndIdempotency(t *testing.T) {
 	env := testEnv(t)
 	requireOK(t, run(t, env, "login", "--email", "dscape@s46.dev"))
+	serveConnectCatalog(t, env, []string{api.DefaultModel, "s46/qwen3-coder"})
 	requireOK(t, run(t, env, "connect", "@s46/engineering", "--harness=claude-code"))
 	settingsPath := filepath.Join(env["HOME"], ".claude", "settings.json")
 	first, err := os.ReadFile(settingsPath)
@@ -260,7 +262,7 @@ func TestApplyAtomicConfigAndHarnessRollsBackBoth(t *testing.T) {
 	if err := store.SaveConfig(before); err != nil {
 		t.Fatal(err)
 	}
-	// after: a team is configured (this is the change we'll try to land)
+	// after: a team is configured
 	after := config.DefaultConfig()
 	after.ActiveTeam = "@s46/engineering"
 	after.Teams["@s46/engineering"] = config.TeamConfig{Endpoint: "https://gateway.s46.dev", DefaultHarness: "failing"}
