@@ -82,9 +82,9 @@ Optional query parameters sent by the CLI: `endpoint`, `region`, `defaultModel`.
 
 For cloud teams, `models` is the authoritative list of currently servable catalog entries allowed by team policy. `modelMetadata` is keyed by those exact public model IDs. Do not invent fallback models or infer runtime limits from model names. `defaultModel` is the configured/requested selection, not proof of authorization; it can be absent from `models`. Cloud `connect` refuses a selected model absent from that list before changing configuration; choose an allowed `--model` or ask an administrator to enable it. Gateway requests still require model authorization.
 
-Pi requires metadata for every listed cloud model: positive `contextWindow` and `maxTokens`, with `maxTokens <= contextWindow`. `reasoning` controls reasoning support; `engine` and `version` identify the runtime. Optional metadata also includes `profileSha256`, `minMemoryBytes`, and `recommendedMemoryBytes`.
+Pi requires metadata for every listed cloud model: positive `contextWindow` and `maxTokens`, with `maxTokens <= contextWindow`. `reasoning` controls reasoning support; `engine` and `version` identify the runtime. The exact ID `s46/deepseek-v4-flash-0731` must also include a syntactically usable `closureSha256`: exactly 64 bare lowercase hexadecimal characters, with no prefix or whitespace, and not an exact repetition of a shorter hex sequence whose length properly divides 64 (a periodic placeholder). `closureSizeBytes` must be an integer from 1 through 64 MiB (67,108,864 bytes), inclusive. The CLI refuses to configure that exact target without closure binding metadata derived from the team API. It validates syntax and bounds; it does not sign or independently authenticate the closure. Unrelated model IDs are not subject to this closure check. Optional metadata also includes `profileSha256`, `minMemoryBytes`, and `recommendedMemoryBytes`.
 
-Illustrative response (not evidence that this model is deployed or authorized for your team):
+Illustrative response (not evidence that this model is deployed or authorized for your team). The nonperiodic digest values are examples generated from fixture text, not release artifacts:
 
 ```json
 {
@@ -100,6 +100,9 @@ Illustrative response (not evidence that this model is deployed or authorized fo
     "s46/deepseek-v4-flash-0731": {
       "engine": "vllm",
       "version": "0.31.0",
+      "profileSha256": "2faeba0deed00bcd0c55d85a87f0213cb3a94d1fcba853f13b21f1a359610e8e",
+      "closureSha256": "3e54fbb5d4a570b9888196ef8f3c8b5045490c29580e39415fa067bdd4d257a1",
+      "closureSizeBytes": 524288,
       "contextWindow": 262144,
       "maxTokens": 32768,
       "reasoning": true

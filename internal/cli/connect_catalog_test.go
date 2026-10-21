@@ -39,7 +39,7 @@ func TestCloudConnectRefusesUnavailableModelWithoutMutation(t *testing.T) {
 						http.NotFound(w, r)
 						return
 					}
-					_ = json.NewEncoder(w).Encode(api.Team{Name: api.DefaultTeam, Endpoint: api.DefaultGatewayURL, DefaultModel: tc.defaultModel, Models: tc.models})
+					_ = json.NewEncoder(w).Encode(api.Team{Name: api.DefaultTeam, Endpoint: api.DefaultGatewayURL, DefaultModel: tc.defaultModel, Models: tc.models, ModelMetadata: testModelMetadata(tc.models)})
 				}))
 				defer server.Close()
 				env["S46_API_BASE_URL"] = server.URL
@@ -56,6 +56,43 @@ func TestCloudConnectRefusesUnavailableModelWithoutMutation(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestCloudConnectRefusesMalformedDeepSeekClosureWithoutMutation(t *testing.T) {
+	env := testEnv(t)
+	requireOK(t, run(t, env, "login", "--email", "dscape@s46.dev"))
+	requireOK(t, run(t, env, "connect", api.DefaultTeam, "--harness=pi"))
+	before := connectHomeFiles(t, env)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/teams/"+api.DefaultTeam {
+			t.Errorf("unexpected request: %s", r.URL)
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(api.Team{
+			Name:         api.DefaultTeam,
+			Endpoint:     api.DefaultGatewayURL,
+			DefaultModel: api.DefaultModel,
+			Models:       api.DefaultModelList(),
+			ModelMetadata: map[string]api.ModelRuntime{api.DefaultModel: {
+				ClosureSHA256:    "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+				ClosureSizeBytes: 4096,
+				ContextWindow:    262144,
+				MaxTokens:        32768,
+			}},
+		})
+	}))
+	defer server.Close()
+	env["S46_API_BASE_URL"] = server.URL
+
+	result := run(t, env, "connect", api.DefaultTeam, "--harness=pi")
+	if result.err == nil || !strings.Contains(result.err.Error(), "no syntactically usable API closure binding") {
+		t.Fatalf("expected malformed closure refusal, got err=%v stdout=%q", result.err, result.stdout)
+	}
+	if after := connectHomeFiles(t, env); !reflect.DeepEqual(before, after) {
+		t.Fatalf("refused connect changed config or Pi files\nbefore: %#v\nafter: %#v", before, after)
 	}
 }
 
@@ -97,14 +134,26 @@ func serveConnectCatalog(t *testing.T, env map[string]string, models []string) {
 		if model == "" {
 			model = api.DefaultModel
 		}
-		metadata := make(map[string]api.ModelRuntime, len(models))
-		for _, id := range models {
-			metadata[id] = api.ModelRuntime{ContextWindow: 8192, MaxTokens: 1024}
-		}
-		_ = json.NewEncoder(w).Encode(api.Team{Name: strings.TrimPrefix(r.URL.Path, "/v1/teams/"), Endpoint: api.DefaultGatewayURL, Region: "EU-OPO", DefaultModel: model, Models: models, ModelMetadata: metadata})
+		_ = json.NewEncoder(w).Encode(api.Team{Name: strings.TrimPrefix(r.URL.Path, "/v1/teams/"), Endpoint: api.DefaultGatewayURL, Region: "EU-OPO", DefaultModel: model, Models: models, ModelMetadata: testModelMetadata(models)})
 	}))
 	t.Cleanup(server.Close)
 	env["S46_API_BASE_URL"] = server.URL
+}
+
+func testModelMetadata(models []string) map[string]api.ModelRuntime {
+	if models == nil {
+		return nil
+	}
+	metadata := make(map[string]api.ModelRuntime, len(models))
+	for _, id := range models {
+		runtime := api.ModelRuntime{ContextWindow: 8192, MaxTokens: 1024}
+		if id == api.DefaultModel {
+			runtime.ClosureSHA256 = testRuntimeClosureSHA256
+			runtime.ClosureSizeBytes = 4096
+		}
+		metadata[id] = runtime
+	}
+	return metadata
 }
 
 type connectFileSnapshot struct {

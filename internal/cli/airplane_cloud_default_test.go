@@ -11,7 +11,7 @@ import (
 	"github.com/sovereign46/cli/internal/config"
 )
 
-func TestAirplaneRoundTripPreservesExplicitCloudDevstralAfterDefaultUpgrade(t *testing.T) {
+func TestAirplaneRoundTripHandlesExplicitCloudDevstralAfterDefaultUpgrade(t *testing.T) {
 	for _, hasSnapshot := range []bool{true, false} {
 		name := "saved-api-snapshot"
 		if !hasSnapshot {

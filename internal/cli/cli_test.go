@@ -16,6 +16,8 @@ import (
 	"github.com/sovereign46/cli/internal/config"
 )
 
+const testRuntimeClosureSHA256 = "3e54fbb5d4a570b9888196ef8f3c8b5045490c29580e39415fa067bdd4d257a1"
+
 func seedActiveTeam(t *testing.T, env map[string]string, name string, endpoint string) {
 	t.Helper()
 	store := config.NewStore(env, "")
@@ -173,7 +175,7 @@ func TestJohnCLIEndToEndLoginAirplaneAndLocalRun(t *testing.T) {
 			if r.Header.Get("Authorization") != "Bearer john-access" {
 				t.Fatalf("missing auth header: %s", r.Header.Get("Authorization"))
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"name": "@yld/platform", "endpoint": "https://gateway.s46.dev", "region": "EU-OPO", "mode": "cloud", "workerHosts": []string{"worker-yld-01"}, "defaultModel": api.DefaultModel, "models": api.DefaultModelList(), "modelMetadata": map[string]api.ModelRuntime{api.DefaultModel: {ContextWindow: 262144, MaxTokens: 32768, Reasoning: true}}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"name": "@yld/platform", "endpoint": "https://gateway.s46.dev", "region": "EU-OPO", "mode": "cloud", "workerHosts": []string{"worker-yld-01"}, "defaultModel": api.DefaultModel, "models": api.DefaultModelList(), "modelMetadata": map[string]api.ModelRuntime{api.DefaultModel: {ClosureSHA256: testRuntimeClosureSHA256, ClosureSizeBytes: 4096, ContextWindow: 262144, MaxTokens: 32768, Reasoning: true}}})
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.String())
 		}

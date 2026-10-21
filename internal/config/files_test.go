@@ -239,7 +239,19 @@ func TestLockSerializesConcurrentSaveConfig(t *testing.T) {
 
 func TestTeamConfigRoundTripWithAPI(t *testing.T) {
 	t.Parallel()
-	team := api.Team{Name: "@s46/engineering", Endpoint: "https://gateway.s46.dev", Region: "EU-OPO", WorkerHosts: []string{"worker-01"}, DefaultModel: api.DefaultModel, Models: api.DefaultModelList()}
+	runtime := api.ModelRuntime{
+		Engine:                 "vllm",
+		Version:                "0.31.0",
+		ProfileSHA256:          "2faeba0deed00bcd0c55d85a87f0213cb3a94d1fcba853f13b21f1a359610e8e",
+		ClosureSHA256:          testRuntimeClosureSHA256,
+		ClosureSizeBytes:       4096,
+		ContextWindow:          8192,
+		MaxTokens:              1024,
+		Reasoning:              true,
+		MinMemoryBytes:         1024,
+		RecommendedMemoryBytes: 2048,
+	}
+	team := api.Team{Name: "@s46/engineering", Endpoint: "https://gateway.s46.dev", Region: "EU-OPO", WorkerHosts: []string{"worker-01"}, DefaultModel: api.DefaultModel, Models: api.DefaultModelList(), ModelMetadata: map[string]api.ModelRuntime{api.DefaultModel: runtime}}
 	tc := TeamConfigFromAPI(team, "claude-code", api.DefaultModel, ModeCloud)
 	if tc.DefaultHarness != "claude-code" || tc.Endpoint != team.Endpoint {
 		t.Fatalf("TeamConfigFromAPI = %#v", tc)
@@ -247,5 +259,8 @@ func TestTeamConfigRoundTripWithAPI(t *testing.T) {
 	round := tc.API("@s46/engineering")
 	if round.Endpoint != team.Endpoint || round.Region != team.Region || round.DefaultModel != team.DefaultModel {
 		t.Fatalf("API round-trip drift: %#v", round)
+	}
+	if got := round.ModelMetadata[api.DefaultModel]; got != runtime {
+		t.Fatalf("runtime metadata round-trip drift:\n got: %#v\nwant: %#v", got, runtime)
 	}
 }

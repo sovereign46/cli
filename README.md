@@ -69,7 +69,7 @@ Encrypted shares are uploaded to `S46_SHARE_API_URL` (default `https://gist.s46.
 
 The initial DeepSeek cloud qualification path uses Pi; existing Claude Code and Codex adapters remain available, but are not qualified for this runtime. See [candidate testing](docs/testing-candidate.md) for installation checks and the separate cloud-readiness prerequisites.
 
-Pi uses the team's authorized model list, default, context window, and output limit. For `s46/deepseek-v4-flash-0731` on vLLM `0.31.0` with reasoning enabled, its model configuration maps thinking `off` to an explicit `reasoning_effort: "none"`. Other thinking levels, models, runtimes, and Devstral airplane settings are unchanged. This request mapping is not evidence of model certification or live tool-loop compatibility.
+Pi uses the team's authorized model list, default, context window, and output limit. For the exact ID `s46/deepseek-v4-flash-0731` on vLLM `0.31.0` with reasoning enabled, syntactically usable runtime-closure binding metadata derived from the team API is also mandatory; its model configuration then maps thinking `off` to an explicit `reasoning_effort: "none"`. The CLI checks the binding's syntax and bounds; it does not sign or independently authenticate the closure. Other thinking levels, models, runtimes, and Devstral airplane settings are unchanged. This request mapping is not evidence of model certification or live tool-loop compatibility.
 
 ## Airplane mode
 
