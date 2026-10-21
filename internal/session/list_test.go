@@ -5,6 +5,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -18,6 +19,19 @@ import (
 	"github.com/sovereign46/cli/internal/harness/pi"
 	"github.com/sovereign46/cli/internal/keyring"
 )
+
+func TestCurrentProjectRootIgnoresParentGitEnvironment(t *testing.T) {
+	parent := t.TempDir()
+	if output, err := exec.Command("git", "init", "--quiet", parent).CombinedOutput(); err != nil {
+		t.Fatalf("initialize parent repository: %v\n%s", err, output)
+	}
+	outside := t.TempDir()
+	t.Setenv("GIT_DIR", filepath.Join(parent, ".git"))
+	t.Setenv("GIT_WORK_TREE", parent)
+	if got := currentProjectRoot(context.Background(), map[string]string{"PWD": outside}); got != outside {
+		t.Fatalf("parent Git environment redirected project root: got %q want %q", got, outside)
+	}
+}
 
 func TestAirplaneSessionCallsDoNotSendCloudBearer(t *testing.T) {
 	home := t.TempDir()
