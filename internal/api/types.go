@@ -101,6 +101,8 @@ type ModelRuntime struct {
 	Engine                 string `json:"engine,omitempty"`
 	Version                string `json:"version,omitempty"`
 	ProfileSHA256          string `json:"profileSha256,omitempty"`
+	ClosureSHA256          string `json:"closureSha256,omitempty"`
+	ClosureSizeBytes       int64  `json:"closureSizeBytes,omitempty"`
 	ContextWindow          int    `json:"contextWindow,omitempty"`
 	MaxTokens              int    `json:"maxTokens,omitempty"`
 	Reasoning              bool   `json:"reasoning"`

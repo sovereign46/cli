@@ -127,6 +127,8 @@ func (c *MockClient) DeleteDevice(ctx context.Context, deviceID string, accessTo
 	return nil
 }
 
+const mockRuntimeClosureSHA256 = "3e54fbb5d4a570b9888196ef8f3c8b5045490c29580e39415fa067bdd4d257a1"
+
 func (c *MockClient) Team(ctx context.Context, name string, opts TeamOptions) (Team, error) {
 	fixtures := c.fixtures()
 	team := sanitizeTeam(name)
@@ -155,7 +157,7 @@ func (c *MockClient) Team(ctx context.Context, name string, opts TeamOptions) (T
 		WorkerHosts:   append([]string(nil), fixtures.WorkerHosts...),
 		DefaultModel:  model,
 		Models:        c.modelList(),
-		ModelMetadata: map[string]ModelRuntime{DefaultModel: {ContextWindow: 262144, MaxTokens: 32768, Reasoning: true}},
+		ModelMetadata: map[string]ModelRuntime{DefaultModel: {ClosureSHA256: mockRuntimeClosureSHA256, ClosureSizeBytes: 4096, ContextWindow: 262144, MaxTokens: 32768, Reasoning: true}},
 	}, nil
 }
 

@@ -22,7 +22,7 @@ Do not run this stage until all of the following have been separately approved a
 
 - Reviewed API/CLI independent-policy loading and initial-serving gates, followed by independently authenticated complete trust policy and current signed registry/audit/advisory evidence.
 - An authenticated gateway and a team authorized for the exact model and runtime.
-- Checkpoint, runtime, certification, and deployment readiness. The existing backend's earlier origin-verification failure is not cleared by building this CLI.
+- The exact corrected checkpoint, a complete protected/hash-locked vLLM executable closure, independent fresh-load certification evidence, signed release, and verified deployment readiness. A working legacy backend or building this CLI does not satisfy those gates.
 - A restricted test environment for the agent, with only the intended files and narrowly scoped credentials accessible.
 
 Then put the candidate directory first on `PATH`, so Pi's `!s46 token --refresh` helper uses the same candidate:
@@ -43,7 +43,7 @@ The initial target is an actual file-writing/tool-result round trip and a hello-
 
 - OpenAI Chat Completions through the team's gateway, with the public model ID retained.
 - Context and output limits come from authorized runtime metadata, not name-based guesses.
-- Only DeepSeek V4 Flash-0731 on vLLM 0.31.0 with reasoning enabled gets `thinkingLevelMap: {"off":"none"}`. This prevents Pi from omitting the disable signal. Other thinking levels are unchanged.
+- Only the exact ID `s46/deepseek-v4-flash-0731` on vLLM 0.31.0 with reasoning enabled and syntactically usable closure binding metadata derived from the team API gets `thinkingLevelMap: {"off":"none"}`. The CLI checks the binding's syntax and bounds, not its signature or authenticity, and refuses to configure that exact target when the binding is absent or malformed. Unrelated models are not subject to this closure check. This prevents Pi from omitting the disable signal for an incompletely identified runtime. Other thinking levels are unchanged.
 - This mapping was qualified against Pi 1.3.0's local wire behavior and captured backend source. Live reasoning and generated tool-loop behavior still need qualification.
 - Devstral/llama.cpp airplane mode retains its existing limits and restoration behavior; model activation still requires the currently absent approved bundled policy.
 

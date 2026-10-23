@@ -362,7 +362,13 @@ func airplaneModeOff(ctx context.Context, app *app) error {
 
 func applyAtomicModeOff(ctx context.Context, app *app, before, after config.Config, teamName string, harnessName string, restored config.TeamConfig, hasCloudConfig bool, snapshot *config.HarnessSnapshot) error {
 	if snapshot != nil {
-		return applyAtomicConfigAndSnapshot(app, before, after, *snapshot, "airplane mode off")
+		validate := func() error {
+			return validateSnapshotRestore(app, teamName, restored, *snapshot)
+		}
+		return applyAtomicConfigAndSnapshotValidated(app, before, after, *snapshot, "airplane mode off", validate)
+	}
+	if err := validateSnapshotRestore(app, teamName, restored, config.HarnessSnapshot{}); err != nil {
+		return err
 	}
 	if hasCloudConfig {
 		adapter, plan, err := planHarnessConfig(ctx, app, teamName, restored, config.ModeCloud, false)
@@ -384,11 +390,27 @@ func applyAtomicModeOff(ctx context.Context, app *app, before, after config.Conf
 	return nil
 }
 
+func validateSnapshotRestore(app *app, teamName string, restored config.TeamConfig, snapshot config.HarnessSnapshot) error {
+	if err := pi.ValidateSnapshotRestore(restored.API(teamName), snapshot, app.runtime.Env); err != nil {
+		return fmt.Errorf("airplane mode off: refusing unsafe snapshot restore: %w", err)
+	}
+	return nil
+}
+
 func missingHarnessSnapshotError(harnessName string) error {
 	return fmt.Errorf("airplane mode off: missing pre-airplane harness snapshot for %s; refusing to rewrite harness config without an exact backup", harnessName)
 }
 
 func applyAtomicConfigAndSnapshot(app *app, before, after config.Config, snapshot config.HarnessSnapshot, op string) error {
+	return applyAtomicConfigAndSnapshotValidated(app, before, after, snapshot, op, nil)
+}
+
+func applyAtomicConfigAndSnapshotValidated(app *app, before, after config.Config, snapshot config.HarnessSnapshot, op string, validate func() error) error {
+	if validate != nil {
+		if err := validate(); err != nil {
+			return err
+		}
+	}
 	if err := app.config.SaveConfig(after); err != nil {
 		return fmt.Errorf("%s: %w", op, err)
 	}

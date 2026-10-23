@@ -7,6 +7,8 @@ import (
 	"github.com/sovereign46/cli/internal/api"
 )
 
+const testRuntimeClosureSHA256 = "3e54fbb5d4a570b9888196ef8f3c8b5045490c29580e39415fa067bdd4d257a1"
+
 func TestStoreLoadSaveConfigAndState(t *testing.T) {
 	home := t.TempDir()
 	env := map[string]string{
@@ -18,7 +20,7 @@ func TestStoreLoadSaveConfigAndState(t *testing.T) {
 
 	cfg := DefaultConfig()
 	cfg.ActiveTeam = "@s46/engineering"
-	cfg.Teams["@s46/engineering"] = TeamConfig{Endpoint: "https://gateway.s46.dev", Region: "EU-OPO", DefaultHarness: "claude-code", DefaultModel: api.DefaultModel}
+	cfg.Teams["@s46/engineering"] = TeamConfig{Endpoint: "https://gateway.s46.dev", Region: "EU-OPO", DefaultHarness: "claude-code", DefaultModel: api.DefaultModel, APISnapshot: api.Team{ModelMetadata: map[string]api.ModelRuntime{api.DefaultModel: {ClosureSHA256: testRuntimeClosureSHA256, ClosureSizeBytes: 4096}}}}
 	if err := store.SaveConfig(cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -26,7 +28,9 @@ func TestStoreLoadSaveConfigAndState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loadedCfg.ActiveTeam != "@s46/engineering" || loadedCfg.Teams["@s46/engineering"].Endpoint != "https://gateway.s46.dev" {
+	loadedTeam := loadedCfg.Teams["@s46/engineering"]
+	loadedRuntime := loadedTeam.APISnapshot.ModelMetadata[api.DefaultModel]
+	if loadedCfg.ActiveTeam != "@s46/engineering" || loadedTeam.Endpoint != "https://gateway.s46.dev" || loadedRuntime.ClosureSHA256 != testRuntimeClosureSHA256 || loadedRuntime.ClosureSizeBytes != 4096 {
 		t.Fatalf("unexpected config: %#v", loadedCfg)
 	}
 

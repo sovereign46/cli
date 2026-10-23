@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/sovereign46/cli/internal/airplane"
+	"github.com/sovereign46/cli/internal/api"
 	"github.com/sovereign46/cli/internal/config"
 )
 
@@ -84,6 +86,334 @@ func TestAirplaneModeOffRestoresPiModelsJSON(t *testing.T) {
 
 	requireOK(t, run(t, env, "airplane", "mode", "off"))
 	assertRestoredPiConfig(t, env, modelsPath, originalRaw)
+}
+
+func TestAirplaneModeOffRefusesStalePiSnapshotAtomically(t *testing.T) {
+	env := testEnv(t)
+	requireOK(t, run(t, env, "login", "--email", "dscape@s46.dev"))
+	requireOK(t, run(t, env, "connect", api.DefaultTeam, "--harness=pi"))
+	requireOK(t, run(t, env, "airplane", "mode", "on"))
+
+	store := config.NewStore(env, "")
+	cfg, err := store.LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	team := cfg.Teams[api.DefaultTeam]
+	runtime := team.APISnapshot.ModelMetadata[api.DefaultModel]
+	runtime.ClosureSHA256 = ""
+	runtime.ClosureSizeBytes = 0
+	team.APISnapshot.ModelMetadata[api.DefaultModel] = runtime
+	cfg.Teams[api.DefaultTeam] = team
+	if err := store.SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	before := connectHomeFiles(t, env)
+
+	result := run(t, env, "airplane", "mode", "off")
+	if result.err == nil || !strings.Contains(result.err.Error(), "refusing unsafe snapshot restore") || !strings.Contains(result.err.Error(), "no syntactically usable closure binding metadata derived from the team API") {
+		t.Fatalf("expected stale Pi snapshot refusal, got err=%v stdout=%q", result.err, result.stdout)
+	}
+	if after := connectHomeFiles(t, env); !reflect.DeepEqual(before, after) {
+		t.Fatalf("mode-off refusal changed airplane config, snapshot, or Pi files\nbefore: %#v\nafter: %#v", before, after)
+	}
+	preserved, err := store.LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preserved.ActiveMode() != config.ModeAirplane || preserved.Teams[api.DefaultTeam].HarnessSnapshot == nil {
+		t.Fatalf("airplane config or exact snapshot was not preserved: %#v", preserved)
+	}
+}
+
+func TestAirplaneModeOffValidatesSavedDeepSeekForNonPiSnapshotAtomically(t *testing.T) {
+	env := testEnv(t)
+	requireOK(t, run(t, env, "login", "--email", "dscape@s46.dev"))
+	requireOK(t, run(t, env, "connect", api.DefaultTeam, "--harness=claude-code"))
+	requireOK(t, run(t, env, "airplane", "mode", "on"))
+
+	store := config.NewStore(env, "")
+	cfg, err := store.LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	team := cfg.Teams[api.DefaultTeam]
+	runtime := team.APISnapshot.ModelMetadata[api.DefaultModel]
+	runtime.ClosureSHA256 = ""
+	runtime.ClosureSizeBytes = 0
+	team.APISnapshot.ModelMetadata[api.DefaultModel] = runtime
+	cfg.Teams[api.DefaultTeam] = team
+	if err := store.SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	before := connectHomeFiles(t, env)
+
+	result := run(t, env, "airplane", "mode", "off")
+	if result.err == nil || !strings.Contains(result.err.Error(), "saved team contains "+api.DefaultModel) || !strings.Contains(result.err.Error(), "no syntactically usable closure binding metadata derived from the team API") {
+		t.Fatalf("expected stale saved team refusal for non-Pi snapshot, got err=%v stdout=%q", result.err, result.stdout)
+	}
+	if after := connectHomeFiles(t, env); !reflect.DeepEqual(before, after) {
+		t.Fatalf("non-Pi refusal changed airplane config, snapshot, or harness files\nbefore: %#v\nafter: %#v", before, after)
+	}
+}
+
+func TestAirplaneModeOffValidatesSavedDeepSeekWithoutHarnessSnapshotAtomically(t *testing.T) {
+	env := testEnv(t)
+	requireOK(t, run(t, env, "login", "--email", "dscape@s46.dev"))
+	requireOK(t, run(t, env, "connect", api.DefaultTeam, "--harness=standard"))
+	requireOK(t, run(t, env, "airplane", "mode", "on"))
+
+	store := config.NewStore(env, "")
+	cfg, err := store.LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	team := cfg.Teams[api.DefaultTeam]
+	if team.HarnessSnapshot != nil {
+		t.Fatalf("standard harness unexpectedly created a snapshot: %#v", team.HarnessSnapshot)
+	}
+	runtime := team.APISnapshot.ModelMetadata[api.DefaultModel]
+	runtime.ClosureSHA256 = ""
+	runtime.ClosureSizeBytes = 0
+	team.APISnapshot.ModelMetadata[api.DefaultModel] = runtime
+	cfg.Teams[api.DefaultTeam] = team
+	if err := store.SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	before := connectHomeFiles(t, env)
+
+	result := run(t, env, "airplane", "mode", "off")
+	if result.err == nil || !strings.Contains(result.err.Error(), "saved team contains "+api.DefaultModel) {
+		t.Fatalf("expected stale saved team refusal without a harness snapshot, got err=%v stdout=%q", result.err, result.stdout)
+	}
+	if after := connectHomeFiles(t, env); !reflect.DeepEqual(before, after) {
+		t.Fatalf("snapshot-free refusal changed airplane config or harness files\nbefore: %#v\nafter: %#v", before, after)
+	}
+}
+
+func TestAirplaneModeOffValidatesAllPiSnapshotSelectionsAtomically(t *testing.T) {
+	const unrelatedModel = "s46/unrelated-cloud-model"
+	for _, tc := range []struct {
+		name   string
+		mutate func(*testing.T, *config.TeamConfig)
+		want   string
+	}{
+		{
+			name: "non-default DeepSeek lacks closure",
+			mutate: func(t *testing.T, team *config.TeamConfig) {
+				team.APISnapshot = api.Team{
+					Name:         api.DefaultTeam,
+					Endpoint:     api.DefaultGatewayURL,
+					DefaultModel: airplane.LocalModelID,
+					Models:       []string{airplane.LocalModelID, api.DefaultModel},
+					ModelMetadata: map[string]api.ModelRuntime{
+						airplane.LocalModelID: {ContextWindow: 65536, MaxTokens: 4096},
+						api.DefaultModel:      {ContextWindow: 262144, MaxTokens: 32768},
+					},
+				}
+			},
+			want: "no syntactically usable closure binding metadata derived from the team API",
+		},
+		{
+			name: "manual DeepSeek model in Pi snapshot",
+			mutate: func(t *testing.T, team *config.TeamConfig) {
+				team.APISnapshot = unrelatedCloudSnapshot(unrelatedModel)
+				setPiHarnessSnapshotContent(t, team.HarnessSnapshot, "models.json", `{
+  "providers": {
+    "custom": {"keep": true},
+    "s46": {"models": [{"id": "s46/unrelated-cloud-model"}, {"id": "s46/deepseek-v4-flash-0731"}]}
+  },
+  "keep": true
+}
+`)
+			},
+			want: "no current saved team authorization",
+		},
+		{
+			name: "malformed s46 models in Pi snapshot",
+			mutate: func(t *testing.T, team *config.TeamConfig) {
+				team.APISnapshot = unrelatedCloudSnapshot(unrelatedModel)
+				setPiHarnessSnapshotContent(t, team.HarnessSnapshot, "models.json", `{"providers":{"custom":{"keep":true},"s46":{"models":"stale"}},"keep":true}`)
+			},
+			want: "providers.s46.models must be an array of objects",
+		},
+		{
+			name: "stale s46 default in Pi settings snapshot",
+			mutate: func(t *testing.T, team *config.TeamConfig) {
+				team.APISnapshot = unrelatedCloudSnapshot(unrelatedModel)
+				setPiHarnessSnapshotContent(t, team.HarnessSnapshot, "models.json", `{"providers":{"custom":{"keep":true},"s46":{"models":[{"id":"s46/unrelated-cloud-model"}]}},"keep":true}`)
+				setPiHarnessSnapshotContent(t, team.HarnessSnapshot, "settings.json", `{"defaultProvider":"s46","defaultModel":"s46/deepseek-v4-flash-0731","theme":"keep"}`)
+			},
+			want: "s46 defaultModel \"s46/deepseek-v4-flash-0731\": no current saved team authorization",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := testEnv(t)
+			requireOK(t, run(t, env, "login", "--email", "dscape@s46.dev"))
+			requireOK(t, run(t, env, "connect", api.DefaultTeam, "--harness=pi"))
+			requireOK(t, run(t, env, "airplane", "mode", "on"))
+
+			store := config.NewStore(env, "")
+			cfg, err := store.LoadConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			team := cfg.Teams[api.DefaultTeam]
+			tc.mutate(t, &team)
+			cfg.Teams[api.DefaultTeam] = team
+			if err := store.SaveConfig(cfg); err != nil {
+				t.Fatal(err)
+			}
+			before := connectHomeFiles(t, env)
+
+			result := run(t, env, "airplane", "mode", "off")
+			if result.err == nil || !strings.Contains(result.err.Error(), tc.want) {
+				t.Fatalf("expected %q refusal, got err=%v stdout=%q", tc.want, result.err, result.stdout)
+			}
+			if after := connectHomeFiles(t, env); !reflect.DeepEqual(before, after) {
+				t.Fatalf("mode-off refusal changed airplane config, snapshot, or Pi files\nbefore: %#v\nafter: %#v", before, after)
+			}
+		})
+	}
+}
+
+func TestAirplaneModeOffRefusesLocalOnlyDeepSeekSnapshotAtomically(t *testing.T) {
+	env := testEnv(t)
+	requireOK(t, run(t, env, "airplane", "mode", "on", "--harness=pi"))
+
+	store := config.NewStore(env, "")
+	cfg, err := store.LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	team := cfg.Teams[cfg.ActiveTeam]
+	setPiHarnessSnapshotContent(t, team.HarnessSnapshot, "models.json", `{"providers":{"s46":{"models":[{"id":"s46/deepseek-v4-flash-0731"}]}}}`)
+	cfg.Teams[cfg.ActiveTeam] = team
+	if err := store.SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	before := connectHomeFiles(t, env)
+
+	result := run(t, env, "airplane", "mode", "off")
+	if result.err == nil || !strings.Contains(result.err.Error(), "no current saved team authorization") {
+		t.Fatalf("expected local-only DeepSeek refusal, got err=%v stdout=%q", result.err, result.stdout)
+	}
+	if after := connectHomeFiles(t, env); !reflect.DeepEqual(before, after) {
+		t.Fatalf("local-only refusal changed airplane config, snapshot, or Pi files\nbefore: %#v\nafter: %#v", before, after)
+	}
+}
+
+func TestAirplaneModeOffRefusesSymlinkedPiSnapshotAliasAtomically(t *testing.T) {
+	env := testEnv(t)
+	requireOK(t, run(t, env, "airplane", "mode", "on", "--harness=pi"))
+
+	actualAgentDir := filepath.Join(env["HOME"], ".pi", "agent")
+	aliasAgentDir := filepath.Join(t.TempDir(), "pi-agent-alias")
+	if err := os.Symlink(actualAgentDir, aliasAgentDir); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	store := config.NewStore(env, "")
+	cfg, err := store.LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	team := cfg.Teams[cfg.ActiveTeam]
+	setPiHarnessSnapshotContent(t, team.HarnessSnapshot, "models.json", `{"providers":{"s46":{"models":[{"id":"s46/deepseek-v4-flash-0731"}]}}}`)
+	for i := range team.HarnessSnapshot.Files {
+		if filepath.Base(team.HarnessSnapshot.Files[i].Path) == "models.json" {
+			team.HarnessSnapshot.Files[i].Path = filepath.Join(aliasAgentDir, "models.json")
+		}
+	}
+	team.HarnessSnapshot.Harness = "standard"
+	team.DefaultHarness = "standard"
+	cfg.Teams[cfg.ActiveTeam] = team
+	if err := store.SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	before := connectHomeFiles(t, env)
+
+	result := run(t, env, "airplane", "mode", "off")
+	if result.err == nil || !strings.Contains(result.err.Error(), "no current saved team authorization") {
+		t.Fatalf("expected symlink alias refusal, got err=%v stdout=%q", result.err, result.stdout)
+	}
+	if after := connectHomeFiles(t, env); !reflect.DeepEqual(before, after) {
+		t.Fatalf("symlink alias refusal changed airplane config, snapshot, or Pi files\nbefore: %#v\nafter: %#v", before, after)
+	}
+}
+
+func TestAirplaneModeOffRestoresPiSnapshotsWithoutGuardedModelExactly(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		models   string
+		settings string
+	}{
+		{
+			name:     "missing s46 models array",
+			models:   `{"providers":{"s46":{"baseUrl":"https://manual.example/v1"}},"keep":true}`,
+			settings: `{"defaultProvider":"custom","defaultModel":"manual-default","keep":true}`,
+		},
+		{
+			name:     "unrelated manual models and s46 default",
+			models:   `{"providers":{"s46":{"models":[{"id":"s46/manual-one"},{"id":"s46/manual-two"}]}},"keep":true}`,
+			settings: `{"defaultProvider":"s46","defaultModel":"s46/manual-default","keep":true}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := testEnv(t)
+			requireOK(t, run(t, env, "airplane", "mode", "on", "--harness=pi"))
+			store := config.NewStore(env, "")
+			cfg, err := store.LoadConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			team := cfg.Teams[cfg.ActiveTeam]
+			setPiHarnessSnapshotContent(t, team.HarnessSnapshot, "models.json", tc.models)
+			setPiHarnessSnapshotContent(t, team.HarnessSnapshot, "settings.json", tc.settings)
+			cfg.Teams[cfg.ActiveTeam] = team
+			if err := store.SaveConfig(cfg); err != nil {
+				t.Fatal(err)
+			}
+
+			requireOK(t, run(t, env, "airplane", "mode", "off"))
+			for path, want := range map[string]string{
+				filepath.Join(env["HOME"], ".pi", "agent", "models.json"):   tc.models,
+				filepath.Join(env["HOME"], ".pi", "agent", "settings.json"): tc.settings,
+			} {
+				raw, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(raw) != want {
+					t.Fatalf("snapshot was not restored exactly for %s: got %q want %q", path, raw, want)
+				}
+			}
+		})
+	}
+}
+
+func unrelatedCloudSnapshot(model string) api.Team {
+	return api.Team{
+		Name:          api.DefaultTeam,
+		Endpoint:      api.DefaultGatewayURL,
+		DefaultModel:  model,
+		Models:        []string{model},
+		ModelMetadata: map[string]api.ModelRuntime{model: {ContextWindow: 8192, MaxTokens: 1024}},
+	}
+}
+
+func setPiHarnessSnapshotContent(t *testing.T, snapshot *config.HarnessSnapshot, name, content string) {
+	t.Helper()
+	if snapshot == nil {
+		t.Fatal("missing Pi harness snapshot")
+	}
+	for i := range snapshot.Files {
+		if filepath.Base(snapshot.Files[i].Path) == name {
+			snapshot.Files[i].Existed = true
+			snapshot.Files[i].Content = content
+			return
+		}
+	}
+	t.Fatalf("Pi harness snapshot has no %s", name)
 }
 
 func TestAirplaneModeOnPromptsForHarnessAndRestoresSelectedHarness(t *testing.T) {
@@ -217,7 +547,7 @@ func TestAirplaneModeOffRestoresManagedHarnessesExactly(t *testing.T) {
 			name:     "pi",
 			harness:  "pi",
 			path:     func(env map[string]string) string { return filepath.Join(env["HOME"], ".pi", "agent", "models.json") },
-			content:  "{\n  \"providers\": {\n    \"custom\": {\n      \"baseUrl\": \"http://localhost:11434/v1\"\n    },\n    \"s46\": {\n      \"baseUrl\": \"https://custom.example/v1\",\n      \"api\": \"custom\"\n    }\n  },\n  \"unrelated\": true\n}\n",
+			content:  "{\n  \"providers\": {\n    \"custom\": {\n      \"baseUrl\": \"http://localhost:11434/v1\"\n    },\n    \"s46\": {\n      \"baseUrl\": \"https://custom.example/v1\",\n      \"api\": \"custom\",\n      \"models\": [{\"id\": \"s46/deepseek-v4-flash-0731\"}]\n    }\n  },\n  \"unrelated\": true\n}\n",
 			contains: airplane.LocalGatewayURL + "/v1",
 		},
 	}
@@ -480,6 +810,116 @@ func TestAirplaneCloudCommandsFailFast(t *testing.T) {
 	connect := requireOK(t, run(t, env, "connect", "@s46/engineering", "--harness=standard"))
 	if !strings.Contains(connect, "workers: localhost") {
 		t.Fatalf("expected airplane connect to stay local:\n%s", connect)
+	}
+}
+
+func TestApplyAtomicConfigAndSnapshotRefusesGuardedContentAcrossParentSymlinkFlip(t *testing.T) {
+	root := t.TempDir()
+	env := map[string]string{
+		"HOME":            filepath.Join(root, "home"),
+		"XDG_CONFIG_HOME": filepath.Join(root, "config"),
+		"XDG_DATA_HOME":   filepath.Join(root, "data"),
+	}
+	piAgentDir := filepath.Join(env["HOME"], ".pi", "agent")
+	benignAgentDir := filepath.Join(root, "benign-agent")
+	if err := os.MkdirAll(piAgentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(benignAgentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	piModelsPath := filepath.Join(piAgentDir, "models.json")
+	benignModelsPath := filepath.Join(benignAgentDir, "models.json")
+	if err := os.WriteFile(piModelsPath, []byte("PI SAFE"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(benignModelsPath, []byte("BENIGN SAFE"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	routedAgentDir := filepath.Join(root, "routed-agent")
+	if err := os.Symlink(benignAgentDir, routedAgentDir); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	replacementLink := filepath.Join(root, "routed-agent-next")
+	if err := os.Symlink(piAgentDir, replacementLink); err != nil {
+		t.Fatal(err)
+	}
+	deepValue := strings.Repeat(`{"nested":`, 10_001) + `null` + strings.Repeat(`}`, 10_001)
+	snapshot := config.HarnessSnapshot{Harness: "other", Files: []config.HarnessFileSnapshot{{
+		Path:    filepath.Join(routedAgentDir, "models.json"),
+		Existed: true,
+		Content: "\ufeff{\n// Pi JSONC must be guarded before a parent can be redirected\n\"unrelated\":" + deepValue + ",\n\"providers\":{\"s46\":{\"models\":[{\"id\":\"s46/deepseek-v4-flash-0731\",},],},},\n}",
+		Mode:    0o600,
+	}}}
+
+	store := config.NewStore(env, "")
+	before := config.DefaultConfig()
+	before.Mode = config.ModeAirplane
+	before.ActiveTeam = "local"
+	before.Teams["local"] = config.TeamConfig{Endpoint: airplane.LocalGatewayURL, HarnessSnapshot: &snapshot}
+	if err := store.SaveConfig(before); err != nil {
+		t.Fatal(err)
+	}
+	after := before.Clone()
+	after.Mode = config.ModeCloud
+	after.Teams["local"] = config.TeamConfig{Endpoint: api.DefaultGatewayURL}
+	app := &app{config: store, runtime: Runtime{Env: env}, options: &options{}}
+	restored := config.TeamConfigFromAPI(unrelatedCloudSnapshot("s46/unrelated-cloud-model"), "other", "s46/unrelated-cloud-model", config.ModeCloud)
+
+	configInfoBefore, err := os.Stat(store.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flipped := false
+	validate := func() error {
+		err := validateSnapshotRestore(app, "local", restored, snapshot)
+		if renameErr := os.Rename(replacementLink, routedAgentDir); renameErr != nil {
+			t.Fatalf("atomically repoint snapshot parent: %v", renameErr)
+		}
+		flipped = true
+		return err
+	}
+	err = applyAtomicConfigAndSnapshotValidated(app, before, after, snapshot, "airplane mode off", validate)
+	if err == nil || !strings.Contains(err.Error(), "snapshot file") || !strings.Contains(err.Error(), "no current saved team authorization") {
+		t.Fatalf("expected path-independent guarded-content refusal, got %v", err)
+	}
+	if !flipped {
+		t.Fatal("test did not flip the snapshot parent after validation")
+	}
+	resolved, err := filepath.EvalSymlinks(routedAgentDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedPiAgentDir, err := filepath.EvalSymlinks(piAgentDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved != resolvedPiAgentDir {
+		t.Fatalf("snapshot parent resolves to %q, want %q", resolved, resolvedPiAgentDir)
+	}
+	configInfoAfter, err := os.Stat(store.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(configInfoBefore, configInfoAfter) {
+		t.Fatal("config was replaced before guarded-content refusal")
+	}
+	for path, want := range map[string]string{piModelsPath: "PI SAFE", benignModelsPath: "BENIGN SAFE"} {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(raw) != want {
+			t.Fatalf("snapshot restore mutated %s: got %q want %q", path, raw, want)
+		}
+		backups, err := filepath.Glob(path + ".s46-backup-*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(backups) != 0 {
+			t.Fatalf("snapshot restore created backup before refusal: %v", backups)
+		}
 	}
 }
 

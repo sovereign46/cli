@@ -14,10 +14,12 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Fixed
 
 - Fixed airplane-mode round trips to preserve every selected cloud default, including Devstral served from a cloud endpoint.
+- Fixed project discovery to ignore repository-local Git environment inherited from parent hooks and commands.
 
 ### Security
 
 - **Breaking:** Model installation and cached verification require an independently approved complete policy bundled with the CLI, signed advisory evidence, and current activation checks. No production policy is approved yet, so both paths fail closed; registry and receipt roots cannot authorize activation.
+- Require API-derived runtime-closure metadata before configuring or restoring DeepSeek V4 Flash-0731 in Pi, including saved team and aliased snapshot state.
 - Recheck signed audits and advisories after artifact verification, and invalidate matching cached receipts after an authenticated policy refusal.
 - Reject native safetensors packages before downloading them through the GGUF-only airplane installer.
 
