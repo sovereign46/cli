@@ -72,6 +72,9 @@ func TestGetReturnsLdflagsWhenSet(t *testing.T) {
 	if info.GoVersion == "" {
 		t.Errorf("GoVersion should be populated from runtime")
 	}
+	if info.Release != releaseBuild {
+		t.Errorf("Release = %v, want %v", info.Release, releaseBuild)
+	}
 }
 
 func TestGetFillsFromBuildInfoWhenLdflagsMissing(t *testing.T) {

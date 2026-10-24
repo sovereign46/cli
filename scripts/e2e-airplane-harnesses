@@ -1,21 +1,47 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 host_home="${HOME:-}"
 sandbox="$(mktemp -d "${TMPDIR:-/tmp}/s46-e2e-airplane.XXXXXX")"
 sandbox="$(cd "$sandbox" && pwd -P)"
 keep_sandbox="${S46_E2E_KEEP_SANDBOX:-0}"
+candidate_binary=""
+airplane_mode_enabled=0
+
+best_effort_disable_airplane() {
+  if [ "$airplane_mode_enabled" != "1" ] || [ ! -x "$candidate_binary" ]; then
+    return 0
+  fi
+  "$candidate_binary" airplane mode off >"$sandbox/cleanup-mode-off.out" 2>"$sandbox/cleanup-mode-off.err" &
+  local pid=$! iteration
+  for ((iteration = 0; iteration < 30; iteration++)); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      if wait "$pid"; then
+        airplane_mode_enabled=0
+      fi
+      return 0
+    fi
+    sleep 1
+  done
+  kill "$pid" 2>/dev/null || true
+  sleep 1
+  kill -9 "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  printf '[s46-e2e] warning: timed out while disabling airplane mode during cleanup\n' >&2
+}
 
 cleanup() {
+  local status=$?
+  trap - EXIT
+  best_effort_disable_airplane
   if [ "$keep_sandbox" = "1" ]; then
     echo "[s46-e2e] sandbox preserved: $sandbox"
-    return
-  fi
-  if [ -d "$sandbox" ]; then
+  elif [ -d "$sandbox" ]; then
     find -P "$sandbox" -type d -exec chmod u+rwx {} + 2>/dev/null || true
     rm -rf "$sandbox"
   fi
+  exit "$status"
 }
 trap cleanup EXIT
 trap 'exit 143' TERM
@@ -31,6 +57,451 @@ fail() {
 
 require_command() {
   command -v "$1" >/dev/null 2>&1 || fail "$1 is required on PATH"
+}
+
+stage_candidate() {
+  local source="$1"
+  local expected_sha256="$2"
+  local binary="$3"
+  local metadata="$4"
+  python3 - "$source" "$expected_sha256" "$binary" "$metadata" <<'PY'
+import hashlib
+import json
+import os
+import re
+import stat
+import sys
+import tarfile
+import zlib
+
+source, expected, binary, metadata = sys.argv[1:]
+max_package_bytes = 256 * 1024 * 1024
+max_member_bytes = 64 * 1024 * 1024
+max_archive_content_bytes = 128 * 1024 * 1024
+max_archive_uncompressed_bytes = 256 * 1024 * 1024
+max_archive_members = 1024
+if not os.path.isabs(source):
+    raise SystemExit("candidate path must be absolute")
+if not re.fullmatch(r"[0-9a-f]{64}", expected):
+    raise SystemExit("candidate SHA-256 must be exactly 64 lowercase hexadecimal characters")
+
+try:
+    before = os.lstat(source)
+except OSError as error:
+    raise SystemExit(f"cannot inspect candidate: {error}")
+if not stat.S_ISREG(before.st_mode):
+    raise SystemExit("candidate must be a regular file (symlinks, FIFOs, devices, and sockets are refused)")
+if before.st_size <= 0:
+    raise SystemExit("candidate must be nonempty")
+if before.st_size > max_package_bytes:
+    raise SystemExit(f"candidate exceeds the {max_package_bytes}-byte package limit")
+package_mode = stat.S_IMODE(before.st_mode)
+if package_mode & 0o7000:
+    raise SystemExit(f"candidate mode {package_mode:04o} has privilege bits")
+if package_mode & 0o022:
+    raise SystemExit(f"candidate mode {package_mode:04o} is group/world writable")
+
+flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+try:
+    source_fd = os.open(source, flags)
+except OSError as error:
+    raise SystemExit(f"cannot open candidate without following links: {error}")
+package_copy = binary + ".package"
+hasher = hashlib.sha256()
+try:
+    opened = os.fstat(source_fd)
+    if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+        raise SystemExit("candidate changed while it was opened")
+    copied_size = 0
+    with os.fdopen(os.open(package_copy, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as output:
+        while True:
+            chunk = os.read(source_fd, 1024 * 1024)
+            if not chunk:
+                break
+            copied_size += len(chunk)
+            if copied_size > max_package_bytes:
+                raise SystemExit(f"candidate exceeds the {max_package_bytes}-byte package limit while copying")
+            hasher.update(chunk)
+            output.write(chunk)
+        output.flush()
+        os.fsync(output.fileno())
+    after = os.fstat(source_fd)
+finally:
+    os.close(source_fd)
+try:
+    current = os.lstat(source)
+except OSError:
+    raise SystemExit("candidate path disappeared during verification")
+stable_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+if any(getattr(before, field) != getattr(after, field) for field in stable_fields):
+    raise SystemExit("candidate was mutated while being verified")
+if any(getattr(after, field) != getattr(current, field) for field in stable_fields):
+    raise SystemExit("candidate path was replaced or mutated while being verified")
+actual = hasher.hexdigest()
+if actual != expected:
+    raise SystemExit(f"candidate SHA-256 mismatch: got {actual}, want {expected}")
+
+package_size = before.st_size
+kind = "binary"
+binary_hash = hashlib.sha256()
+binary_size = 0
+binary_mode = package_mode
+with open(package_copy, "rb") as package:
+    gzip_magic = package.read(2) == b"\x1f\x8b"
+
+if not gzip_magic:
+    if package_size > max_member_bytes:
+        raise SystemExit(f"candidate binary exceeds the {max_member_bytes}-byte binary limit")
+    if package_mode != 0o755:
+        raise SystemExit(f"candidate binary mode {package_mode:04o} must be 0755")
+    os.replace(package_copy, binary)
+    with open(binary, "rb") as candidate:
+        while chunk := candidate.read(1024 * 1024):
+            binary_hash.update(chunk)
+            binary_size += len(chunk)
+else:
+    kind = "archive"
+    tar_copy = binary + ".tar"
+    decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    uncompressed_size = 0
+    try:
+        with open(package_copy, "rb") as compressed, os.fdopen(os.open(tar_copy, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as output:
+            while True:
+                chunk = compressed.read(1024 * 1024)
+                if not chunk:
+                    break
+                decoded = decompressor.decompress(chunk, max_archive_uncompressed_bytes - uncompressed_size + 1)
+                uncompressed_size += len(decoded)
+                if uncompressed_size > max_archive_uncompressed_bytes or decompressor.unconsumed_tail:
+                    raise SystemExit(f"candidate archive exceeds the {max_archive_uncompressed_bytes}-byte uncompressed limit")
+                output.write(decoded)
+                if decompressor.eof:
+                    if decompressor.unused_data or compressed.read(1):
+                        raise SystemExit("candidate archive must contain exactly one gzip stream with no trailing data")
+                    break
+            if not decompressor.eof:
+                raise SystemExit("candidate archive gzip stream is truncated")
+            decoded = decompressor.flush(max_archive_uncompressed_bytes - uncompressed_size + 1)
+            uncompressed_size += len(decoded)
+            if uncompressed_size > max_archive_uncompressed_bytes:
+                raise SystemExit(f"candidate archive exceeds the {max_archive_uncompressed_bytes}-byte uncompressed limit")
+            output.write(decoded)
+            output.flush()
+            os.fsync(output.fileno())
+    except zlib.error as error:
+        raise SystemExit(f"candidate gzip is invalid: {error}")
+
+    def parse_octal(field, label):
+        value = field.rstrip(b"\0 ").lstrip(b" ")
+        if not value or not re.fullmatch(br"[0-7]+", value):
+            raise SystemExit(f"candidate archive has a non-canonical {label}")
+        return int(value, 8)
+
+    raw_member_count = 0
+    with open(tar_copy, "rb") as raw_tar:
+        while True:
+            header = raw_tar.read(512)
+            if len(header) != 512:
+                raise SystemExit("candidate archive is missing canonical tar end markers")
+            if header == bytes(512):
+                second = raw_tar.read(512)
+                if second != bytes(512):
+                    raise SystemExit("candidate archive has a non-canonical tar end marker")
+                trailing_size = 0
+                while True:
+                    trailing = raw_tar.read(1024 * 1024)
+                    if not trailing:
+                        break
+                    trailing_size += len(trailing)
+                    if any(trailing):
+                        raise SystemExit("candidate archive has noncanonical data after its tar end markers")
+                if trailing_size % 512 != 0:
+                    raise SystemExit("candidate archive has noncanonical data after its tar end markers")
+                break
+            raw_member_count += 1
+            if raw_member_count > max_archive_members:
+                raise SystemExit(f"candidate archive exceeds the {max_archive_members}-member limit")
+            stored_checksum = parse_octal(header[148:156], "tar checksum")
+            calculated_checksum = sum(header[:148]) + 8 * ord(" ") + sum(header[156:])
+            if stored_checksum != calculated_checksum:
+                raise SystemExit("candidate archive has an invalid tar header checksum")
+            typeflag = header[156:157]
+            if typeflag in (b"1", b"2"):
+                raise SystemExit("candidate archive member is a symlink or hardlink")
+            if typeflag in (b"3", b"4", b"6", b"7"):
+                raise SystemExit("candidate archive member is a special file")
+            if typeflag not in (b"\0", b"0", b"5"):
+                raise SystemExit("candidate archive uses PAX, GNU, sparse, or unsupported tar headers")
+            raw_size = parse_octal(header[124:136], "tar member size")
+            if raw_size > max_member_bytes:
+                raise SystemExit(f"candidate archive member exceeds the {max_member_bytes}-byte limit")
+            padded_size = (raw_size + 511) // 512 * 512
+            if len(raw_tar.read(padded_size)) != padded_size:
+                raise SystemExit("candidate archive member payload is truncated")
+
+    try:
+        archive = tarfile.open(tar_copy, mode="r:")
+    except (OSError, tarfile.TarError) as error:
+        raise SystemExit(f"candidate gzip is not a valid tar archive: {error}")
+    try:
+        candidate_member = None
+        member_names = set()
+        total_size = 0
+        member_count = 0
+        try:
+            for member_count, member in enumerate(archive, start=1):
+                if member_count > max_archive_members:
+                    raise SystemExit(f"candidate archive exceeds the {max_archive_members}-member limit")
+                if member.pax_headers:
+                    raise SystemExit("candidate archive member uses PAX metadata")
+                name = member.name
+                if not name or "\\" in name or name.startswith("/") or re.match(r"^[A-Za-z]:", name):
+                    raise SystemExit(f"candidate archive has an absolute or non-POSIX path: {name!r}")
+                path_parts = name.rstrip("/").split("/")
+                if not path_parts or any(part in ("", ".", "..") for part in path_parts):
+                    raise SystemExit(f"candidate archive has a non-canonical or traversing path: {name!r}")
+                canonical_name = "/".join(path_parts)
+                if canonical_name in member_names:
+                    raise SystemExit(f"candidate archive has duplicate member {canonical_name!r}")
+                member_names.add(canonical_name)
+
+                if member.mode < 0 or member.mode & ~0o7777:
+                    raise SystemExit(f"candidate archive member {canonical_name!r} has a non-canonical mode")
+                mode = member.mode
+                if mode & 0o7000:
+                    raise SystemExit(f"candidate archive member {canonical_name!r} has privilege bits in mode {mode:04o}")
+                if member.issym() or member.islnk():
+                    raise SystemExit(f"candidate archive member {canonical_name!r} is a symlink or hardlink")
+                if not (member.isfile() or member.isdir()):
+                    raise SystemExit(f"candidate archive member {canonical_name!r} is a special file")
+                if member.size < 0 or member.size > max_member_bytes:
+                    raise SystemExit(f"candidate archive member {canonical_name!r} exceeds the {max_member_bytes}-byte limit")
+                total_size += member.size
+                if total_size > max_archive_content_bytes:
+                    raise SystemExit(f"candidate archive declared content exceeds the {max_archive_content_bytes}-byte aggregate limit")
+
+                if member.isdir():
+                    if member.size != 0 or mode != 0o755:
+                        raise SystemExit(f"candidate archive directory {canonical_name!r} must have size 0 and mode 0755")
+                    continue
+                if canonical_name == "s46":
+                    if candidate_member is not None:
+                        raise SystemExit("candidate archive has duplicate s46 executables")
+                    if member.size <= 0:
+                        raise SystemExit("candidate archive s46 entry must be nonempty")
+                    if mode != 0o755:
+                        raise SystemExit(f"candidate archive s46 mode {mode:04o} must be 0755")
+                    if getattr(member, "sparse", None) is not None:
+                        raise SystemExit("candidate archive s46 entry must not be sparse")
+                    candidate_member = member
+                    binary_mode = mode
+                    continue
+                if path_parts[-1] == "s46" or mode & 0o111:
+                    raise SystemExit(f"candidate archive has an extra executable layout at {canonical_name!r}")
+                if mode != 0o644:
+                    raise SystemExit(f"candidate archive regular member {canonical_name!r} must have mode 0644")
+                if getattr(member, "sparse", None) is not None:
+                    raise SystemExit(f"candidate archive regular member {canonical_name!r} must not be sparse")
+                payload = archive.extractfile(member)
+                if payload is None:
+                    raise SystemExit(f"cannot read candidate archive member {canonical_name!r}")
+                member_size = 0
+                member_hash = hashlib.sha256()
+                with payload:
+                    while True:
+                        chunk = payload.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        member_size += len(chunk)
+                        if member_size > member.size:
+                            raise SystemExit(f"candidate archive member {canonical_name!r} exceeds its declared size")
+                        member_hash.update(chunk)
+                if member_size != member.size:
+                    raise SystemExit(f"candidate archive member {canonical_name!r} size changed while reading")
+                member_hash.hexdigest()
+        except tarfile.TarError as error:
+            raise SystemExit(f"candidate archive cannot be read safely: {error}")
+        if member_count != raw_member_count:
+            raise SystemExit("candidate archive raw and logical member counts differ")
+        if candidate_member is None:
+            raise SystemExit("candidate archive must contain exactly one top-level regular executable named s46")
+
+        payload = archive.extractfile(candidate_member)
+        if payload is None:
+            raise SystemExit("cannot read candidate archive s46 entry")
+        with payload, os.fdopen(os.open(binary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700), "wb") as output:
+            while True:
+                chunk = payload.read(1024 * 1024)
+                if not chunk:
+                    break
+                binary_size += len(chunk)
+                if binary_size > candidate_member.size:
+                    raise SystemExit("candidate archive s46 content exceeds its declared size")
+                binary_hash.update(chunk)
+                output.write(chunk)
+            output.flush()
+            os.fsync(output.fileno())
+        if binary_size != candidate_member.size:
+            raise SystemExit("candidate archive s46 size changed while reading")
+    finally:
+        archive.close()
+
+os.chmod(binary, 0o500)
+if kind == "binary":
+    binary_size = package_size
+    binary_hash = hashlib.sha256()
+    with open(binary, "rb") as candidate:
+        while chunk := candidate.read(1024 * 1024):
+            binary_hash.update(chunk)
+with open(metadata, "x", encoding="utf-8") as output:
+    json.dump({
+        "source": source,
+        "kind": kind,
+        "packageSha256": actual,
+        "packageSize": package_size,
+        "packageMode": f"{package_mode:04o}",
+        "binarySha256": binary_hash.hexdigest(),
+        "binarySize": binary_size,
+        "binarySourceMode": f"{binary_mode:04o}",
+        "stagedMode": "0500",
+    }, output, sort_keys=True)
+    output.write("\n")
+PY
+}
+
+verify_candidate_identity() {
+  local binary="$1"
+  local metadata="$2"
+  local expected_version="$3"
+  local expected_commit="$4"
+  local qualification="$5"
+  local version_json="$sandbox/candidate-version.json"
+  "$binary" version --json >"$version_json"
+  python3 - "$metadata" "$version_json" "$sandbox/candidate-identity.json" "$expected_version" "$expected_commit" "$qualification" <<'PY'
+import datetime
+import json
+import re
+import sys
+
+metadata_path, version_path, identity_path, expected_version, expected_commit, qualification = sys.argv[1:]
+with open(metadata_path, encoding="utf-8") as source:
+    identity = json.load(source)
+with open(version_path, encoding="utf-8") as source:
+    version = json.load(source)
+if not re.fullmatch(r"\d+\.\d+\.\d+", str(version.get("version", ""))):
+    raise SystemExit(f"candidate reports a non-release version: {version.get('version')!r}")
+if version.get("release") is not True:
+    raise SystemExit("candidate is not compiled with the release build tag")
+commit = str(version.get("commit", ""))
+if not re.fullmatch(r"[0-9a-f]{40,64}", commit):
+    raise SystemExit(f"candidate reports an invalid, unknown, or dirty commit: {commit!r}")
+if qualification == "1":
+    if identity.get("kind") != "archive":
+        raise SystemExit("release qualification requires a validated release archive")
+    if not re.fullmatch(r"\d+\.\d+\.\d+", expected_version):
+        raise SystemExit("qualification requires S46_E2E_EXPECTED_VERSION=x.y.z")
+    if not re.fullmatch(r"[0-9a-f]{40,64}", expected_commit):
+        raise SystemExit("qualification requires a full lowercase S46_E2E_EXPECTED_COMMIT")
+    if version["version"] != expected_version:
+        raise SystemExit(f"candidate version {version['version']!r} does not match expected {expected_version!r}")
+    if commit != expected_commit:
+        raise SystemExit(f"candidate commit {commit!r} does not match expected {expected_commit!r}")
+date = str(version.get("date", ""))
+try:
+    datetime.datetime.fromisoformat(date.replace("Z", "+00:00"))
+except ValueError:
+    raise SystemExit(f"candidate reports an invalid or unknown build date: {date!r}")
+if not version.get("goVersion"):
+    raise SystemExit("candidate reports an empty Go version")
+identity["build"] = version
+identity["qualification"] = {
+    "requested": qualification == "1",
+    "expectedVersion": expected_version or None,
+    "expectedCommit": expected_commit or None,
+}
+with open(identity_path, "x", encoding="utf-8") as output:
+    json.dump(identity, output, indent=2, sort_keys=True)
+    output.write("\n")
+print(f"candidate package: {identity['packageSha256']} ({identity['packageSize']} bytes, mode {identity['packageMode']}, {identity['kind']})")
+print(f"candidate binary:  {identity['binarySha256']} ({identity['binarySize']} bytes, staged mode {identity['stagedMode']})")
+print(f"candidate build:   v{version['version']} commit {commit} date {date} {version['goVersion']}")
+print(f"candidate identity: {identity_path}")
+PY
+}
+
+write_qualification_evidence() {
+  local identity="$1"
+  local destination="$2"
+  python3 - "$identity" "$destination" <<'PY'
+import datetime
+import json
+import os
+import stat
+import sys
+
+identity_path, destination = sys.argv[1:]
+if not os.path.isabs(destination):
+    raise SystemExit("qualification evidence path must be absolute")
+parent = os.path.dirname(destination)
+parent_info = os.lstat(parent)
+if not stat.S_ISDIR(parent_info.st_mode):
+    raise SystemExit("qualification evidence parent must be a directory")
+with open(identity_path, encoding="utf-8") as source:
+    identity = json.load(source)
+expected_name = os.path.basename(identity["source"]) + ".qualification.json"
+if os.path.basename(destination) != expected_name:
+    raise SystemExit(f"qualification evidence filename must be {expected_name}")
+if identity.get("kind") != "archive":
+    raise SystemExit("release qualification evidence requires a validated release archive")
+qualification = identity.get("qualification", {})
+if qualification.get("requested") is not True:
+    raise SystemExit("cannot write qualification evidence for a non-qualification run")
+evidence = {
+    "schema": "s46.release-qualification.v1",
+    "result": "passed",
+    "qualifiedAt": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+    "artifact": {
+        "name": os.path.basename(identity["source"]),
+        "sha256": identity["packageSha256"],
+        "size": identity["packageSize"],
+        "kind": identity["kind"],
+    },
+    "binary": {
+        "sha256": identity["binarySha256"],
+        "size": identity["binarySize"],
+        "sourceMode": identity["binarySourceMode"],
+    },
+    "build": identity["build"],
+    "qualification": {
+        "expectedVersion": qualification["expectedVersion"],
+        "expectedCommit": qualification["expectedCommit"],
+        "networkIsolation": "external",
+        "airplaneHarnesses": ["pi", "claude-code", "codex"],
+    },
+}
+flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+try:
+    output_fd = os.open(destination, flags, 0o600)
+except OSError as error:
+    raise SystemExit(f"cannot create qualification evidence: {error}")
+with os.fdopen(output_fd, "w", encoding="utf-8") as output:
+    json.dump(evidence, output, indent=2, sort_keys=True)
+    output.write("\n")
+    output.flush()
+    os.fsync(output.fileno())
+print(f"qualification evidence: {destination}")
+PY
+}
+
+install_smoke_proxy_poisoning() {
+  export NO_PROXY="127.0.0.1,localhost,::1"
+  export no_proxy="$NO_PROXY"
+  export HTTP_PROXY="http://127.0.0.1:9"
+  export HTTPS_PROXY="http://127.0.0.1:9"
+  export ALL_PROXY="http://127.0.0.1:9"
+  export http_proxy="$HTTP_PROXY"
+  export https_proxy="$HTTPS_PROXY"
+  export all_proxy="$ALL_PROXY"
 }
 
 assert_file_contains() {
@@ -108,19 +579,42 @@ run_capture_timeout() {
 local_model="s46/devstral-small-2-24b"
 backend_model="${S46_LOCAL_MODEL:-devstral-small-2:24b-instruct-2512-q4_K_M}"
 harness_timeout="${S46_E2E_HARNESS_TIMEOUT:-420}"
+candidate_source="${S46_E2E_CANDIDATE:-}"
+candidate_sha256="${S46_E2E_CANDIDATE_SHA256:-}"
+network_isolation="${S46_E2E_NETWORK_ISOLATION:-proxy}"
+qualification="${S46_E2E_QUALIFICATION:-0}"
+expected_version="${S46_E2E_EXPECTED_VERSION:-}"
+expected_commit="${S46_E2E_EXPECTED_COMMIT:-}"
+qualification_evidence="${S46_E2E_QUALIFICATION_EVIDENCE:-}"
+verify_candidate_only="${S46_E2E_VERIFY_CANDIDATE_ONLY:-0}"
 
-require_command cmp
-require_command diff
+[ -n "$candidate_source" ] || fail "S46_E2E_CANDIDATE must name an absolute release-candidate binary or archive"
+[ -n "$candidate_sha256" ] || fail "S46_E2E_CANDIDATE_SHA256 must be supplied independently"
+case "$network_isolation" in
+  proxy|external) ;;
+  *) fail "S46_E2E_NETWORK_ISOLATION must be proxy or external" ;;
+esac
+case "$qualification" in
+  0|1) ;;
+  *) fail "S46_E2E_QUALIFICATION must be 0 or 1" ;;
+esac
+case "$verify_candidate_only" in
+  0|1) ;;
+  *) fail "S46_E2E_VERIFY_CANDIDATE_ONLY must be 0 or 1" ;;
+esac
+if [ "$qualification" = "1" ] && [ "$network_isolation" != "external" ]; then
+  fail "S46_E2E_QUALIFICATION=1 requires a pre-established external OS-level egress block"
+fi
+if [ "$qualification" = "1" ]; then
+  [ -n "$expected_version" ] || fail "S46_E2E_QUALIFICATION=1 requires S46_E2E_EXPECTED_VERSION"
+  [ -n "$expected_commit" ] || fail "S46_E2E_QUALIFICATION=1 requires S46_E2E_EXPECTED_COMMIT"
+  [ -n "$qualification_evidence" ] || fail "S46_E2E_QUALIFICATION=1 requires S46_E2E_QUALIFICATION_EVIDENCE"
+fi
+
 require_command python3
-require_command pi
-require_command claude
-require_command codex
-require_command llama-server
-
 mkdir -p "$sandbox/home" "$sandbox/bin" "$sandbox/project"
-cd "$repo_root"
-log "building s46"
-go build -o "$sandbox/bin/s46" ./cmd/s46
+stage_candidate "$candidate_source" "$candidate_sha256" "$sandbox/bin/s46" "$sandbox/candidate-package.json"
+candidate_binary="$sandbox/bin/s46"
 
 export HOME="$sandbox/home"
 export XDG_CONFIG_HOME="$HOME/.config"
@@ -144,6 +638,26 @@ unset OPENAI_API_KEY AZURE_OPENAI_API_KEY DEEPSEEK_API_KEY GEMINI_API_KEY GROQ_A
 unset MISTRAL_API_KEY TOGETHER_API_KEY FIREWORKS_API_KEY OPENROUTER_API_KEY
 unset XAI_API_KEY CEREBRAS_API_KEY KIMI_API_KEY MINIMAX_API_KEY ZAI_API_KEY
 
+install_smoke_proxy_poisoning
+if [ "$network_isolation" = "external" ]; then
+  log "network isolation: operator-confirmed pre-established external OS-level egress denial (proxy poisoning also installed as defense in depth)"
+else
+  log "network isolation: proxy poisoning smoke check only; this is not OS-level egress isolation or release qualification"
+fi
+verify_candidate_identity "$candidate_binary" "$sandbox/candidate-package.json" "$expected_version" "$expected_commit" "$qualification"
+
+if [ "$verify_candidate_only" = "1" ]; then
+  [ "$qualification" = "0" ] || fail "qualification evidence requires the complete airplane harness run"
+  log "candidate verification completed without starting the airplane runtime"
+  exit 0
+fi
+
+require_command cmp
+require_command diff
+require_command pi
+require_command claude
+require_command codex
+require_command llama-server
 mkdir -p "$S46_LOG_DIR"
 cd "$sandbox/project"
 
@@ -203,6 +717,7 @@ EOF
 
 enable_airplane_harness_configs() {
   log "enabling airplane mode for Pi"
+  airplane_mode_enabled=1
   s46 airplane setup --mode=on --harness=pi --yes
   log "configuring Claude Code and Codex for local team"
   s46 connect local --harness=claude-code
@@ -226,6 +741,7 @@ assert_airplane_harness_configs() {
 assert_airplane_mode_off_restores_configs() {
   log "turning airplane mode off and checking exact config restore"
   s46 airplane mode off >"$sandbox/mode-off.out" 2>"$sandbox/mode-off.err"
+  airplane_mode_enabled=0
   assert_file_matches "$pi_models" "$original_pi_models"
   assert_file_matches "$pi_settings" "$original_pi_settings"
   assert_file_matches "$claude_settings" "$original_claude_settings"
@@ -250,16 +766,6 @@ assert_airplane_harness_configs
 assert_airplane_mode_off_restores_configs
 enable_airplane_harness_configs
 assert_airplane_harness_configs
-
-log "poisoning non-local cloud egress for harness runs"
-export NO_PROXY="127.0.0.1,localhost,::1"
-export no_proxy="$NO_PROXY"
-export HTTP_PROXY="http://127.0.0.1:9"
-export HTTPS_PROXY="http://127.0.0.1:9"
-export ALL_PROXY="http://127.0.0.1:9"
-export http_proxy="$HTTP_PROXY"
-export https_proxy="$HTTPS_PROXY"
-export all_proxy="$ALL_PROXY"
 
 run_pi() {
   log "running Pi against airplane gateway"
@@ -365,6 +871,10 @@ run_claude
 assert_local_share claude-code
 run_codex
 assert_local_share codex
+assert_airplane_mode_off_restores_configs
+if [ "$qualification" = "1" ]; then
+  write_qualification_evidence "$sandbox/candidate-identity.json" "$qualification_evidence"
+fi
 
-log "all harnesses wrote files, produced local sessions, and built local share artifacts"
+log "all harnesses wrote files, produced local sessions, built local share artifacts, and restored cloud mode and harness configuration"
 log "project: $sandbox/project"

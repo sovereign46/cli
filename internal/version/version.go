@@ -34,6 +34,7 @@ type Info struct {
 	Commit    string `json:"commit"`
 	Date      string `json:"date"`
 	GoVersion string `json:"goVersion"`
+	Release   bool   `json:"release"`
 }
 
 func Get(ctx context.Context) (Info, error) {
@@ -60,7 +61,7 @@ func Get(ctx context.Context) (Info, error) {
 }
 
 func resolve(ctx context.Context, key cacheKey) (Info, error) {
-	info := Info{Version: key.version, Commit: key.commit, Date: key.date, GoVersion: runtime.Version()}
+	info := Info{Version: key.version, Commit: key.commit, Date: key.date, GoVersion: runtime.Version(), Release: releaseBuild}
 	if !isUnknown(info.Commit) && !isUnknown(info.Date) {
 		return info, nil
 	}
