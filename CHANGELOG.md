@@ -10,6 +10,8 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Changed cloud model selection and Pi runtime limits to use the authorized team catalog instead of client-side defaults; `connect` refuses unavailable selections before changing configuration, without silently switching models.
 - Changed Pi thinking `off` to send an explicit disable value for DeepSeek V4 Flash-0731 on vLLM 0.31.0, without changing other models or airplane mode.
+- Changed the airplane harness E2E to require an exact release-tagged candidate and independently supplied SHA-256, emit digest-bound evidence only after full externally isolated qualification, and strictly validate every archive member.
+- Split release preparation from explicit publication; candidates are built once from the exact prepared commit in an isolated clone, publication requires evidence for every archive, and CI promotes the staged qualified bytes without rebuilding or replacing them before updating Homebrew from their exact checksums.
 
 ### Fixed
 
@@ -22,6 +24,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Require API-derived runtime-closure metadata before configuring or restoring DeepSeek V4 Flash-0731 in Pi, including saved team and aliased snapshot state.
 - Recheck signed audits and advisories after artifact verification, and invalidate matching cached receipts after an authenticated policy refusal.
 - Reject native safetensors packages before downloading them through the GGUF-only airplane installer.
+- Require distinct approved Ed25519 build and qualification authorities to sign the exact release receipt and every archive qualification record.
 
 ### Removed
 

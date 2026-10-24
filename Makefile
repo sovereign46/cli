@@ -38,13 +38,13 @@ e2e-airplane-harnesses:
 	./scripts/e2e-airplane-harnesses
 
 release-changelog-context:
-	go run ./scripts/release.go changelog-context
+	go run ./scripts changelog-context
 
 release-patch:
-	go run ./scripts/release.go patch
+	go run ./scripts prepare patch
 
 release-minor:
-	go run ./scripts/release.go minor
+	go run ./scripts prepare minor
 
 release-major:
-	go run ./scripts/release.go major
+	go run ./scripts prepare major

@@ -3,6 +3,7 @@
 package models
 
 import (
+	"bytes"
 	"context"
 	"strings"
 	"testing"
@@ -19,11 +20,16 @@ func TestReleaseIgnoresEnvironmentPolicyAndKeys(t *testing.T) {
 	for key, value := range request.Env {
 		t.Setenv(key, value)
 	}
-	if err := Install(context.Background(), request); err == nil || !strings.Contains(err.Error(), "bundled model activation policy unavailable") {
-		t.Fatalf("release honored environment authority: %v", err)
+	if fixtureActivationPolicy(request.Env) != nil {
+		t.Fatal("release honored environment activation policy override")
 	}
-	if ok, err := VerifyInstalled(context.Background(), request); ok || err == nil || !strings.Contains(err.Error(), "bundled model activation policy unavailable") {
-		t.Fatalf("release honored cached environment authority: %v, %v", ok, err)
+	if len(bytes.TrimSpace([]byte(bundledActivationPolicy))) == 0 {
+		if err := Install(context.Background(), request); err == nil || !strings.Contains(err.Error(), "bundled model activation policy unavailable") {
+			t.Fatalf("release honored environment authority: %v", err)
+		}
+		if ok, err := VerifyInstalled(context.Background(), request); ok || err == nil || !strings.Contains(err.Error(), "bundled model activation policy unavailable") {
+			t.Fatalf("release honored cached environment authority: %v, %v", ok, err)
+		}
 	}
 	keys, err := trustedKeys(request.Env)
 	if err != nil {

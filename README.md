@@ -93,16 +93,21 @@ For local gateway development, set `S46_API_REPO=/path/to/api`; `make shell` exp
 
 ## Releases
 
-GoReleaser config in `.goreleaser.yml` targets macOS and Linux on amd64/arm64 plus a Homebrew formula. Release builds use `-tags=release` so mock fixtures are excluded.
+GoReleaser config in `.goreleaser.yml` builds release-tagged `tar.gz` candidates for macOS and Linux on amd64/arm64. It is deliberately unable to publish or replace assets; final publication uses only independently qualified candidate bytes, then updates the Homebrew formula from their exact checksums. Release builds use `-tags=release` so mock fixtures are excluded.
 
-Release flow (also see [CONTRIBUTING.md](CONTRIBUTING.md)):
+Release preparation and publication are separate (also see [CONTRIBUTING.md](CONTRIBUTING.md)):
 
 ```sh
-make release-changelog-context   # diff since last release for changelog drafting
-make release-patch | release-minor | release-major
+make release-changelog-context
+make release-patch               # prepares files and tests; never commits, tags, or pushes
+# review and commit; push the exact commit to main; build it once in an isolated clone
+commit=$(git rev-parse HEAD)
+go run ./scripts build-candidate vX.Y.Z "$commit" /new/absolute/qualified-bundle
+# qualify all four archives as documented in CONTRIBUTING.md, then publish
+go run ./scripts publish vX.Y.Z "$commit" /new/absolute/qualified-bundle --confirm-publish
 ```
 
-The pushed `v*.*.*` tag triggers `.github/workflows/release.yml`.
+Publish requires a clean prepared commit already at local and remote `main`, exact version/changelog agreement, distinct approved Ed25519 build/qualification authorities, and a complete signed digest-bound qualification bundle. It refuses feature branches and mismatches, runs the release-only policy/pin gate, records the complete bundle digest in an annotated tag, and atomically requires `main` to remain at the prepared commit when pushing that tag. The tag workflow repeats the same checks, copies and byte-compares the staged qualified archives into the final release without rebuilding them, and compare-and-replace updates the Homebrew tap from the verified checksums. Publication remains intentionally blocked until a valid approved activation policy is embedded.
 
 ## License
 

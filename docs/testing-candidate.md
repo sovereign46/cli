@@ -16,6 +16,8 @@ S46_OFFLINE=1 ./s46 connect --help
 
 Compare the displayed candidate version, source identifier, and Go version with the supplied build manifest. A candidate built from an uncommitted tree must say so; it must not claim to be a published stable CLI release. Its build must use a real published `github.com/sovereign46/attest` version, without a sibling replacement or temporary Go workspace.
 
+For airplane harness testing, `scripts/e2e-airplane-harnesses` requires this exact executable or archive in `S46_E2E_CANDIDATE` and an independently supplied lowercase digest in `S46_E2E_CANDIDATE_SHA256`; it does not build or fall back to checkout output. It validates every archive member and requires one top-level regular `s46` at mode `0755`. Proxy poisoning is only a smoke check. Qualification requires `S46_E2E_NETWORK_ISOLATION=external S46_E2E_QUALIFICATION=1`, the expected version and full prepared commit, and an absolute `S46_E2E_QUALIFICATION_EVIDENCE=<archive>.qualification.json` path under an OS- or network-enforced egress block established before launch. The script does not establish or verify that block. It writes digest-bound passed evidence only after the complete Pi, Claude Code, and Codex run and final restore; verification-only runs cannot produce evidence. Final publication requires equivalent evidence for all four GoReleaser archives, exact detached Ed25519 signatures from the separately approved build and qualification authorities, and copies those exact bytes without rebuilding. The external qualification environment is responsible for stopping or destroying local service processes.
+
 ## First cloud test: Pi only
 
 Do not run this stage until all of the following have been separately approved and provisioned:

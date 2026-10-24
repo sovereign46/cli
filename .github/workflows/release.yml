@@ -8,8 +8,12 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  goreleaser:
+  release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
@@ -18,9 +22,110 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
           go-version-file: go.mod
-      - uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a
-        with:
-          version: v2.16.0
-          args: release --clean
+      - name: Download and verify the exact qualified release bundle
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GORELEASER_TOKEN || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git fetch --quiet --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git fetch --quiet --force --no-tags origin \
+            "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
+          test "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag
+          commit="$(git rev-parse HEAD)"
+          test "$commit" = "$GITHUB_SHA"
+          candidate_tag="candidate-$GITHUB_REF_NAME-$commit"
+          bundle="$RUNNER_TEMP/qualified-release"
+          mkdir -p "$bundle"
+          gh release download "$candidate_tag" --dir "$bundle"
+          go run ./scripts check-tag "$GITHUB_REF_NAME" "$commit" "$bundle"
+          tag_object="$(git rev-parse "refs/tags/$GITHUB_REF_NAME")"
+          test "$(git ls-remote origin "refs/tags/$GITHUB_REF_NAME" | awk '{print $1}')" = "$tag_object"
+          printf '%s\n' "$tag_object" > "$RUNNER_TEMP/qualified-tag-object"
+      - name: Publish the verified bytes without rebuilding
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          bundle="$RUNNER_TEMP/qualified-release"
+          published="$RUNNER_TEMP/published-release"
+          expected_tag_object="$(cat "$RUNNER_TEMP/qualified-tag-object")"
+          verify_tag_ref() {
+            test "$(git ls-remote origin "refs/tags/$GITHUB_REF_NAME" | awk '{print $1}')" = "$expected_tag_object"
+          }
+          verify_release_refs() {
+            verify_tag_ref
+            test "$(git ls-remote origin refs/heads/main | awk '{print $1}')" = "$GITHUB_SHA"
+          }
+          verify_release_refs
+          verify_assets() {
+            rm -rf "$published"
+            mkdir -p "$published"
+            gh release download "$GITHUB_REF_NAME" --dir "$published"
+            for source in "$bundle"/*; do
+              asset="$published/$(basename "$source")"
+              test -f "$asset"
+              cmp --silent "$source" "$asset"
+            done
+            test "$(find "$published" -maxdepth 1 -type f | wc -l | tr -d '[:space:]')" = \
+              "$(find "$bundle" -maxdepth 1 -type f | wc -l | tr -d '[:space:]')"
+          }
+          if draft_state="$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2>/dev/null)"; then
+            verify_assets
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --draft \
+              --verify-tag \
+              --title "$GITHUB_REF_NAME" \
+              --generate-notes \
+              "$bundle"/*
+            draft_state=true
+            verify_assets
+          fi
+          go run ./scripts check-tag "$GITHUB_REF_NAME" "$GITHUB_SHA" "$published"
+          verify_release_refs
+          if [ "$draft_state" = true ]; then
+            gh release edit "$GITHUB_REF_NAME" --draft=false
+          elif [ "$draft_state" != false ]; then
+            echo "unexpected release draft state: $draft_state" >&2
+            exit 1
+          fi
+          verify_tag_ref
+      - name: Publish the exact qualified checksums to Homebrew
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GORELEASER_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "${GH_TOKEN:-}"
+          bundle="$RUNNER_TEMP/homebrew-final-release"
+          expected_tag_object="$(cat "$RUNNER_TEMP/qualified-tag-object")"
+          test "$(git ls-remote origin "refs/tags/$GITHUB_REF_NAME" | awk '{print $1}')" = "$expected_tag_object"
+          rm -rf "$bundle"
+          mkdir -p "$bundle"
+          gh release download "$GITHUB_REF_NAME" --dir "$bundle"
+          go run ./scripts check-tag "$GITHUB_REF_NAME" "$GITHUB_SHA" "$bundle"
+          formula="$RUNNER_TEMP/s46.rb"
+          existing="$RUNNER_TEMP/existing-s46.rb"
+          go run ./scripts homebrew-formula "$GITHUB_REF_NAME" "$bundle" > "$formula"
+          endpoint="repos/sovereign46/tap/contents/Formula/s46.rb"
+          current_sha="$(gh api "$endpoint?ref=main" --jq .sha)"
+          gh api "$endpoint?ref=main" --jq .content | tr -d '\n' | base64 --decode > "$existing"
+          test "$(grep -Ec '^  version "[0-9]+\.[0-9]+\.[0-9]+"$' "$existing")" = 1
+          existing_version="$(sed -n 's/^  version "\([0-9][0-9.]*\)"$/\1/p' "$existing")"
+          target_version="${GITHUB_REF_NAME#v}"
+          if [ "$existing_version" != "$target_version" ]; then
+            test "$(printf '%s\n%s\n' "$existing_version" "$target_version" | sort -V | tail -n 1)" = "$target_version"
+          fi
+          if ! cmp --silent "$formula" "$existing"; then
+            encoded="$(base64 -w 0 "$formula")"
+            gh api --method PUT "$endpoint" \
+              --raw-field message="Brew formula update for s46 version $GITHUB_REF_NAME" \
+              --raw-field content="$encoded" \
+              --raw-field sha="$current_sha" \
+              --raw-field branch=main >/dev/null
+          fi
+          gh api "$endpoint?ref=main" --jq .content | tr -d '\n' | base64 --decode > "$existing"
+          cmp --silent "$formula" "$existing"
+          test "$(git ls-remote origin "refs/tags/$GITHUB_REF_NAME" | awk '{print $1}')" = "$expected_tag_object"
