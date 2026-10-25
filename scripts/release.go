@@ -566,12 +566,13 @@ type qualifiedBuild struct {
 }
 
 type qualificationDetail struct {
-	ExpectedVersion   string               `json:"expectedVersion"`
-	ExpectedCommit    string               `json:"expectedCommit"`
-	NetworkIsolation  string               `json:"networkIsolation"`
-	AirplaneHarnesses []string             `json:"airplaneHarnesses"`
-	Runtime           qualificationRuntime `json:"runtime"`
-	Runner            qualificationRunner  `json:"runner"`
+	ExpectedVersion     string               `json:"expectedVersion"`
+	ExpectedCommit      string               `json:"expectedCommit"`
+	NetworkIsolation    string               `json:"networkIsolation"`
+	FilesystemIsolation string               `json:"filesystemIsolation"`
+	AirplaneHarnesses   []string             `json:"airplaneHarnesses"`
+	Runtime             qualificationRuntime `json:"runtime"`
+	Runner              qualificationRunner  `json:"runner"`
 }
 
 type qualifiedInput struct {
@@ -978,8 +979,8 @@ func validateQualificationRecord(path string, archive string, digest string, siz
 		return fmt.Errorf("qualification evidence for %q has invalid build date: %w", archive, err)
 	}
 	detail := record.Qualification
-	if detail.ExpectedVersion != version || detail.ExpectedCommit != preparedCommit || detail.NetworkIsolation != "external" {
-		return fmt.Errorf("qualification evidence for %q does not contain the required expected release identity and external isolation", archive)
+	if detail.ExpectedVersion != version || detail.ExpectedCommit != preparedCommit || detail.NetworkIsolation != "external" || detail.FilesystemIsolation != "external" {
+		return fmt.Errorf("qualification evidence for %q does not contain the required expected release identity and external network/filesystem isolation", archive)
 	}
 	wantHarnesses := []string{"pi", "claude-code", "codex"}
 	if len(detail.AirplaneHarnesses) != len(wantHarnesses) {

@@ -487,6 +487,23 @@ func TestValidateQualificationBundleRejectsMissingExtraAndForgedEvidence(t *test
 		}
 	})
 
+	t.Run("filesystem isolation not enforced", func(t *testing.T) {
+		bundle := writeReleaseBundle(t, "1.2.3", commit)
+		evidence := filepath.Join(bundle, expectedReleaseArchives("1.2.3")[0]+qualificationSuffix)
+		raw, err := os.ReadFile(evidence)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw = bytes.Replace(raw, []byte(`"filesystemIsolation": "external"`), []byte(`"filesystemIsolation": "none"`), 1)
+		if err := os.WriteFile(evidence, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		writeTestReleaseEvidenceSignature(t, evidence, testQualificationPrivateKey)
+		if _, err := validateQualificationBundle(bundle, "1.2.3", commit, strings.Repeat("d", 40)); err == nil || !strings.Contains(err.Error(), "external network/filesystem isolation") {
+			t.Fatalf("unenforced filesystem isolation should fail, got %v", err)
+		}
+	})
+
 	t.Run("cleanup not verified", func(t *testing.T) {
 		bundle := writeReleaseBundle(t, "1.2.3", commit)
 		evidence := filepath.Join(bundle, expectedReleaseArchives("1.2.3")[0]+qualificationSuffix)
@@ -723,10 +740,11 @@ func writeReleaseBundle(t *testing.T, version string, commit string) string {
 			Binary:      qualifiedBinary{SHA256: strings.Repeat("a", 64), Size: 1234, SourceMode: "0755"},
 			Build:       qualifiedBuild{Version: version, Commit: commit, Date: "2026-05-20T10:00:00Z", GoVersion: "go1.26.9", Release: true},
 			Qualification: qualificationDetail{
-				ExpectedVersion:   version,
-				ExpectedCommit:    commit,
-				NetworkIsolation:  "external",
-				AirplaneHarnesses: []string{"pi", "claude-code", "codex"},
+				ExpectedVersion:     version,
+				ExpectedCommit:      commit,
+				NetworkIsolation:    "external",
+				FilesystemIsolation: "external",
+				AirplaneHarnesses:   []string{"pi", "claude-code", "codex"},
 				Runtime: qualificationRuntime{
 					Model:       qualifiedInput{Name: qualifiedDevstralGGUFName, SHA256: qualifiedDevstralGGUFSHA256, Size: qualifiedDevstralGGUFSize},
 					LlamaServer: qualifiedInput{Name: "llama-server", SHA256: strings.Repeat("b", 64), Size: 12_345},

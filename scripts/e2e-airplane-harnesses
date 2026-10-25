@@ -19,7 +19,13 @@ qualified_gateway_binary=""
 trusted_python=""
 trusted_ps=""
 candidate_path_runner_identity=""
+candidate_path_runner_parent_identity=""
 candidate_path_runner_sha256=""
+candidate_invocation_root_identity=""
+candidate_path=""
+qualification=0
+qualification_evidence=""
+qualification_ready=0
 declare -a tracked_process_groups=()
 declare -a tracked_service_pids=()
 declare -a tracked_service_groups=()
@@ -33,20 +39,45 @@ best_effort_disable_airplane() {
     airplane_mode_enabled=0
   else
     printf '[s46-e2e] warning: timed out or failed while disabling airplane mode during cleanup\n' >&2
+    return 1
   fi
 }
 
 cleanup() {
-  local status=$?
-  trap - EXIT
-  best_effort_disable_airplane || true
-  if [ -f "$sandbox/baseline-services.tsv" ]; then
-    record_new_airplane_services || printf '[s46-e2e] warning: found an untrackable detached airplane service\n' >&2
+  local status=$? cleanup_failed=0
+  trap - EXIT HUP INT TERM
+  if ! best_effort_disable_airplane; then
+    cleanup_failed=1
   fi
-  terminate_tracked_processes || printf '[s46-e2e] warning: could not terminate every tracked process\n' >&2
-  terminate_runner_owned_processes || printf '[s46-e2e] warning: could not terminate every runner-owned process\n' >&2
-  if [ -n "$trusted_python" ] && [ -d "$sandbox/invocations" ]; then
-    cleanup_candidate_invocations || printf '[s46-e2e] warning: could not remove every candidate invocation copy\n' >&2
+  if [ -f "$sandbox/baseline-services.tsv" ] && ! record_new_airplane_services; then
+    printf '[s46-e2e] warning: found an untrackable detached airplane service\n' >&2
+    cleanup_failed=1
+  fi
+  if ! terminate_tracked_processes; then
+    printf '[s46-e2e] warning: could not terminate every tracked process\n' >&2
+    cleanup_failed=1
+  fi
+  if ! terminate_runner_owned_processes; then
+    printf '[s46-e2e] warning: could not terminate every runner-owned process\n' >&2
+    cleanup_failed=1
+  fi
+  if [ -n "$trusted_python" ] && [ -n "$candidate_invocation_root_identity" ] && ! cleanup_candidate_invocations; then
+    printf '[s46-e2e] warning: could not remove every candidate invocation copy\n' >&2
+    cleanup_failed=1
+  fi
+  if [ "$cleanup_failed" -ne 0 ] && [ "$status" -eq 0 ]; then
+    printf '[s46-e2e] error: final cleanup verification failed\n' >&2
+    status=1
+  fi
+  if [ "$status" -eq 0 ] && [ "$qualification" = "1" ] && [ "$qualification_ready" = "1" ]; then
+    if ! write_qualification_evidence \
+      "$sandbox/candidate-identity.json" \
+      "$qualification_runtime_identity" \
+      "$qualification_cleanup_identity" \
+      "$qualification_evidence"; then
+      printf '[s46-e2e] error: could not publish qualification evidence after final cleanup verification\n' >&2
+      status=1
+    fi
   fi
   if [ "$keep_sandbox" = "1" ]; then
     echo "[s46-e2e] sandbox preserved: $sandbox"
@@ -57,6 +88,8 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
 trap 'exit 143' TERM
 
 log() {
@@ -413,6 +446,37 @@ with open(metadata, "x", encoding="utf-8") as output:
 PY
 }
 
+capture_candidate_invocation_root_identity() {
+  candidate_invocation_root_identity="$("$trusted_python" - "$sandbox/invocations" <<'PY'
+import os
+import stat
+import sys
+path = sys.argv[1]
+info = os.lstat(path)
+if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700:
+    raise SystemExit("candidate invocation root has invalid identity")
+fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_uid", "st_gid")
+print(":".join(str(getattr(info, field)) for field in fields))
+PY
+  )" || fail "could not record candidate invocation root identity"
+  [ -n "$candidate_invocation_root_identity" ] || fail "could not record candidate invocation root identity"
+}
+
+verify_candidate_invocation_root() {
+  [ -n "$candidate_invocation_root_identity" ] || return 1
+  "$trusted_python" - "$sandbox/invocations" "$candidate_invocation_root_identity" <<'PY'
+import os
+import stat
+import sys
+path, expected = sys.argv[1:]
+info = os.lstat(path)
+fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_uid", "st_gid")
+actual = ":".join(str(getattr(info, field)) for field in fields)
+if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700 or actual != expected:
+    raise SystemExit("candidate invocation root identity changed")
+PY
+}
+
 fresh_candidate_copy() {
   local directory destination
   directory="$(mktemp -d "$sandbox/invocations/candidate.XXXXXX")" || return 1
@@ -570,8 +634,12 @@ run_candidate_bounded() {
     printf '[s46-e2e] error: candidate PATH runner changed before candidate execution\n' >&2
     return 1
   fi
+  if ! verify_candidate_invocation_root; then
+    printf '[s46-e2e] error: candidate invocation root changed before candidate execution\n' >&2
+    return 1
+  fi
   executable="$(fresh_candidate_copy)" || return 1
-  if "$trusted_python" - "$seconds" "$maximum" "$stdout" "$stderr" "$executable" "$@" <<'PY'
+  if "$trusted_python" - "$seconds" "$maximum" "$stdout" "$stderr" "$executable" "$candidate_path" "$@" <<'PY'
 import os
 import selectors
 import signal
@@ -579,7 +647,7 @@ import subprocess
 import sys
 import time
 
-seconds, maximum, stdout_path, stderr_path, executable, *arguments = sys.argv[1:]
+seconds, maximum, stdout_path, stderr_path, executable, candidate_path, *arguments = sys.argv[1:]
 seconds = int(seconds)
 maximum = int(maximum)
 outputs = {}
@@ -610,8 +678,11 @@ def stop():
 try:
     with open(stdout_path, "xb") as stdout, open(stderr_path, "xb") as stderr:
         outputs = {"stdout": [stdout, 0], "stderr": [stderr, 0]}
+        environment = os.environ.copy()
+        environment["PATH"] = candidate_path
         process = subprocess.Popen(
             [executable, *arguments],
+            env=environment,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -657,12 +728,20 @@ PY
   else
     status=$?
   fi
-  "$trusted_python" - "$executable" <<'PY'
+  if ! "$trusted_python" - "$executable" <<'PY'
 import os
 import shutil
 import sys
 shutil.rmtree(os.path.dirname(sys.argv[1]))
 PY
+  then
+    printf '[s46-e2e] error: could not remove candidate invocation copy\n' >&2
+    status=1
+  fi
+  if ! verify_candidate_invocation_root; then
+    printf '[s46-e2e] error: candidate invocation root changed during candidate execution\n' >&2
+    status=1
+  fi
   if ! verify_candidate_path_runner; then
     printf '[s46-e2e] error: candidate PATH runner changed during candidate execution\n' >&2
     status=1
@@ -773,7 +852,6 @@ with open(path, "w", encoding="utf-8") as runner:
     __import__("os").fsync(runner.fileno())
 PY
   chmod 0500 "$sandbox/bin/s46"
-  capture_candidate_path_runner_identity
 }
 
 capture_candidate_path_runner_identity() {
@@ -785,64 +863,91 @@ import stat
 import sys
 
 path = sys.argv[1]
-before = os.lstat(path)
-if not stat.S_ISREG(before.st_mode) or stat.S_IMODE(before.st_mode) != 0o500 or before.st_nlink != 1:
-    raise SystemExit("candidate PATH runner has invalid initial identity")
-fd = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
-try:
-    opened = os.fstat(fd)
-    body = bytearray()
-    while chunk := os.read(fd, 65536):
-        body.extend(chunk)
-        if len(body) > 1024 * 1024:
-            raise SystemExit("candidate PATH runner exceeds size limit")
-    after = os.fstat(fd)
-finally:
-    os.close(fd)
-named = os.lstat(path)
+parent = os.path.dirname(path)
+name = os.path.basename(path)
 fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_uid", "st_gid", "st_size", "st_mtime_ns", "st_ctime_ns")
-if any(getattr(before, field) != getattr(opened, field) for field in fields) or any(getattr(opened, field) != getattr(after, field) for field in fields) or any(getattr(after, field) != getattr(named, field) for field in fields):
+parent_before = os.lstat(parent)
+parent_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
+try:
+    parent_opened = os.fstat(parent_fd)
+    before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if not stat.S_ISREG(before.st_mode) or stat.S_IMODE(before.st_mode) != 0o500 or before.st_nlink != 1:
+        raise SystemExit("candidate PATH runner has invalid initial identity")
+    fd = os.open(name, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent_fd)
+    try:
+        opened = os.fstat(fd)
+        body = bytearray()
+        while chunk := os.read(fd, 65536):
+            body.extend(chunk)
+            if len(body) > 1024 * 1024:
+                raise SystemExit("candidate PATH runner exceeds size limit")
+        after = os.fstat(fd)
+    finally:
+        os.close(fd)
+    named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    parent_after = os.fstat(parent_fd)
+finally:
+    os.close(parent_fd)
+path_named = os.lstat(path)
+parent_named = os.lstat(parent)
+if any(getattr(before, field) != getattr(opened, field) for field in fields) or any(getattr(opened, field) != getattr(after, field) for field in fields) or any(getattr(after, field) != getattr(named, field) for field in fields) or any(getattr(named, field) != getattr(path_named, field) for field in fields):
     raise SystemExit("candidate PATH runner changed while recording its identity")
-print(hashlib.sha256(body).hexdigest(), ":".join(str(getattr(after, field)) for field in fields))
+if any(getattr(parent_before, field) != getattr(parent_opened, field) for field in fields) or any(getattr(parent_opened, field) != getattr(parent_after, field) for field in fields) or any(getattr(parent_after, field) != getattr(parent_named, field) for field in fields):
+    raise SystemExit("candidate PATH runner parent changed while recording its identity")
+print(hashlib.sha256(body).hexdigest(), ":".join(str(getattr(after, field)) for field in fields), ":".join(str(getattr(parent_after, field)) for field in fields))
 PY
   )"; then
     fail "could not record candidate PATH runner identity"
   fi
-  read -r candidate_path_runner_sha256 candidate_path_runner_identity <<<"$captured"
-  [ -n "$candidate_path_runner_sha256" ] && [ -n "$candidate_path_runner_identity" ] || fail "could not record candidate PATH runner identity"
+  read -r candidate_path_runner_sha256 candidate_path_runner_identity candidate_path_runner_parent_identity <<<"$captured"
+  [ -n "$candidate_path_runner_sha256" ] && [ -n "$candidate_path_runner_identity" ] && [ -n "$candidate_path_runner_parent_identity" ] || fail "could not record candidate PATH runner identity"
 }
 
 verify_candidate_path_runner() {
-  [ -n "$candidate_path_runner_sha256" ] && [ -n "$candidate_path_runner_identity" ] || return 1
-  "$trusted_python" - "$sandbox/bin/s46" "$candidate_path_runner_sha256" "$candidate_path_runner_identity" <<'PY'
+  [ -n "$candidate_path_runner_sha256" ] && [ -n "$candidate_path_runner_identity" ] && [ -n "$candidate_path_runner_parent_identity" ] || return 1
+  "$trusted_python" - "$sandbox/bin/s46" "$candidate_path_runner_sha256" "$candidate_path_runner_identity" "$candidate_path_runner_parent_identity" <<'PY'
 import hashlib
 import os
 import stat
 import sys
 
-path, expected_hash, expected_identity = sys.argv[1:]
-before = os.lstat(path)
-if not stat.S_ISREG(before.st_mode) or stat.S_IMODE(before.st_mode) != 0o500 or before.st_nlink != 1:
-    raise SystemExit("candidate PATH runner identity changed")
-fd = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
-try:
-    opened = os.fstat(fd)
-    hasher = hashlib.sha256()
-    size = 0
-    while chunk := os.read(fd, 65536):
-        size += len(chunk)
-        if size > 1024 * 1024:
-            raise SystemExit("candidate PATH runner exceeds size limit")
-        hasher.update(chunk)
-    after = os.fstat(fd)
-finally:
-    os.close(fd)
-named = os.lstat(path)
+path, expected_hash, expected_identity, expected_parent_identity = sys.argv[1:]
+parent = os.path.dirname(path)
+name = os.path.basename(path)
 fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_uid", "st_gid", "st_size", "st_mtime_ns", "st_ctime_ns")
+parent_before = os.lstat(parent)
+parent_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
+try:
+    parent_opened = os.fstat(parent_fd)
+    before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if not stat.S_ISREG(before.st_mode) or stat.S_IMODE(before.st_mode) != 0o500 or before.st_nlink != 1:
+        raise SystemExit("candidate PATH runner identity changed")
+    fd = os.open(name, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0), dir_fd=parent_fd)
+    try:
+        opened = os.fstat(fd)
+        hasher = hashlib.sha256()
+        size = 0
+        while chunk := os.read(fd, 65536):
+            size += len(chunk)
+            if size > 1024 * 1024:
+                raise SystemExit("candidate PATH runner exceeds size limit")
+            hasher.update(chunk)
+        after = os.fstat(fd)
+    finally:
+        os.close(fd)
+    named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    parent_after = os.fstat(parent_fd)
+finally:
+    os.close(parent_fd)
+path_named = os.lstat(path)
+parent_named = os.lstat(parent)
 actual_identity = ":".join(str(getattr(after, field)) for field in fields)
-if any(getattr(before, field) != getattr(opened, field) for field in fields) or any(getattr(opened, field) != getattr(after, field) for field in fields) or any(getattr(after, field) != getattr(named, field) for field in fields):
+actual_parent_identity = ":".join(str(getattr(parent_after, field)) for field in fields)
+if any(getattr(before, field) != getattr(opened, field) for field in fields) or any(getattr(opened, field) != getattr(after, field) for field in fields) or any(getattr(after, field) != getattr(named, field) for field in fields) or any(getattr(named, field) != getattr(path_named, field) for field in fields):
     raise SystemExit("candidate PATH runner changed during verification")
-if actual_identity != expected_identity or hasher.hexdigest() != expected_hash:
+if any(getattr(parent_before, field) != getattr(parent_opened, field) for field in fields) or any(getattr(parent_opened, field) != getattr(parent_after, field) for field in fields) or any(getattr(parent_after, field) != getattr(parent_named, field) for field in fields):
+    raise SystemExit("candidate PATH runner parent changed during verification")
+if actual_identity != expected_identity or actual_parent_identity != expected_parent_identity or hasher.hexdigest() != expected_hash:
     raise SystemExit("candidate PATH runner identity changed")
 PY
 }
@@ -1169,6 +1274,7 @@ evidence = {
         "expectedVersion": qualification["expectedVersion"],
         "expectedCommit": qualification["expectedCommit"],
         "networkIsolation": "external",
+        "filesystemIsolation": "external",
         "airplaneHarnesses": ["pi", "claude-code", "codex"],
         "runtime": {
             "model": runtime_identity["model"],
@@ -1484,24 +1590,114 @@ terminate_tracked_processes() {
 }
 
 cleanup_candidate_invocations() {
-  "$trusted_python" - "$sandbox/invocations" <<'PY'
+  "$trusted_python" - "$sandbox/invocations" "$candidate_invocation_root_identity" "$sandbox" "$candidate_seed" "$candidate_binary_sha256" "$candidate_binary_size" <<'PY'
 import os
 import shutil
 import stat
 import sys
 
-root = sys.argv[1]
-info = os.lstat(root)
-if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
-    raise SystemExit("candidate invocation root is not a real directory")
-for entry in os.scandir(root):
-    if entry.is_dir(follow_symlinks=False):
-        shutil.rmtree(entry.path)
+root, expected, sandbox, candidate_seed, candidate_hash, candidate_size = sys.argv[1:]
+candidate_size = int(candidate_size)
+fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_uid", "st_gid")
+expected_fields = tuple(int(value) for value in expected.split(":"))
+expected_device, expected_inode = expected_fields[:2]
+changed = False
+entries_seen = 0
+original_roots = []
+invocation_dirs = []
+for directory, directories, _files in os.walk(sandbox, topdown=True, followlinks=False):
+    entries_seen += len(directories)
+    if entries_seen > 100000:
+        raise SystemExit("candidate invocation cleanup exceeded directory budget")
+    for name in list(directories):
+        path = os.path.join(directory, name)
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(info.st_mode):
+            directories.remove(name)
+            continue
+        if (info.st_dev, info.st_ino) == (expected_device, expected_inode):
+            original_roots.append(path)
+        if name.startswith(("candidate.", "path-candidate.")):
+            invocation_dirs.append(path)
+for path in sorted(set(invocation_dirs), key=lambda item: item.count(os.sep), reverse=True):
+    try:
+        shutil.rmtree(path)
+    except FileNotFoundError:
+        pass
+for path in original_roots:
+    for entry in list(os.scandir(path)):
+        if entry.is_dir(follow_symlinks=False):
+            shutil.rmtree(entry.path)
+        else:
+            os.unlink(entry.path)
+try:
+    info = os.lstat(root)
+except FileNotFoundError:
+    changed = True
+else:
+    actual = tuple(getattr(info, field) for field in fields)
+    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or actual != expected_fields:
+        changed = True
     else:
-        os.unlink(entry.path)
-with os.scandir(root) as entries:
-    if next(entries, None) is not None:
-        raise SystemExit("candidate invocation copies survived cleanup")
+        with os.scandir(root) as entries:
+            if next(entries, None) is not None:
+                raise SystemExit("candidate invocation copies survived cleanup")
+if len(original_roots) != 1 or os.path.realpath(original_roots[0]) != os.path.realpath(root):
+    changed = True
+unexpected_copy = False
+files_seen = 0
+for directory, directories, files in os.walk(sandbox, topdown=True, followlinks=False):
+    directories[:] = [name for name in directories if not os.path.islink(os.path.join(directory, name))]
+    files_seen += len(files)
+    if files_seen > 100000:
+        raise SystemExit("candidate invocation cleanup exceeded file budget")
+    for name in files:
+        path = os.path.join(directory, name)
+        if os.path.normpath(path) == os.path.normpath(candidate_seed):
+            continue
+        try:
+            before = os.lstat(path)
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISREG(before.st_mode) or before.st_size != candidate_size:
+            continue
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(path, flags)
+        except FileNotFoundError:
+            continue
+        try:
+            opened = os.fstat(descriptor)
+            if (opened.st_dev, opened.st_ino, opened.st_size) != (before.st_dev, before.st_ino, before.st_size):
+                raise SystemExit("candidate-sized file changed during cleanup")
+            import hashlib
+            hasher = hashlib.sha256()
+            remaining = candidate_size
+            while remaining:
+                chunk = os.read(descriptor, min(65536, remaining))
+                if not chunk:
+                    raise SystemExit("candidate-sized file truncated during cleanup")
+                hasher.update(chunk)
+                remaining -= len(chunk)
+            if os.read(descriptor, 1):
+                raise SystemExit("candidate-sized file grew during cleanup")
+            after = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+        named = os.lstat(path)
+        stable = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if any(getattr(before, field) != getattr(opened, field) for field in stable) or any(getattr(opened, field) != getattr(after, field) for field in stable) or any(getattr(after, field) != getattr(named, field) for field in stable):
+            raise SystemExit("candidate-sized file changed during cleanup")
+        if hasher.hexdigest() == candidate_hash:
+            os.unlink(path)
+            unexpected_copy = True
+if unexpected_copy:
+    changed = True
+if changed:
+    raise SystemExit("candidate invocation root or copy identity changed")
 PY
 }
 
@@ -1510,7 +1706,9 @@ cleanup_and_verify_runner_processes() {
   terminate_tracked_processes || fail "runner $runner_identity could not terminate every tracked process group"
   terminate_runner_owned_processes || fail "runner $runner_identity could not terminate every runner-owned process"
   verify_candidate_path_runner || fail "candidate PATH runner changed before cleanup evidence"
+  verify_candidate_invocation_root || fail "candidate invocation root changed before cleanup evidence"
   cleanup_candidate_invocations || fail "runner $runner_identity could not remove every candidate invocation copy"
+  verify_candidate_invocation_root || fail "candidate invocation root changed after cleanup"
   tracked_process_groups=()
   tracked_service_pids=()
   tracked_service_groups=()
@@ -1529,7 +1727,8 @@ run_capture_timeout() {
   local stderr="$3"
   shift 3
   verify_candidate_path_runner || fail "candidate PATH runner changed before harness execution"
-  "$trusted_python" -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' "$@" >"$stdout" 2>"$stderr" &
+  verify_candidate_invocation_root || fail "candidate invocation root changed before harness execution"
+  "$trusted_python" -c 'import os, sys; os.setsid(); os.environ["PATH"] = sys.argv[1]; os.execvp(sys.argv[2], sys.argv[2:])' "$candidate_path" "$@" >"$stdout" 2>"$stderr" &
   local pid="$!"
   local start status
   tracked_process_groups+=("$pid")
@@ -1556,6 +1755,7 @@ run_capture_timeout() {
     fail "harness process group $pid survived command completion: $*"
   fi
   untrack_process_group "$pid"
+  verify_candidate_invocation_root || fail "candidate invocation root changed during harness execution"
   verify_candidate_path_runner || fail "candidate PATH runner changed during harness execution"
   if [ "$status" -eq 0 ]; then
     return 0
@@ -1575,6 +1775,7 @@ candidate_command_output_limit="${S46_E2E_CANDIDATE_COMMAND_OUTPUT_LIMIT:-104857
 candidate_source="${S46_E2E_CANDIDATE:-}"
 candidate_sha256="${S46_E2E_CANDIDATE_SHA256:-}"
 network_isolation="${S46_E2E_NETWORK_ISOLATION:-proxy}"
+filesystem_isolation="${S46_E2E_FILESYSTEM_ISOLATION:-none}"
 qualification="${S46_E2E_QUALIFICATION:-0}"
 expected_version="${S46_E2E_EXPECTED_VERSION:-}"
 expected_commit="${S46_E2E_EXPECTED_COMMIT:-}"
@@ -1604,6 +1805,10 @@ case "$network_isolation" in
   proxy|external) ;;
   *) fail "S46_E2E_NETWORK_ISOLATION must be proxy or external" ;;
 esac
+case "$filesystem_isolation" in
+  none|external) ;;
+  *) fail "S46_E2E_FILESYSTEM_ISOLATION must be none or external" ;;
+esac
 case "$qualification" in
   0|1) ;;
   *) fail "S46_E2E_QUALIFICATION must be 0 or 1" ;;
@@ -1614,6 +1819,9 @@ case "$verify_candidate_only" in
 esac
 if [ "$qualification" = "1" ] && [ "$network_isolation" != "external" ]; then
   fail "S46_E2E_QUALIFICATION=1 requires a pre-established external OS-level egress block"
+fi
+if [ "$qualification" = "1" ] && [ "$filesystem_isolation" != "external" ]; then
+  fail "S46_E2E_QUALIFICATION=1 requires externally enforced filesystem isolation from runner and invocation control paths"
 fi
 if [ "$qualification" = "1" ]; then
   [ -n "$expected_version" ] || fail "S46_E2E_QUALIFICATION=1 requires S46_E2E_EXPECTED_VERSION"
@@ -1629,6 +1837,7 @@ if [ "$qualification" = "1" ]; then
 fi
 
 mkdir -p "$sandbox/home" "$sandbox/bin" "$sandbox/project" "$sandbox/candidate" "$sandbox/invocations"
+capture_candidate_invocation_root_identity
 candidate_seed="$sandbox/candidate/s46"
 candidate_metadata="$sandbox/candidate-package.json"
 stage_candidate "$candidate_source" "$candidate_sha256" "$candidate_seed" "$candidate_metadata"
@@ -1676,10 +1885,10 @@ if [ "$qualification" = "1" ]; then
   export S46_AIRPLANE_MODEL_PATH="$qualification_model_path"
   export S46_AIRPLANE_MODEL_DIR="$(dirname "$qualification_model_path")"
   export S46_API_BINARY="$qualified_gateway_binary"
-  export PATH="$sandbox/bin:$(dirname "$qualified_llama_server"):$PATH"
+  candidate_path="$sandbox/bin:$(dirname "$qualified_llama_server"):$PATH"
 else
   export S46_AIRPLANE_MODEL_DIR="${S46_AIRPLANE_MODEL_DIR:-$host_home/.local/share/s46/models/devstral}"
-  export PATH="$sandbox/bin:$PATH"
+  candidate_path="$sandbox/bin:$PATH"
 fi
 export S46_LOG_DIR="${S46_LOG_DIR:-$host_home/.cache/s46}"
 export PI_OFFLINE=1
@@ -1698,10 +1907,16 @@ unset XAI_API_KEY CEREBRAS_API_KEY KIMI_API_KEY MINIMAX_API_KEY ZAI_API_KEY
 
 install_candidate_path_runner
 install_smoke_proxy_poisoning
+capture_candidate_path_runner_identity
 if [ "$network_isolation" = "external" ]; then
   log "network isolation: operator-confirmed pre-established external OS-level egress denial (proxy poisoning also installed as defense in depth)"
 else
   log "network isolation: proxy poisoning smoke check only; this is not OS-level egress isolation or release qualification"
+fi
+if [ "$filesystem_isolation" = "external" ]; then
+  log "filesystem isolation: operator-confirmed external enforcement denies candidate and harness writes to runner and invocation control paths"
+else
+  log "filesystem isolation: identity and cleanup checks only; this mode cannot produce release qualification evidence"
 fi
 capture_initial_service_state
 verify_candidate_identity "$candidate_metadata" "$expected_version" "$expected_commit" "$qualification"
@@ -1718,7 +1933,9 @@ require_command diff
 require_command pi
 require_command claude
 require_command codex
-require_command llama-server
+if [ "$qualification" != "1" ]; then
+  require_command llama-server
+fi
 mkdir -p "$S46_LOG_DIR"
 cd "$sandbox/project"
 
@@ -1937,11 +2154,7 @@ assert_local_share codex
 assert_airplane_mode_off_restores_configs
 cleanup_and_verify_runner_processes
 if [ "$qualification" = "1" ]; then
-  write_qualification_evidence \
-    "$sandbox/candidate-identity.json" \
-    "$qualification_runtime_identity" \
-    "$qualification_cleanup_identity" \
-    "$qualification_evidence"
+  qualification_ready=1
 fi
 
 log "all harnesses wrote files, produced local sessions, built local share artifacts, and restored cloud mode and harness configuration"

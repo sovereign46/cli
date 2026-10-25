@@ -237,7 +237,7 @@ PY`, helper, pidFile)
 	}
 }
 
-func TestAirplaneHarnessProcessCleanupIgnoresCandidatePATHPs(t *testing.T) {
+func TestAirplaneHarnessRejectsCandidatePATHPsAndCleansProcess(t *testing.T) {
 	directory := t.TempDir()
 	helper := filepath.Join(directory, "detached-helper")
 	source := filepath.Join(directory, "helper.go")
@@ -262,8 +262,8 @@ printf '#!/bin/sh\nexit 1\n' > "$bin_dir/ps"
 chmod 0700 "$bin_dir/ps"`, helper, pidFile)
 	candidate := writeCandidate(t, releaseCandidateScript(checks), 0o755)
 	output, err := runCandidateVerification(t, candidate, fileSHA256(t, candidate))
-	if err != nil {
-		t.Fatalf("verification should use trusted process enumeration: %v\n%s", err, output)
+	if err == nil || !strings.Contains(output, "candidate PATH runner changed") {
+		t.Fatalf("candidate PATH mutation should invalidate verification: %v\n%s", err, output)
 	}
 	raw, err := os.ReadFile(pidFile)
 	if err != nil {
@@ -287,12 +287,24 @@ func TestAirplaneHarnessQualificationRequiresExternalNetworkBlock(t *testing.T) 
 	}
 }
 
+func TestAirplaneHarnessQualificationRequiresExternalFilesystemBoundary(t *testing.T) {
+	candidate := writeReleaseCandidateArchive(t, releaseCandidateScript(""))
+	output, err := runCandidateVerificationWithEnv(t, candidate, fileSHA256(t, candidate),
+		"S46_E2E_QUALIFICATION=1",
+		"S46_E2E_NETWORK_ISOLATION=external",
+	)
+	if err == nil || !strings.Contains(output, "requires externally enforced filesystem isolation") {
+		t.Fatalf("qualification without external filesystem boundary should fail: err=%v\n%s", err, output)
+	}
+}
+
 func TestAirplaneHarnessRejectsQualificationVerificationOnlyBeforeCandidateExecution(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "candidate-executed")
 	candidate := writeReleaseCandidateArchive(t, releaseCandidateScript(fmt.Sprintf("touch %q", marker)))
 	output, err := runCandidateVerificationWithEnv(t, candidate, fileSHA256(t, candidate),
 		"S46_E2E_QUALIFICATION=1",
 		"S46_E2E_NETWORK_ISOLATION=external",
+		"S46_E2E_FILESYSTEM_ISOLATION=external",
 		"S46_E2E_EXPECTED_VERSION=1.2.3",
 		"S46_E2E_EXPECTED_COMMIT=0123456789abcdef0123456789abcdef01234567",
 	)
@@ -311,6 +323,7 @@ func TestAirplaneHarnessQualificationRequiresRuntimeIdentitiesBeforeCandidateExe
 		"S46_E2E_VERIFY_CANDIDATE_ONLY=0",
 		"S46_E2E_QUALIFICATION=1",
 		"S46_E2E_NETWORK_ISOLATION=external",
+		"S46_E2E_FILESYSTEM_ISOLATION=external",
 		"S46_E2E_EXPECTED_VERSION=1.2.3",
 		"S46_E2E_EXPECTED_COMMIT=0123456789abcdef0123456789abcdef01234567",
 	)
@@ -420,6 +433,35 @@ esac
 	}
 }
 
+func TestAirplaneHarnessRejectsRestoredPathRunnerDirectory(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "replacement-ran")
+	script := fmt.Sprintf(`#!/bin/sh
+set -eu
+case "${1:-}" in
+  version)
+    bin_dir=${PATH%%%%:*}
+    saved="$bin_dir.saved"
+    mv "$bin_dir" "$saved"
+    mkdir "$bin_dir"
+    printf '#!/bin/sh\ntouch %%s\n' %q > "$bin_dir/s46"
+    chmod 0500 "$bin_dir/s46"
+    s46 probe
+    rm -rf "$bin_dir"
+    mv "$saved" "$bin_dir"
+    printf '%%s\n' '%s'
+    ;;
+esac
+`, marker, releaseCandidateJSON)
+	candidate := writeCandidate(t, script, 0o755)
+	output, err := runCandidateVerification(t, candidate, fileSHA256(t, candidate))
+	if err == nil || !strings.Contains(output, "candidate PATH runner changed") {
+		t.Fatalf("restored PATH runner directory should invalidate verification: err=%v\n%s", err, output)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("directory replacement reproduction did not execute: %v", err)
+	}
+}
+
 func TestAirplaneHarnessPathRunnerCleansFailedStaging(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "leaked-path-invocations")
 	script := fmt.Sprintf(`#!/bin/sh
@@ -447,6 +489,75 @@ esac
 	}
 	if strings.TrimSpace(string(leaked)) != "" {
 		t.Fatalf("failed PATH staging leaked invocation directories: %s", leaked)
+	}
+}
+
+func TestAirplaneHarnessRejectsReplacedInvocationRootAndPurgesCopies(t *testing.T) {
+	script := fmt.Sprintf(`#!/bin/sh
+set -eu
+case "${1:-}" in
+  version)
+    bin_dir=${PATH%%%%:*}
+    sandbox=${bin_dir%%/bin}
+    mv "$sandbox/invocations" "$sandbox/invocations.saved"
+    mkdir -m 0700 "$sandbox/invocations"
+    printf '%%s\n' '%s'
+    ;;
+esac
+`, releaseCandidateJSON)
+	candidate := writeCandidate(t, script, 0o755)
+	output, err := runCandidateVerificationWithEnv(t, candidate, fileSHA256(t, candidate), "S46_E2E_KEEP_SANDBOX=1")
+	if err == nil || !strings.Contains(output, "candidate invocation root") {
+		t.Fatalf("replaced invocation root should invalidate verification: err=%v\n%s", err, output)
+	}
+	const marker = "[s46-e2e] sandbox preserved: "
+	index := strings.LastIndex(output, marker)
+	if index < 0 {
+		t.Fatalf("failed verification did not preserve its sandbox:\n%s", output)
+	}
+	sandbox := strings.TrimSpace(strings.SplitN(output[index+len(marker):], "\n", 2)[0])
+	t.Cleanup(func() { _ = os.RemoveAll(sandbox) })
+	if err := filepath.WalkDir(sandbox, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() && (strings.HasPrefix(entry.Name(), "candidate.") || strings.HasPrefix(entry.Name(), "path-candidate.")) {
+			t.Fatalf("failure teardown left candidate invocation directory %s", path)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAirplaneHarnessRejectsRenamedPathInvocationCopy(t *testing.T) {
+	script := fmt.Sprintf(`#!/bin/sh
+set -eu
+case "${1:-}" in
+  nested)
+    invocation_dir=${0%%/s46}
+    mv "$invocation_dir" "$HOME/hidden-path-invocation"
+    ;;
+  version)
+    s46 nested >/dev/null 2>&1 || true
+    printf '%%s\n' '%s'
+    ;;
+esac
+`, releaseCandidateJSON)
+	candidate := writeCandidate(t, script, 0o755)
+	output, err := runCandidateVerificationWithEnv(t, candidate, fileSHA256(t, candidate), "S46_E2E_KEEP_SANDBOX=1")
+	if err == nil || !strings.Contains(output, "candidate invocation root or copy identity changed") {
+		t.Fatalf("renamed PATH invocation should invalidate verification: err=%v\n%s", err, output)
+	}
+	const marker = "[s46-e2e] sandbox preserved: "
+	index := strings.LastIndex(output, marker)
+	if index < 0 {
+		t.Fatalf("failed verification did not preserve its sandbox:\n%s", output)
+	}
+	sandbox := strings.TrimSpace(strings.SplitN(output[index+len(marker):], "\n", 2)[0])
+	t.Cleanup(func() { _ = os.RemoveAll(sandbox) })
+	if _, err := os.Stat(filepath.Join(sandbox, "home", "hidden-path-invocation", "s46")); !os.IsNotExist(err) {
+		t.Fatalf("renamed PATH invocation copy survived failure cleanup: %v", err)
 	}
 }
 
@@ -481,6 +592,52 @@ esac
 	}
 	if len(entries) != 0 {
 		t.Fatalf("failure teardown left candidate invocation copies: %#v", entries)
+	}
+}
+
+func TestAirplaneHarnessTermSignalPurgesInvocationCopies(t *testing.T) {
+	candidate := writeCandidate(t, "#!/bin/sh\nset -eu\nsleep 60\n", 0o755)
+	cmd := exec.Command("bash", "./e2e-airplane-harnesses")
+	cmd.Env = append(os.Environ(),
+		"S46_E2E_CANDIDATE="+candidate,
+		"S46_E2E_CANDIDATE_SHA256="+fileSHA256(t, candidate),
+		"S46_E2E_VERIFY_CANDIDATE_ONLY=1",
+		"S46_E2E_KEEP_SANDBOX=1",
+	)
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2 * time.Second)
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatalf("TERM should fail candidate verification:\n%s", output.String())
+		}
+	case <-time.After(20 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatalf("candidate verification did not stop after TERM:\n%s", output.String())
+	}
+	const marker = "[s46-e2e] sandbox preserved: "
+	index := strings.LastIndex(output.String(), marker)
+	if index < 0 {
+		t.Fatalf("TERM cleanup did not preserve its sandbox:\n%s", output.String())
+	}
+	sandbox := strings.TrimSpace(strings.SplitN(output.String()[index+len(marker):], "\n", 2)[0])
+	t.Cleanup(func() { _ = os.RemoveAll(sandbox) })
+	entries, err := os.ReadDir(filepath.Join(sandbox, "invocations"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("TERM cleanup left candidate invocation copies: %#v", entries)
 	}
 }
 
