@@ -70,7 +70,11 @@ func (s Service) ShareWithOptions(ctx context.Context, options ShareOptions) (Sh
 	if err != nil {
 		return ShareResult{}, fmt.Errorf("normalize share ttl: %w", err)
 	}
-	if s.Config.Env["S46_SHARE_BACKEND"] != "mock" {
+	mock, err := mockShareBackend(s.Config.Env)
+	if err != nil {
+		return ShareResult{}, err
+	}
+	if !mock {
 		if ensureAnonymousClientID(&ctxState.State) {
 			if err := s.Config.SaveState(ctxState.State); err != nil {
 				return ShareResult{}, err
@@ -139,7 +143,11 @@ func (s Service) RevokeShare(ctx context.Context, target string) (RevokeResult, 
 	if record.ID == "" || record.RevokeKey == "" {
 		return RevokeResult{}, fmt.Errorf("share %q has no revoke key; recreate it with `s46 share %s`", target, sessionID)
 	}
-	mock := s.Config.Env["S46_SHARE_BACKEND"] == "mock" || record.Mock
+	mock, err := mockShareBackend(s.Config.Env)
+	if err != nil {
+		return RevokeResult{}, err
+	}
+	mock = mock || record.Mock
 	if !mock {
 		client := sharepkg.Client{BaseURL: shareAPIBaseURL(s.Config.Env)}
 		if _, err := client.Delete(ctx, record.ID, record.RevokeKey); err != nil {
@@ -154,7 +162,11 @@ func (s Service) RevokeShare(ctx context.Context, target string) (RevokeResult, 
 }
 
 func (s Service) buildShare(ctx context.Context, ctxState workspaceContext, sessionID string, ttl string, transcriptPath string, preferredHarness string) (ShareResult, error) {
-	if s.Config.Env["S46_SHARE_BACKEND"] == "mock" {
+	mock, err := mockShareBackend(s.Config.Env)
+	if err != nil {
+		return ShareResult{}, err
+	}
+	if mock {
 		return s.mockShare(ctx, ctxState, sessionID, ttl, transcriptPath, preferredHarness)
 	}
 	return s.gistShare(ctx, ctxState, sessionID, ttl, transcriptPath, preferredHarness)

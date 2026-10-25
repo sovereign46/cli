@@ -1,6 +1,11 @@
-[s46] auth:    dscape@s46.dev
+[s46] mode: cloud
 [s46] team:    @s46/engineering · EU-OPO · cloud
 [s46] harness: standard · s46/devstral-small-2-24b
-[s46] api:     https://gateway.s46.dev
-[s46] checks:  3/3 ok
-[s46] sessions: 0
+[s46] [ok] auth: authenticated as dscape@s46.dev
+[s46] [ok] readiness: test gateway is ready
+[s46] [ok] model: s46/devstral-small-2-24b is advertised
+[s46] [ok] inference: live inference completed
+[s46] [ok] gateway: test gateway is ready
+[s46] [ok] harness-installed: standard built-in
+[s46] [ok] standard: no third-party harness config required
+[s46] [ok] harness: standard executable and configuration

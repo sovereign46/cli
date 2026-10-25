@@ -51,6 +51,7 @@ type HarnessFileSnapshot struct {
 
 type State struct {
 	CurrentUser       string                 `json:"currentUser,omitempty"`
+	CurrentTeam       string                 `json:"currentTeam,omitempty"`
 	CurrentDeviceID   string                 `json:"currentDeviceId,omitempty"`
 	CurrentDeviceName string                 `json:"currentDeviceName,omitempty"`
 	AnonymousClientID string                 `json:"anonymousClientId,omitempty"`

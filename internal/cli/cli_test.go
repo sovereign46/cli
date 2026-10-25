@@ -1,8 +1,11 @@
+//go:build !release
+
 package cli
 
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -44,8 +47,45 @@ type commandResult struct {
 func testEnv(t *testing.T) map[string]string {
 	t.Helper()
 	home := t.TempDir()
+	bin := filepath.Join(home, "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"pi", "claude", "codex"} {
+		path := filepath.Join(bin, name)
+		script := "#!/bin/sh\nprintf '[test-harness] " + name + "\\n'\n"
+		if name == "pi" {
+			script = `#!/bin/sh
+set -eu
+session=""
+model=""
+task=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --session-id) session=$2; shift 2 ;;
+    --model) model=$2; shift 2 ;;
+    --provider) shift 2 ;;
+    --) shift; task=${1:-coding-session}; break ;;
+    *) shift ;;
+  esac
+done
+test -n "$session"
+dir="$HOME/.pi/agent/sessions/test"
+mkdir -p "$dir"
+now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+printf '{"type":"session","version":3,"id":"%s","cwd":"%s","timestamp":"%s"}\n' "$session" "$(pwd)" "$now" > "$dir/${session}.jsonl"
+printf '{"type":"model_change","id":"model","timestamp":"%s","provider":"s46","modelId":"%s"}\n' "$now" "$model" >> "$dir/${session}.jsonl"
+printf '{"type":"message","id":"user","timestamp":"%s","message":{"role":"user","content":[{"type":"text","text":"%s"}]}}\n' "$now" "$task" >> "$dir/${session}.jsonl"
+printf '[test-harness] pi\n'
+`
+		}
+		if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 	return map[string]string{
 		"HOME":                           home,
+		"PATH":                           bin + string(os.PathListSeparator) + os.Getenv("PATH"),
 		"XDG_CONFIG_HOME":                filepath.Join(home, ".config"),
 		"XDG_DATA_HOME":                  filepath.Join(home, ".data"),
 		"XDG_CACHE_HOME":                 filepath.Join(home, ".cache"),
@@ -56,6 +96,7 @@ func testEnv(t *testing.T) map[string]string {
 		"S46_SKIP_STARTUP_UPDATE_CHECK":  "1",
 		"S46_AIRPLANE_SKIP_SETUP_CHECKS": "1",
 		"S46_TEST_GATEWAY_RESPONDING":    "0",
+		"S46_TEST_STATUS_LIVE_OK":        "1",
 		"S46_TEST_OLLAMA_RUNNING":        "0",
 		"S46_TEST_LISTENER_DEFAULT":      "missing",
 	}
@@ -73,7 +114,11 @@ func runWithStdin(t *testing.T, env map[string]string, stdin *strings.Reader, ar
 	}
 	stdout := &bytes.Buffer{}
 	stderr := &bytes.Buffer{}
-	root := NewRootCommand(Runtime{Stdin: stdin, Stdout: stdout, Stderr: stderr, Env: env})
+	var input io.Reader
+	if stdin != nil {
+		input = stdin
+	}
+	root := NewRootCommand(Runtime{Stdin: input, Stdout: stdout, Stderr: stderr, Env: env})
 	root.SetArgs(args)
 	err := root.Execute()
 	return commandResult{stdout: stdout.String(), stderr: stderr.String(), err: err}
@@ -188,8 +233,8 @@ func TestJohnCLIEndToEndLoginAirplaneAndLocalRun(t *testing.T) {
 		t.Fatalf("unexpected login output:\n%s", login)
 	}
 	teams := requireOK(t, run(t, env, "teams", "list"))
-	if !strings.Contains(teams, "@yld/platform") {
-		t.Fatalf("unexpected teams output:\n%s", teams)
+	if !strings.Contains(teams, "no connected teams") {
+		t.Fatalf("login must not claim catalog connection:\n%s", teams)
 	}
 	connect := requireOK(t, run(t, env, "connect", "@yld/platform", "--harness=pi"))
 	if !strings.Contains(connect, "team:    @yld/platform") || !strings.Contains(connect, "harness: pi") {
@@ -200,18 +245,18 @@ func TestJohnCLIEndToEndLoginAirplaneAndLocalRun(t *testing.T) {
 		t.Fatalf("unexpected setup output:\n%s", setup)
 	}
 	status := requireOK(t, run(t, env, "status", "--verbose"))
-	if !strings.Contains(status, "auth:    john@yld.example") || !strings.Contains(status, "team:    @yld/platform") || !strings.Contains(status, "mode:    airplane") {
+	if !strings.Contains(status, "mode: airplane") || !strings.Contains(status, "@yld/platform · EU-OPO · airplane") || !strings.Contains(status, "[ok] auth") {
 		t.Fatalf("unexpected status output:\n%s", status)
 	}
 	if token := strings.TrimSpace(requireOK(t, run(t, env, "token", "--refresh"))); token != "s46_airplane_local" {
 		t.Fatalf("unexpected airplane token %q", token)
 	}
 	runOut := requireOK(t, run(t, env, "run", "offline tyre-kick task"))
-	if !strings.Contains(runOut, "@john/offline-tyre-kick-task-") || !strings.Contains(runOut, "state:   local") {
+	if !strings.Contains(runOut, "pi exited successfully") || !strings.Contains(runOut, "s46/devstral") {
 		t.Fatalf("unexpected run output:\n%s", runOut)
 	}
 	sessions := requireOK(t, run(t, env, "sessions"))
-	if !strings.Contains(sessions, "@john/offline-tyre-kick-task-") || strings.Contains(sessions, "@mary/") {
+	if !strings.Contains(sessions, "offline tyre-kick task") || strings.Contains(sessions, "@mary/") {
 		t.Fatalf("unexpected sessions output:\n%s", sessions)
 	}
 }
@@ -223,17 +268,11 @@ func TestStatusModeSessionsAndShare(t *testing.T) {
 	requireOK(t, run(t, env, "mode", "cloud"))
 	assertGolden(t, "status.golden", requireOK(t, run(t, env, "status")))
 	statusRaw := requireOK(t, run(t, env, "status", "--json"))
-	var status struct {
-		ActiveTeam string `json:"activeTeam"`
-		Team       struct {
-			Endpoint       string `json:"endpoint"`
-			DefaultHarness string `json:"defaultHarness"`
-		} `json:"team"`
-	}
+	var status statusResult
 	if err := json.Unmarshal([]byte(statusRaw), &status); err != nil {
 		t.Fatal(err)
 	}
-	if status.ActiveTeam != "@s46/engineering" || status.Team.Endpoint != "https://gateway.s46.dev" || status.Team.DefaultHarness != "standard" {
+	if !status.OK || status.Team != "@s46/engineering" {
 		t.Fatalf("unexpected status: %s", statusRaw)
 	}
 	sessions := requireOK(t, run(t, env, "sessions"))
@@ -274,7 +313,7 @@ func TestDisconnectTeamsUseStatusAndModeRequireActiveTeam(t *testing.T) {
 	requireOK(t, run(t, env, "airplane", "mode", "off"))
 	requireOK(t, run(t, env, "login", "--email", "dscape@s46.dev"))
 	requireOK(t, run(t, env, "connect", "@s46/engineering", "--harness=claude-code"))
-	if out := requireOK(t, run(t, env, "--verbose", "status")); !strings.Contains(out, "[ok] gateway") || !strings.Contains(out, "[ok] harness") {
+	if out := requireOK(t, run(t, env, "--verbose", "status")); !strings.Contains(out, "[ok] readiness") || !strings.Contains(out, "[ok] claude-base-url") {
 		t.Fatalf("unexpected status output: %s", out)
 	}
 	requireOK(t, run(t, env, "teams", "use", "@s46/engineering"))

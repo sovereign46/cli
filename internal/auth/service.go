@@ -89,10 +89,6 @@ func (s Service) LoginWithDeviceCallback(ctx context.Context, req LoginRequest, 
 		return LoginResult{}, fmt.Errorf("login failed after approval: could not load account details from /v1/me: %w", err)
 	}
 	account := strs.FirstNonEmpty(user.Email, tokens.Account)
-	tokens.Account = account
-	if err := s.storeTokens(ctx, tokens); err != nil {
-		return LoginResult{}, err
-	}
 	teamName := user.Team
 	if teamName == "" {
 		return LoginResult{}, fmt.Errorf("login failed after approval: API did not return a team for %s", account)
@@ -100,25 +96,21 @@ func (s Service) LoginWithDeviceCallback(ctx context.Context, req LoginRequest, 
 	if req.Team != "" && req.Team != teamName {
 		return LoginResult{}, fmt.Errorf("login failed: %s belongs to team %s, not requested team %s", account, teamName, req.Team)
 	}
-	team, err := s.API.Team(ctx, teamName, api.TeamOptions{AccessToken: tokens.AccessToken})
-	if err != nil {
-		if errors.Is(err, api.ErrForbidden) {
-			return LoginResult{}, fmt.Errorf("login failed: authenticated as %s for team %s, but the API denied team lookup; ask an admin to check your team membership", account, teamName)
-		}
-		return LoginResult{}, fmt.Errorf("login failed: could not load team %s: %w", teamName, err)
+	tokens.Account = account
+	if err := s.storeTokens(ctx, tokens); err != nil {
+		return LoginResult{}, err
 	}
 
-	// Save state (auth identity) before config (active team). If only the
-	// first write succeeds, the user is authenticated but no team is
-	// selected — `s46 login` again recovers cleanly. The opposite order
-	// would leave a team active for a user we haven't recorded yet, which
-	// makes `s46 whoami` lie about the identity until login is retried.
+	// Login records only the authenticated identity returned by /v1/me.
+	// Team catalog and gateway availability are checked later by connect,
+	// so an unavailable registry cannot turn a completed login into failure.
 	state, err := s.Config.LoadState()
 	if err != nil {
 		return LoginResult{}, err
 	}
 	state.Authenticated = true
 	state.CurrentUser = account
+	state.CurrentTeam = teamName
 	state.CurrentDeviceID = strs.FirstNonEmpty(tokens.DeviceID, loginReq.DeviceID)
 	state.CurrentDeviceName = loginReq.DeviceName
 	state.LastLoginAt = time.Now().UTC().Format(time.RFC3339)
@@ -126,22 +118,10 @@ func (s Service) LoginWithDeviceCallback(ctx context.Context, req LoginRequest, 
 		return LoginResult{}, err
 	}
 
-	cfg, err := s.Config.LoadConfig()
-	if err != nil {
-		return LoginResult{}, err
-	}
-	if _, ok := cfg.Teams[team.Name]; !ok {
-		cfg.Teams[team.Name] = config.TeamConfigFromAPI(team, "standard", team.DefaultModel, config.ModeCloud)
-	}
-	cfg.ActiveTeam = team.Name
-	if err := s.Config.SaveConfig(cfg); err != nil {
-		return LoginResult{}, err
-	}
-
 	return LoginResult{
 		Authenticated:   true,
 		User:            account,
-		Team:            team.Name,
+		Team:            teamName,
 		DeviceID:        state.CurrentDeviceID,
 		DeviceName:      state.CurrentDeviceName,
 		VerificationURI: device.VerificationURI,
@@ -196,14 +176,10 @@ func (s Service) currentLogin(ctx context.Context) (LoginResult, bool) {
 			return LoginResult{}, false
 		}
 	}
-	cfg, err := s.Config.LoadConfig()
-	if err != nil {
-		return LoginResult{}, false
-	}
 	return LoginResult{
 		Authenticated: true,
 		User:          state.CurrentUser,
-		Team:          cfg.ActiveTeam,
+		Team:          state.CurrentTeam,
 		DeviceID:      strs.FirstNonEmpty(tokens.DeviceID, state.CurrentDeviceID),
 		DeviceName:    state.CurrentDeviceName,
 		ExpiresAt:     tokens.ExpiresAt,
@@ -348,6 +324,7 @@ func (s Service) clearLocalCredentials(ctx context.Context, state config.State) 
 	}
 	state.Authenticated = false
 	state.CurrentUser = ""
+	state.CurrentTeam = ""
 	state.CurrentDeviceID = ""
 	state.CurrentDeviceName = ""
 	state.LastLoginAt = ""

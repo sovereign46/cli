@@ -3,8 +3,12 @@ package harness
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -34,6 +38,16 @@ type DisconnectRequest struct {
 	Team    api.Team
 	Harness string
 	Scope   string
+}
+
+type LaunchRequest struct {
+	Env       map[string]string
+	Stdin     io.Reader
+	Stdout    io.Writer
+	Stderr    io.Writer
+	Task      string
+	Model     string
+	SessionID string
 }
 
 type FilePlan struct {
@@ -126,6 +140,7 @@ type SessionLister interface {
 type Adapter interface {
 	Name() string
 	Detect(ctx context.Context, env map[string]string) (Detection, error)
+	Launch(ctx context.Context, req LaunchRequest) error
 	PlanConnect(ctx context.Context, req ConnectRequest) (Plan, error)
 	PlanDisconnect(ctx context.Context, req DisconnectRequest) (Plan, error)
 	// Apply writes the files in plan, used for both connect and
@@ -206,6 +221,68 @@ func (r *Registry) ListSessions(ctx context.Context, env map[string]string) ([]L
 		sessions = append(sessions, listed...)
 	}
 	return sessions, nil
+}
+
+func ExecutablePath(env map[string]string, name string) (string, bool) {
+	if strings.ContainsRune(name, filepath.Separator) {
+		return executablePath(name)
+	}
+	pathValue := env["PATH"]
+	if strings.TrimSpace(pathValue) == "" {
+		pathValue = os.Getenv("PATH")
+	}
+	for _, directory := range filepath.SplitList(pathValue) {
+		if directory == "" {
+			directory = "."
+		}
+		candidate := filepath.Join(directory, name)
+		if path, ok := executablePath(candidate); ok {
+			return path, true
+		}
+		if runtime.GOOS == "windows" && filepath.Ext(candidate) == "" {
+			if path, ok := executablePath(candidate + ".exe"); ok {
+				return path, true
+			}
+		}
+	}
+	return "", false
+}
+
+func LaunchExecutable(ctx context.Context, name string, args []string, req LaunchRequest) error {
+	path, ok := ExecutablePath(req.Env, name)
+	if !ok {
+		return fmt.Errorf("%s is not installed on PATH", name)
+	}
+	command := exec.Command(path, args...)
+	command.Env = ProcessEnv(req.Env)
+	command.Stdin = req.Stdin
+	command.Stdout = req.Stdout
+	command.Stderr = req.Stderr
+	if err := runCommandInProcessGroup(ctx, command); err != nil {
+		return fmt.Errorf("launch %s: %w", name, err)
+	}
+	return nil
+}
+
+func ProcessEnv(env map[string]string) []string {
+	values := make([]string, 0, len(env))
+	for key, value := range env {
+		values = append(values, key+"="+value)
+	}
+	sort.Strings(values)
+	return values
+}
+
+func executablePath(path string) (string, bool) {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return "", false
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return path, true
+	}
+	return absolute, true
 }
 
 func looksLikeTranscriptPath(ref string) bool {

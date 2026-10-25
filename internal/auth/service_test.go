@@ -108,7 +108,7 @@ func TestDevicesAndSelfRevoke(t *testing.T) {
 	}
 }
 
-func TestLoginUsesAuthoritativeTeamFromMe(t *testing.T) {
+func TestLoginUsesAuthoritativeTeamFromMeWithoutLoadingCatalog(t *testing.T) {
 	home := t.TempDir()
 	env := map[string]string{"HOME": home, "XDG_CONFIG_HOME": filepath.Join(home, ".config"), "XDG_DATA_HOME": filepath.Join(home, ".data")}
 	store := config.NewStore(env, "")
@@ -119,8 +119,22 @@ func TestLoginUsesAuthoritativeTeamFromMe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if login.User != "nunojob@icloud.com" || login.Team != "@s46/engineering" || apiClient.teamRequested != "@s46/engineering" {
+	if login.User != "nunojob@icloud.com" || login.Team != "@s46/engineering" || apiClient.teamRequested != "" {
 		t.Fatalf("login=%#v teamRequested=%q", login, apiClient.teamRequested)
+	}
+	state, err := store.LoadState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.CurrentTeam != "@s46/engineering" {
+		t.Fatalf("authenticated team was not persisted independently: %#v", state)
+	}
+	cfg, err := store.LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ActiveTeam != "" || len(cfg.Teams) != 0 {
+		t.Fatalf("login must not claim a connected team catalog: %#v", cfg)
 	}
 }
 

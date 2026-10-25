@@ -165,7 +165,11 @@ func promptConnectRequest(app *app, req connectRequest) (connectRequest, error) 
 	if err := writeInteractiveCancelHint(out); err != nil {
 		return connectRequest{}, err
 	}
-	defaultTeam := cfg.ActiveTeam
+	state, err := app.config.LoadState()
+	if err != nil {
+		return connectRequest{}, err
+	}
+	defaultTeam := strs.FirstNonEmpty(cfg.ActiveTeam, state.CurrentTeam)
 	if defaultTeam == "" && len(cfg.Teams) == 1 {
 		for name := range cfg.Teams {
 			defaultTeam = name

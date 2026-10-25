@@ -1,3 +1,5 @@
+//go:build !release
+
 package cli
 
 import (
@@ -56,9 +58,9 @@ func TestLoginTellsUserToCheckEmail(t *testing.T) {
 	if !strings.Contains(out, "check your email at dscape@s46.dev") || strings.Contains(out, "magic-link endpoint") || strings.Contains(out, "API server") {
 		t.Fatalf("unexpected login output: %s", out)
 	}
-	status := requireOK(t, run(t, env, "status"))
-	if !strings.Contains(status, "api:     "+server.URL) {
-		t.Fatalf("unexpected status output: %s", status)
+	status := run(t, env, "status", "--json")
+	if status.err == nil || !strings.Contains(status.stdout, `"name": "auth"`) || !strings.Contains(status.stdout, `"ok": true`) {
+		t.Fatalf("login-only status must show live auth but fail unconnected setup: %#v", status)
 	}
 }
 

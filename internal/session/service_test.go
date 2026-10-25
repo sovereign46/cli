@@ -19,11 +19,12 @@ import (
 func TestRunStoresSessionAndListReturnsLocalState(t *testing.T) {
 	service, store := newTestService(t, api.Team{Name: "s46", Endpoint: "http://127.0.0.1:8080", Region: "EU-OPO", DefaultModel: api.DefaultModel}, config.ModeAirplane, nil)
 
-	run, err := service.Run(context.Background(), "Fix /v1 sessions", "", "")
+	const transcriptID = "00000000-0000-4000-8000-000000000123"
+	run, err := service.RecordCompletedLaunch(context.Background(), "Fix /v1 sessions", "", transcriptID, "pi")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(run.ID, "@nunojob/fix-v1-sessions-") || run.Location != "localhost" || run.State != "local" {
+	if run.ID != transcriptID || run.Location != "localhost" || run.State != "local" {
 		t.Fatalf("run = %#v", run)
 	}
 
@@ -38,7 +39,7 @@ func TestRunStoresSessionAndListReturnsLocalState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(listed) != 1 || listed[0].ID != run.ID || listed[0].Harness != "s46" {
+	if len(listed) != 1 || listed[0].ID != run.ID || listed[0].Harness != "pi" {
 		t.Fatalf("listed = %#v", listed)
 	}
 }

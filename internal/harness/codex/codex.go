@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -28,14 +27,15 @@ func New() Adapter { return Adapter{} }
 func (a Adapter) Name() string { return "codex" }
 
 func (a Adapter) Detect(ctx context.Context, env map[string]string) (harness.Detection, error) {
-	path := configPath(env)
-	if _, err := os.Stat(path); err == nil {
-		return harness.Detection{Installed: true, Path: config.DisplayPath(path, env)}, nil
-	}
-	if binary, err := exec.LookPath("codex"); err == nil {
+	if binary, ok := harness.ExecutablePath(env, "codex"); ok {
 		return harness.Detection{Installed: true, Path: binary}, nil
 	}
-	return harness.Detection{Installed: false, Path: config.DisplayPath(path, env)}, nil
+	return harness.Detection{Installed: false}, nil
+}
+
+func (a Adapter) Launch(ctx context.Context, req harness.LaunchRequest) error {
+	args := []string{"--profile", "s46", "--model", req.Model, "--", req.Task}
+	return harness.LaunchExecutable(ctx, "codex", args, req)
 }
 
 func (a Adapter) PlanConnect(ctx context.Context, req harness.ConnectRequest) (harness.Plan, error) {

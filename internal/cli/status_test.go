@@ -1,77 +1,110 @@
+//go:build !release
+
 package cli
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
-	"github.com/sovereign46/cli/internal/airplane"
+	"github.com/sovereign46/cli/internal/api"
+	"github.com/sovereign46/cli/internal/harness"
 )
 
-func TestStatusJSONFailureIsMachineReadable(t *testing.T) {
+func TestStatusJSONFailureIsMachineReadableAndNonzero(t *testing.T) {
 	env := testEnv(t)
-	result := run(t, env, "status", "--json")
-	if result.err != nil {
-		t.Fatalf("status --json should report failed checks in JSON without returning a second error: %#v", result)
+	result := runMain(t, env, "status", "--json")
+	if result.err == nil {
+		t.Fatal("failed JSON status returned a zero exit result")
 	}
 	if result.stderr != "" {
-		t.Fatalf("status --json wrote stderr: %q", result.stderr)
+		t.Fatalf("already-rendered status emitted a second JSON error: %q", result.stderr)
 	}
-	var payload struct {
-		OK           bool          `json:"ok"`
-		Checks       []statusCheck `json:"checks"`
-		LocalServers []any         `json:"localServers"`
-		Ollama       any           `json:"ollama"`
-	}
+	var payload statusResult
 	if err := json.Unmarshal([]byte(result.stdout), &payload); err != nil {
 		t.Fatalf("invalid status json: %v\n%s", err, result.stdout)
 	}
-	if payload.OK || len(payload.Checks) == 0 || payload.LocalServers != nil || payload.Ollama != nil {
+	if payload.OK || len(payload.Checks) == 0 {
 		t.Fatalf("unexpected status json: %s", result.stdout)
 	}
 }
 
-func TestTenantEndpointOKAllowsLocalAPIBase(t *testing.T) {
-	if !tenantEndpointOK(map[string]string{"S46_API_BASE_URL": "http://127.0.0.1:8080"}, "@s46/engineering", "http://127.0.0.1:8080") {
-		t.Fatalf("expected local API base to pass tenant check")
-	}
-	if !tenantEndpointOK(map[string]string{"S46_DEV_SHELL": "1", "S46_DEV_BASE_URL": "http://127.0.0.1:8080"}, "@s46/engineering", "http://127.0.0.1:8080") {
-		t.Fatalf("expected dev shell base to pass tenant check")
-	}
-	if !tenantEndpointOK(nil, "@s46/engineering", "https://gateway.s46.dev") {
-		t.Fatalf("expected production tenant to pass tenant check")
-	}
-	if tenantEndpointOK(map[string]string{"S46_API_BASE_URL": "http://127.0.0.1:8080"}, "@s46/engineering", "https://evil.example") {
-		t.Fatalf("unexpected tenant check success")
-	}
-}
+func TestStatusLiveAuthReadinessModelAndInferenceContract(t *testing.T) {
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		switch r.URL.Path {
+		case "/readyz":
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		case "/v1/models":
+			if r.Header.Get("Authorization") == "" {
+				http.Error(w, "missing bearer", http.StatusUnauthorized)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]string{{"id": api.DefaultModel}}})
+		case "/v1/chat/completions":
+			if r.Header.Get("Authorization") == "" {
+				http.Error(w, "missing bearer", http.StatusUnauthorized)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"choices": []map[string]any{{"message": map[string]string{"role": "assistant", "content": "ok"}}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
 
-func TestStatusShowsLlamacppRuntime(t *testing.T) {
 	env := testEnv(t)
+	delete(env, "S46_TEST_STATUS_LIVE_OK")
 	requireOK(t, run(t, env, "login", "--email", "dscape@s46.dev"))
-	requireOK(t, run(t, env, "connect", "@s46/engineering", "--harness=standard"))
-	env["S46_TEST_LLAMACPP_RUNNING"] = "1"
-	env["S46_TEST_LLAMACPP_PROCESS_KIND"] = "manual"
-	env["S46_TEST_LLAMACPP_MODELS"] = airplane.BackendModel
-
-	out := requireOK(t, run(t, env, "--verbose", "status"))
-	for _, want := range []string{
-		"[s46] llama.cpp server: manual",
-		"[s46] llama.cpp models: devstral-small-2:24b-instruct-2512-q4_K_M",
-		"[s46] llama.cpp --ctx-size: want 65536",
-		"[s46] llama.cpp --cache-type-k: want q8_0",
-	} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("status output missing %q:\n%s", want, out)
+	requireOK(t, run(t, env, "connect", "@s46/engineering", "--harness=standard", "--mode=cloud", "--endpoint="+server.URL))
+	result := run(t, env, "status", "--json")
+	if result.err != nil {
+		t.Fatalf("live status failed: %v\n%s", result.err, result.stdout)
+	}
+	var payload statusResult
+	if err := json.Unmarshal([]byte(result.stdout), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if !payload.OK {
+		t.Fatalf("live status did not pass: %#v", payload.Checks)
+	}
+	for _, name := range []string{"auth", "readiness", "model", "inference", "standard"} {
+		if !statusCheckOK(payload.Checks, name) {
+			t.Fatalf("missing successful %s check: %#v", name, payload.Checks)
+		}
+	}
+	joined := strings.Join(paths, ",")
+	for _, want := range []string{"GET /readyz", "GET /v1/models", "POST /v1/chat/completions"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("status did not perform %s: %s", want, joined)
 		}
 	}
 }
 
-func TestStatusAfterLoginDoesNotRequireHarnessConnect(t *testing.T) {
+func TestStatusAfterLoginRequiresConnectAndDoesNotClaimHarnessSetup(t *testing.T) {
 	env := testEnv(t)
 	requireOK(t, run(t, env, "login", "--email", "dscape@s46.dev"))
-	out := requireOK(t, run(t, env, "--verbose", "status"))
-	if !strings.Contains(out, "[ok] standard") || strings.Contains(out, "claude-config") {
-		t.Fatalf("unexpected status output: %s", out)
+	result := run(t, env, "status", "--json")
+	if result.err == nil {
+		t.Fatal("login-only status claimed readiness without a connected gateway and harness")
 	}
+	var payload statusResult
+	if err := json.Unmarshal([]byte(result.stdout), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Team != "" || statusCheckOK(payload.Checks, "harness") {
+		t.Fatalf("login-only status claimed connected setup: %#v", payload)
+	}
+}
+
+func statusCheckOK(checks []harness.StatusCheck, name string) bool {
+	for _, check := range checks {
+		if check.Name == name {
+			return check.OK
+		}
+	}
+	return false
 }

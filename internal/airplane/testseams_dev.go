@@ -68,6 +68,7 @@ func (s Service) seamInstallGateway() (handled bool, err error) {
 	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		return true, err
 	}
+	s.setEnv("S46_TEST_GATEWAY_BINARY", path)
 	return true, nil
 }
 
@@ -131,6 +132,13 @@ func (s Service) seamGatewayResponding() (responding bool, ok bool) {
 		return false, false
 	}
 	return strs.Truthy(value), true
+}
+
+func (s Service) seamLlamacppDownloadAvailable() (available bool, ok bool) {
+	if available, ok := s.seamHomebrewAvailable(); ok {
+		return available, true
+	}
+	return false, false
 }
 
 func (s Service) seamGatewayDownloadAvailable() (available bool, ok bool) {

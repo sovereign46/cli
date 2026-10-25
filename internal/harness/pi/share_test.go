@@ -60,6 +60,33 @@ func TestShareArtifactIngestsPiJSONL(t *testing.T) {
 	}
 }
 
+func TestPiTranscriptAcceptsStringContentAndIsolatesMalformedSessions(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, ".pi", "agent", "sessions", "project")
+	good := filepath.Join(root, "session_019e4ad2-ba3a-71f7-b34a-205e84be280e.jsonl")
+	writeJSONL(t, good, `
+{"type":"session","id":"019e4ad2-ba3a-71f7-b34a-205e84be280e","timestamp":"2026-05-21T10:00:00Z","cwd":"$HOME/dev/app"}
+{"type":"message","timestamp":"2026-05-21T10:00:01Z","message":{"role":"user","content":"show the remote error"}}
+{"type":"message","timestamp":"2026-05-21T10:00:02Z","message":{"role":"assistant","content":"remote inference unavailable"}}
+`)
+	writeJSONL(t, filepath.Join(root, "session_broken.jsonl"), `{not-json}`)
+
+	sessions, err := New().ListSessions(context.Background(), map[string]string{"HOME": home})
+	if err != nil {
+		t.Fatalf("one malformed Pi session hid healthy sessions: %v", err)
+	}
+	if len(sessions) != 1 || sessions[0].ID != "019e4ad2-ba3a-71f7-b34a-205e84be280e" {
+		t.Fatalf("unexpected isolated session list: %#v", sessions)
+	}
+	artifact, ok, err := New().ShareArtifact(context.Background(), harness.ShareRequest{Env: map[string]string{"HOME": home}, Session: api.Session{ID: sessions[0].ID}})
+	if err != nil || !ok {
+		t.Fatalf("share string-content transcript: ok=%v err=%v", ok, err)
+	}
+	if len(artifact.Steps) != 2 || artifact.Steps[0].Body != "show the remote error" || artifact.Steps[1].Body != "remote inference unavailable" {
+		t.Fatalf("string content or remote error was lost: %#v", artifact.Steps)
+	}
+}
+
 func writeJSONL(t *testing.T, path string, content string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

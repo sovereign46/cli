@@ -27,8 +27,16 @@ type errorCoder interface {
 	ErrorCode() string
 }
 
+type alreadyRenderedError interface {
+	AlreadyRendered()
+}
+
 func RenderExecutionError(root *cobra.Command, runtime Runtime, err error) error {
 	if err == nil || errors.Is(err, context.Canceled) {
+		return nil
+	}
+	var rendered alreadyRenderedError
+	if errors.As(err, &rendered) {
 		return nil
 	}
 	if runtime.Env == nil {

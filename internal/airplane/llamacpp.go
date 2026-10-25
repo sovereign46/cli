@@ -3,6 +3,7 @@ package airplane
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -13,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/sovereign46/cli/internal/config"
 	"github.com/sovereign46/cli/internal/contextx"
 	"github.com/sovereign46/cli/internal/models"
 	"github.com/sovereign46/cli/internal/strs"
@@ -44,7 +46,7 @@ func (s Service) InstallLlamacpp(ctx context.Context) error {
 	if handled, err := s.seamInstallLlamacpp(); handled {
 		return err
 	}
-	return s.runHomebrewInstall(ctx, "llama.cpp")
+	return s.installPinnedLlamaCpp(ctx)
 }
 
 func (s Service) PullModel(ctx context.Context) error {
@@ -84,16 +86,68 @@ func (s Service) StartLlamacpp(ctx context.Context) error {
 	if handled, err := s.seamStartLlamacpp(); handled {
 		return err
 	}
-	path, ok := s.llamacppPath()
-	if !ok {
-		return fmt.Errorf("llama-server is not installed")
-	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	cmd := exec.Command(path, AirplaneLlamacppArgs(s.Env, s.modelPath())...)
-	cmd.Env = s.processEnv()
-	return s.startDetached(cmd, "llamacpp.log")
+	pin, err := embeddedLlamaCppReleasePin(runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		return err
+	}
+	if err := s.cleanupStaleModelRuntimeSnapshot(); err != nil {
+		return err
+	}
+	model, err := s.openVerifiedModelDescriptor(ctx)
+	if err != nil {
+		return err
+	}
+	defer model.File.Close()
+	snapshot, err := s.createLlamaRuntimeSnapshot(ctx, pin)
+	if err != nil {
+		return err
+	}
+	ownedSnapshot := true
+	defer func() {
+		if ownedSnapshot {
+			_ = removeRuntimeSnapshot(snapshot.Root)
+		}
+	}()
+	if err := config.RemoveIfExists(s.modelRuntimeIdentityPath()); err != nil {
+		return err
+	}
+	executable, err := openRuntimeExecutableDescriptor(snapshot.Executable, pin.BinarySHA256, pin.BinarySize)
+	if err != nil {
+		return err
+	}
+	defer executable.File.Close()
+	args := AirplaneLlamacppArgs(s.Env, descriptorModelPath())
+	cmd := exec.Command(snapshot.Executable, args...)
+	cmd.Env = s.processEnv("DYLD_LIBRARY_PATH=" + snapshot.Root)
+	cmd.ExtraFiles = []*os.File{model.File, executable.File}
+	pid, err := s.startDetachedProcess(cmd, "llamacpp.log")
+	if err != nil {
+		return err
+	}
+	device, inode, err := processFDIdentity(pid, 3)
+	if err != nil || device != model.Device || inode != model.Inode {
+		return s.failStartedRuntime(pid, snapshot.Root, errors.Join(errors.New("llama-server did not retain the verified model descriptor at launch"), err))
+	}
+	runtimeDevice, runtimeInode, err := processFDIdentity(pid, 4)
+	if err != nil || runtimeDevice != executable.Device || runtimeInode != executable.Inode {
+		return s.failStartedRuntime(pid, snapshot.Root, errors.Join(errors.New("llama-server process executable descriptor does not match the authenticated runtime"), err))
+	}
+	if verifyLlamaCppDistribution(ctx, snapshot.Root, snapshot.Executable, pin) != nil || verifyRuntimeSnapshotLock(snapshot.Root) != nil {
+		return s.failStartedRuntime(pid, snapshot.Root, errors.New("private llama.cpp runtime snapshot changed during launch"))
+	}
+	started, err := processStartIdentity(pid)
+	if err != nil {
+		return s.failStartedRuntime(pid, snapshot.Root, fmt.Errorf("record llama-server process identity: %w", err))
+	}
+	identity := modelRuntimeIdentity{Schema: modelRuntimeIdentitySchema, PID: pid, ModelSHA256: model.SHA256, ModelSize: model.Size, ModelDevice: model.Device, ModelInode: model.Inode, ModelFDVerifiedAtStart: true, ManifestSHA256: model.ManifestSHA256, RuntimeSHA256: pin.BinarySHA256, RuntimeInventorySHA256: pin.InventorySHA256, RuntimeSnapshotRoot: snapshot.Root, RuntimeDevice: executable.Device, RuntimeInode: executable.Inode, RuntimeFD: 4, Command: append([]string{snapshot.Executable}, args...), ProcessStarted: started}
+	if err := s.saveModelRuntimeIdentity(identity); err != nil {
+		return s.failStartedRuntime(pid, snapshot.Root, fmt.Errorf("record descriptor-bound model runtime identity: %w", err))
+	}
+	ownedSnapshot = false
+	return nil
 }
 
 func (s Service) requireVerifiedModel(ctx context.Context) error {
@@ -135,7 +189,13 @@ func (s Service) llamacppServingVerifiedModel(ctx context.Context) (bool, string
 	}
 	process, ok := s.llamacppServeProcess(ctx)
 	if !ok {
-		return false, "could not verify llama-server process model path; restart it with `s46 airplane setup`"
+		return false, "could not verify llama-server process model identity; restart it with `s46 airplane setup`"
+	}
+	if pin, err := embeddedLlamaCppReleasePin(runtime.GOOS, runtime.GOARCH); err == nil {
+		if s.descriptorBoundModelIsRunning(process, pin) {
+			return true, "serving descriptor-bound verified model release"
+		}
+		return false, "llama-server process is not bound to the verified model descriptor and release identity"
 	}
 	if commandUsesModelPath(process.Command, s.modelPath()) {
 		return true, "serving verified model: " + s.modelPath()
@@ -191,24 +251,32 @@ func (r LlamacppRuntime) NeedsProcessRestart() bool {
 	return false
 }
 
-func (s Service) runHomebrewInstall(ctx context.Context, formula string) error {
-	cmd := exec.CommandContext(ctx, "brew", "install", formula)
-	cmd.Stdout = s.Stdout
-	cmd.Stderr = s.Stderr
-	return contextx.ExternalError(ctx, cmd.Run())
-}
-
 func (s Service) llamacppPath() (string, bool) {
 	if path, installed, ok := s.seamLlamacppPath(); ok {
 		return path, installed
 	}
-	path, err := exec.LookPath("llama-server")
-	return path, err == nil
+	if pin, err := embeddedLlamaCppReleasePin(runtime.GOOS, runtime.GOARCH); err == nil {
+		if path, ok := s.verifiedManagedLlamaCpp(context.Background(), pin); ok {
+			return path, true
+		}
+	}
+	return s.developmentLlamacppPath()
 }
 
 func (s Service) llamacppServeProcess(ctx context.Context) (llamacppProcess, bool) {
 	if process, found, ok := s.seamLlamacppServeProcess(); ok {
 		return process, found
+	}
+	if _, err := embeddedLlamaCppReleasePin(runtime.GOOS, runtime.GOARCH); err == nil {
+		identity, identityErr := s.loadModelRuntimeIdentity()
+		if identityErr != nil || len(identity.Command) == 0 {
+			return llamacppProcess{}, false
+		}
+		started, startErr := processStartIdentity(identity.PID)
+		if startErr != nil || started != identity.ProcessStarted {
+			return llamacppProcess{}, false
+		}
+		return llamacppProcess{PID: identity.PID, Command: strings.Join(identity.Command, " ")}, true
 	}
 	output, err := contextx.CommandOutput(ctx, "ps", "-axo", "pid=,ppid=,args=")
 	if err != nil {

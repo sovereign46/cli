@@ -1,0 +1,32 @@
+{
+  "schema": "s46.airplane-release.v1",
+  "qualified": false,
+  "model": {
+    "id": "s46/devstral-small-2-24b",
+    "backendModel": "devstral-small-2:24b-instruct-2512-q4_K_M",
+    "fileName": "Devstral-Small-2-24B-Instruct-2512-Q4_K_M.gguf",
+    "sha256": "d14ba9edee1bb4c4996a726deb81e49ae81800a3216f0774634238c380aee496",
+    "size": 14334446752
+  },
+  "llamaCpp": {
+    "repository": "ggml-org/llama.cpp",
+    "version": "b9270",
+    "platforms": {
+      "darwin/arm64": {
+        "assetName": "llama-b9270-bin-macos-arm64.tar.gz",
+        "archiveSha256": "1a41b5bb3585a79ce90535b2c61671eae60a032ddb2b4992a62eb0d221f9b2bb",
+        "archiveSize": 8488521,
+        "binarySha256": "fc05cc348584b01226d1a95bc2282978193d009a02b16d739ff17f9b332b1cda",
+        "binarySize": 8023664,
+        "inventorySchema": "s46.llamacpp-runtime-inventory.v1",
+        "inventorySha256": "5188ea71039a80e56a3026fa4c7a823e6b550887a50475fe9c45001ee436c167",
+        "versionOutput": "version: 9270 (7ea23ddf7)"
+      }
+    }
+  },
+  "gateway": {
+    "repository": "sovereign46/api",
+    "version": "",
+    "platforms": {}
+  }
+}

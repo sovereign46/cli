@@ -1,3 +1,5 @@
+//go:build !release
+
 package cli
 
 import (
@@ -33,6 +35,20 @@ func TestAirplaneSetupModeOnHarnessIsNonInteractive(t *testing.T) {
 	status := requireOK(t, run(t, env, "status"))
 	if !strings.Contains(status, "[s46✈] harness: pi · s46/devstral-small-2-24b") {
 		t.Fatalf("setup did not configure pi harness:\n%s", status)
+	}
+}
+
+func TestAirplaneSetupYesFailsWhenSetupRemainsIncomplete(t *testing.T) {
+	env := testEnv(t)
+	delete(env, "S46_AIRPLANE_SKIP_SETUP_CHECKS")
+	env["S46_TEST_MEMORY_BYTES"] = "16000000000"
+	env["S46_TEST_FREE_DISK_BYTES"] = "18000000000"
+	result := run(t, env, "airplane", "setup", "--yes")
+	if result.err == nil {
+		t.Fatalf("incomplete noninteractive setup succeeded:\n%s", result.stdout)
+	}
+	if !strings.Contains(result.stdout, "airplane setup: needs setup") || !strings.Contains(result.err.Error(), "incomplete or unsupported") {
+		t.Fatalf("unexpected incomplete setup result: %v\n%s", result.err, result.stdout)
 	}
 }
 
@@ -155,7 +171,7 @@ func TestAirplaneSetupContinuesAfterInstallingLlamacpp(t *testing.T) {
 
 	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\nY\nY\nY\nn\n"), "airplane", "setup"))
 	for _, want := range []string{
-		"[s46] Install with Homebrew? [Y/n]",
+		"[s46] Install test-qualified llama.cpp runtime? [Y/n]",
 		"[s46] llama-server is installed but not running.",
 		"[s46] Start llama-server now? [Y/n]",
 		"Download or verify devstral-small-2:24b-instruct-2512-q4_K_M",
@@ -245,10 +261,9 @@ func TestAirplaneSetupCanTurnOnAirplaneModeWithoutLogin(t *testing.T) {
 	status := requireOK(t, run(t, env, "--verbose", "status"))
 	for _, want := range []string{
 		"[s46✈] team:    local",
-		"[s46✈] harness: claude-code",
-		"[s46✈] model:   s46/devstral-small-2-24b",
-		"[s46✈] local llamacpp: http://127.0.0.1:8081 · port 8081 · pid 111 (llama-server)",
-		"[s46✈] local gateway: http://127.0.0.1:8080 · port 8080 · pid 222 (s46-gateway)",
+		"[s46✈] harness: claude-code · s46/devstral-small-2-24b",
+		"[s46✈] [ok] gateway",
+		"[s46✈] [ok] inference",
 	} {
 		if !strings.Contains(status, want) {
 			t.Fatalf("unexpected airplane status without login missing %q:\n%s", want, status)
@@ -338,7 +353,7 @@ func TestAirplaneSetupInstallsMissingGateway(t *testing.T) {
 	out := requireOK(t, runWithStdin(t, env, strings.NewReader("Y\nY\nn\n"), "airplane", "setup"))
 	for _, want := range []string{
 		"[s46] Local s46 gateway is not installed.",
-		"Install from verified GitHub release or git clone sovereign46/api",
+		"Install test-qualified gateway release into",
 		"[s46] installing local s46 gateway...",
 		"[s46] Start local gateway now? [Y/n]",
 		"[s46] airplane setup: ready",

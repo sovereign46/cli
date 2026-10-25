@@ -1,24 +1,38 @@
+//go:build !release
+
 package airplane
 
 import (
-	"archive/tar"
 	"bytes"
-	"compress/gzip"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sovereign46/cli/internal/models"
 )
+
+func TestAirplanePlatformPolicyRequiresMacOS26ARM64(t *testing.T) {
+	for _, test := range []struct {
+		goos, goarch, version string
+		want                  bool
+	}{
+		{goos: "darwin", goarch: "arm64", version: "26.0", want: true},
+		{goos: "darwin", goarch: "arm64", version: "15.7"},
+		{goos: "darwin", goarch: "amd64", version: "26.0"},
+		{goos: "linux", goarch: "arm64", version: "26.0"},
+	} {
+		got, _ := airplanePlatformPolicy(test.goos, test.goarch, test.version)
+		if got != test.want {
+			t.Fatalf("airplanePlatformPolicy(%q, %q, %q) = %t, want %t", test.goos, test.goarch, test.version, got, test.want)
+		}
+	}
+}
 
 func TestModelInstallProgressRendererShowsFlyingPlane(t *testing.T) {
 	var out bytes.Buffer
@@ -102,14 +116,10 @@ func TestEnsureModelDirCreatesConfiguredDirectory(t *testing.T) {
 	}
 }
 
-func TestInstallLlamacppInstallsOnlyLlamacppFormula(t *testing.T) {
-	logPath := fakeBrew(t)
-
-	if err := (Service{}).InstallLlamacpp(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if got := readText(t, logPath); strings.TrimSpace(got) != "install llama.cpp" {
-		t.Fatalf("unexpected brew args: %q", got)
+func TestInstallLlamacppFailsClosedWithoutCompleteQualifiedClosure(t *testing.T) {
+	err := (Service{}).InstallLlamacpp(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "gateway pin") {
+		t.Fatalf("unqualified llama.cpp candidate was accepted: %v", err)
 	}
 }
 
@@ -331,167 +341,6 @@ func TestLlamacppRuntimeReportsSettingsAndModels(t *testing.T) {
 	}
 }
 
-func TestGatewaySourceRequiresExplicitRepo(t *testing.T) {
-	service := Service{Env: map[string]string{}}
-	if command, ok := service.gatewaySourceCommand(); ok {
-		t.Fatalf("unexpected implicit gateway source command: %#v", command)
-	}
-}
-
-func TestGatewaySourceUsesExplicitRepo(t *testing.T) {
-	repo := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(repo, "cmd", GatewayBinaryName), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	service := Service{Env: map[string]string{"S46_API_REPO": repo}}
-	command, ok := service.gatewaySourceCommand()
-	if !ok || command.Dir != repo || !strings.Contains(command.Description, repo) {
-		t.Fatalf("unexpected gateway source command: %#v", command)
-	}
-}
-
-func TestInstallGatewayDownloadsReleaseAssetWithDigest(t *testing.T) {
-	archive := gatewayArchive(t)
-	assetName := GatewayBinaryName + "_1.2.3_" + runtime.GOOS + "_" + runtime.GOARCH + ".tar.gz"
-	var server *httptest.Server
-	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/latest":
-			_ = json.NewEncoder(w).Encode(gatewayRelease{TagName: "v1.2.3", Assets: []gatewayAsset{{Name: assetName, BrowserDownloadURL: server.URL + "/archive", Digest: "sha256:" + sha256Hex(archive)}}})
-		case "/archive":
-			_, _ = w.Write(archive)
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-
-	home := t.TempDir()
-	service := Service{Env: map[string]string{
-		"XDG_DATA_HOME":              filepath.Join(home, ".data"),
-		"S46_API_GATEWAY_LATEST_URL": server.URL + "/latest",
-	}}
-	if err := service.InstallGateway(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(service.managedGatewayBinaryPath()); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestInstallGatewayDownloadsArchive(t *testing.T) {
-	archive := gatewayArchive(t)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("Accept"); got != "application/octet-stream" {
-			t.Fatalf("Accept = %q", got)
-		}
-		if got := r.Header.Get("Accept-Encoding"); got != "identity" {
-			t.Fatalf("Accept-Encoding = %q", got)
-		}
-		if got := r.Header.Get("User-Agent"); got != "s46-airplane" {
-			t.Fatalf("User-Agent = %q", got)
-		}
-		_, _ = w.Write(archive)
-	}))
-	defer server.Close()
-
-	home := t.TempDir()
-	service := Service{Env: map[string]string{
-		"XDG_DATA_HOME":                filepath.Join(home, ".data"),
-		"S46_API_GATEWAY_DOWNLOAD_URL": server.URL,
-		"S46_API_GATEWAY_SHA256":       sha256Hex(archive),
-	}}
-	if err := service.InstallGateway(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	path := service.managedGatewayBinaryPath()
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.IsDir() || info.Mode()&0o111 == 0 {
-		t.Fatalf("expected executable gateway binary, mode=%s", info.Mode())
-	}
-}
-
-func TestInstallGatewayRejectsChecksumMismatch(t *testing.T) {
-	archive := gatewayArchive(t)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write(archive)
-	}))
-	defer server.Close()
-
-	service := Service{Env: map[string]string{
-		"XDG_DATA_HOME":                filepath.Join(t.TempDir(), ".data"),
-		"S46_API_GATEWAY_DOWNLOAD_URL": server.URL,
-		"S46_API_GATEWAY_SHA256":       strings.Repeat("0", sha256.Size*2),
-	}}
-	if err := service.InstallGateway(context.Background()); err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
-		t.Fatalf("expected checksum mismatch, got %v", err)
-	}
-}
-
-func TestInstallGatewayFallsBackToGitClone(t *testing.T) {
-	if !gatewaySourceFallbackEnabled() {
-		t.Skip("source fallback is disabled in this build")
-	}
-	bin := t.TempDir()
-	logPath := filepath.Join(t.TempDir(), "commands.log")
-	writeExecutable(t, filepath.Join(bin, "git"), `#!/bin/sh
-echo git "$@" >> "$S46_TEST_COMMAND_LOG"
-if [ "$1" = clone ]; then
-  /bin/mkdir -p "$5/cmd/s46-gateway"
-  exit 0
-fi
-exit 1
-`)
-	writeExecutable(t, filepath.Join(bin, "go"), `#!/bin/sh
-echo go "$@" >> "$S46_TEST_COMMAND_LOG"
-out=""
-while [ "$#" -gt 0 ]; do
-  if [ "$1" = -o ]; then
-    out="$2"
-    shift 2
-    continue
-  fi
-  shift
-done
-printf '#!/bin/sh\n' > "$out"
-/bin/chmod +x "$out"
-`)
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	server := httptest.NewServer(http.NotFoundHandler())
-	defer server.Close()
-
-	home := t.TempDir()
-	service := Service{Env: map[string]string{
-		"XDG_DATA_HOME":              filepath.Join(home, ".data"),
-		"S46_API_GATEWAY_LATEST_URL": server.URL,
-		"S46_TEST_COMMAND_LOG":       logPath,
-	}}
-	if err := service.InstallGateway(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	path := service.managedGatewayBinaryPath()
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.IsDir() || info.Mode()&0o111 == 0 {
-		t.Fatalf("expected executable gateway binary, mode=%s", info.Mode())
-	}
-	log, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{"git clone --depth 1 git@github.com:sovereign46/api.git", "go build -o " + path + " ./cmd/s46-gateway"} {
-		if !strings.Contains(string(log), want) {
-			t.Fatalf("command log missing %q:\n%s", want, string(log))
-		}
-	}
-}
-
 func TestCheckRequiresAirplaneReadyGateway(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -607,30 +456,4 @@ func readText(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(content)
-}
-
-func sha256Hex(content []byte) string {
-	sum := sha256.Sum256(content)
-	return hex.EncodeToString(sum[:])
-}
-
-func gatewayArchive(t *testing.T) []byte {
-	t.Helper()
-	buffer := &bytes.Buffer{}
-	gzipWriter := gzip.NewWriter(buffer)
-	tarWriter := tar.NewWriter(gzipWriter)
-	content := []byte("#!/bin/sh\n")
-	if err := tarWriter.WriteHeader(&tar.Header{Name: GatewayBinaryName, Mode: 0o755, Size: int64(len(content))}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tarWriter.Write(content); err != nil {
-		t.Fatal(err)
-	}
-	if err := tarWriter.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := gzipWriter.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return buffer.Bytes()
 }

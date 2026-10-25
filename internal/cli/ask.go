@@ -313,8 +313,8 @@ func askCommandGuide(app *app) string {
 	lines := []string{
 		"Use these exact s46 commands and flags. Do not invent s46 subcommands.",
 		"There is no `s46 init` command and no `s46 ls` command.",
-		"`s46 run <task>` is mostly for demos and the direct s46 runner. It records a direct s46 task; it does not execute shell commands and does not start Pi, Claude Code, or Codex.",
-		"Do not suggest `s46 run` when the user asks to use Pi, Claude Code, or Codex. Tell them to start that harness normally after s46 setup/configuration.",
+		"`s46 run <task>` launches the connected Pi, Claude Code, or Codex harness with the exact selected model and records only the real transcript-backed session it creates.",
+		"Use `s46 run <task>` when the user wants s46 to launch the connected harness; starting the harness directly remains valid after setup.",
 		"For offline Pi setup, prefer `s46 airplane setup --mode=on --harness=pi --yes`.",
 		"For listing files, use shell commands such as `ls`, not `s46 ls`.",
 		"Prefer flags and positional arguments over interactive prompts.",

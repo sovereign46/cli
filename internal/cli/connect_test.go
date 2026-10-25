@@ -1,3 +1,5 @@
+//go:build !release
+
 package cli
 
 import (
@@ -218,6 +220,8 @@ func (a *failingAdapter) Name() string { return "failing" }
 func (*failingAdapter) Detect(context.Context, map[string]string) (harness.Detection, error) {
 	return harness.Detection{Installed: true}, nil
 }
+
+func (*failingAdapter) Launch(context.Context, harness.LaunchRequest) error { return nil }
 
 func (*failingAdapter) PlanConnect(context.Context, harness.ConnectRequest) (harness.Plan, error) {
 	return harness.Plan{}, nil

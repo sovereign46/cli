@@ -6,19 +6,20 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
+	"syscall"
 
 	"github.com/sovereign46/cli/internal/config"
 	"github.com/sovereign46/cli/internal/contextx"
@@ -26,561 +27,447 @@ import (
 )
 
 const (
-	gatewayChecksumMaxBytes = 1 << 20
-	gatewayReleaseMaxBytes  = 1 << 20
+	llamaCppInventorySchema = "s46.llamacpp-runtime-inventory.v1"
+	gatewayReleaseSchema    = "s46.airplane-release.v1"
+	gatewayArchiveMaxBytes  = 256 * 1024 * 1024
+	gatewayBinaryMaxBytes   = 256 * 1024 * 1024
 	gatewayErrorSnippetSize = 4 * 1024
 )
 
-var errGatewayVerification = errors.New("gateway verification failed")
+var (
+	//go:embed gateway-release.json
+	gatewayReleaseFiles embed.FS
 
-type gatewayRelease struct {
-	TagName string         `json:"tag_name"`
-	Name    string         `json:"name"`
-	Assets  []gatewayAsset `json:"assets"`
+	gatewaySemver = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
+)
+
+type airplaneReleaseManifest struct {
+	Schema    string              `json:"schema"`
+	Qualified bool                `json:"qualified"`
+	Model     airplaneModelPin    `json:"model"`
+	LlamaCpp  llamaCppReleasePins `json:"llamaCpp"`
+	Gateway   gatewayReleasePins  `json:"gateway"`
 }
 
-type gatewayAsset struct {
-	Name               string `json:"name"`
-	BrowserDownloadURL string `json:"browser_download_url"`
-	Digest             string `json:"digest,omitempty"`
+type airplaneModelPin struct {
+	ID           string `json:"id"`
+	BackendModel string `json:"backendModel"`
+	FileName     string `json:"fileName"`
+	SHA256       string `json:"sha256"`
+	Size         int64  `json:"size"`
 }
 
-type gatewayDownload struct {
-	Name        string
-	URL         string
-	SHA256      string
-	AllowedHost string
+type gatewayReleasePins struct {
+	Repository string                        `json:"repository"`
+	Version    string                        `json:"version"`
+	Platforms  map[string]gatewayPlatformPin `json:"platforms"`
+}
+
+type llamaCppReleasePins struct {
+	Repository string                         `json:"repository"`
+	Version    string                         `json:"version"`
+	Platforms  map[string]llamaCppPlatformPin `json:"platforms"`
+}
+
+type llamaCppPlatformPin struct {
+	AssetName       string `json:"assetName"`
+	ArchiveSHA256   string `json:"archiveSha256"`
+	ArchiveSize     int64  `json:"archiveSize"`
+	BinarySHA256    string `json:"binarySha256"`
+	BinarySize      int64  `json:"binarySize"`
+	InventorySchema string `json:"inventorySchema"`
+	InventorySHA256 string `json:"inventorySha256"`
+	VersionOutput   string `json:"versionOutput"`
+}
+
+type gatewayPlatformPin struct {
+	ArchiveSHA256 string `json:"archiveSha256"`
+	ArchiveSize   int64  `json:"archiveSize"`
+	BinarySHA256  string `json:"binarySha256"`
+	BinarySize    int64  `json:"binarySize"`
+}
+
+type gatewayResolvedPin struct {
+	Repository string
+	Version    string
+	GOOS       string
+	GOARCH     string
+	AssetName  string
+	URL        string
+	gatewayPlatformPin
 }
 
 func (s Service) InstallGateway(ctx context.Context) error {
 	if handled, err := s.seamInstallGateway(); handled {
 		return err
 	}
-	if !s.GatewayDownloadAvailable() {
-		return fmt.Errorf("gateway install is not available for %s/%s", runtime.GOOS, runtime.GOARCH)
-	}
-	if err := s.installGatewayRelease(ctx); err != nil {
-		if errors.Is(err, errGatewayVerification) || !gatewaySourceFallbackEnabled() {
-			return err
-		}
-		if ctxErr := contextx.Done(ctx, err); ctxErr != nil {
-			return ctxErr
-		}
-		if sourceErr := s.installGatewayFromSource(ctx); sourceErr != nil {
-			if ctxErr := contextx.Done(ctx, sourceErr); ctxErr != nil {
-				return ctxErr
-			}
-			return errors.Join(err, fmt.Errorf("source clone fallback failed: %w", sourceErr))
-		}
-	}
-	return nil
-}
-
-func (s Service) installGatewayRelease(ctx context.Context) error {
-	download, err := s.gatewayDownload(ctx)
+	pin, err := embeddedGatewayReleasePin(runtime.GOOS, runtime.GOARCH)
 	if err != nil {
 		return err
 	}
-	if err := validateGatewayDownloadURL(download.URL, download.AllowedHost); err != nil {
-		return fmt.Errorf("%w: gateway release asset URL is not trusted: %w", errGatewayVerification, err)
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, download.URL, nil)
-	if err != nil {
-		return fmt.Errorf("build gateway release GET %s request: %w", download.URL, err)
-	}
-	s.setGitHubHeaders(request, "application/octet-stream")
-	request.Header.Set("Accept-Encoding", "identity")
-	response, err := gatewayHTTPClient(s.httpClient(), download.AllowedHost).Do(request)
-	if err != nil {
-		if ctxErr := contextx.Done(request.Context(), err); ctxErr != nil {
-			return ctxErr
-		}
-		return fmt.Errorf("gateway release GET %s: %w", download.URL, err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return gatewayStatusError("download gateway release", request, response)
-	}
-	return s.installGatewayVerifiedArchive(ctx, response.Body, download)
-}
-
-func (s Service) installGatewayVerifiedArchive(ctx context.Context, body io.Reader, download gatewayDownload) error {
-	name := strs.FirstNonEmpty(download.Name, "gateway archive")
-	if download.SHA256 == "" {
-		return fmt.Errorf("%w: gateway archive %s has no sha256 checksum", errGatewayVerification, name)
-	}
-	var archive bytes.Buffer
-	hash := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(&archive, hash), body); err != nil {
-		if ctxErr := contextx.Done(ctx, err); ctxErr != nil {
-			return ctxErr
-		}
-		return fmt.Errorf("read gateway release GET %s response: %w", download.URL, err)
-	}
-	got := hex.EncodeToString(hash.Sum(nil))
-	if !strings.EqualFold(got, download.SHA256) {
-		return fmt.Errorf("%w: gateway archive checksum mismatch for %s: got sha256:%s, want sha256:%s", errGatewayVerification, name, got, download.SHA256)
-	}
-	return s.installGatewayArchive(bytes.NewReader(archive.Bytes()))
-}
-
-func (s Service) installGatewayFromSource(ctx context.Context) error {
-	gitPath, err := exec.LookPath("git")
-	if err != nil {
-		return fmt.Errorf("git is not installed")
-	}
-	goPath, err := exec.LookPath("go")
-	if err != nil {
-		return fmt.Errorf("go is not installed")
-	}
-	sourceDir := s.managedGatewaySourceDir()
-	if err := os.MkdirAll(filepath.Dir(sourceDir), 0o755); err != nil {
-		return err
-	}
-	installCtx, cancel := contextx.WithMaxTimeout(ctx, gatewaySourceInstallTime)
-	defer cancel()
-	if err := s.cloneGatewaySource(installCtx, gitPath, sourceDir); err != nil {
-		return err
-	}
-	return s.buildGatewaySource(installCtx, goPath, sourceDir)
-}
-
-func (s Service) cloneGatewaySource(ctx context.Context, gitPath string, sourceDir string) error {
-	cloneURLs := s.gatewayCloneURLs()
-	failures := []string{}
-	for _, cloneURL := range cloneURLs {
-		if err := os.RemoveAll(sourceDir); err != nil {
-			return err
-		}
-		if err := s.runGatewayInstallCommand(ctx, "", gitPath, "clone", "--depth", "1", cloneURL, sourceDir); err != nil {
-			if cleanupErr := os.RemoveAll(sourceDir); cleanupErr != nil {
-				failures = append(failures, fmt.Sprintf("%s: %v; cleanup failed: %v", cloneURL, err, cleanupErr))
-				continue
-			}
-			failures = append(failures, fmt.Sprintf("%s: %v", cloneURL, err))
-			continue
-		}
+	if err := s.verifyManagedGateway(pin); err == nil {
 		return nil
 	}
-	if len(failures) == 0 {
-		return fmt.Errorf("no gateway clone URLs configured")
-	}
-	return fmt.Errorf("git clone failed: %s", strings.Join(failures, "; "))
-}
-
-func (s Service) buildGatewaySource(ctx context.Context, goPath string, sourceDir string) error {
-	target := s.managedGatewayBinaryPath()
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return err
-	}
-	if err := s.runGatewayInstallCommand(ctx, sourceDir, goPath, "build", "-o", target, "./cmd/"+GatewayBinaryName); err != nil {
-		return fmt.Errorf("build cloned gateway: %w", err)
-	}
-	return nil
-}
-
-func (s Service) runGatewayInstallCommand(ctx context.Context, dir string, path string, args ...string) error {
-	cmd := exec.CommandContext(ctx, path, args...)
-	cmd.Dir = dir
-	cmd.Env = s.gatewayInstallEnv()
-	output, err := cmd.CombinedOutput()
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return ctxErr
-	}
+	archive, err := s.loadGatewayArchive(ctx, pin)
 	if err != nil {
-		detail := strings.TrimSpace(string(output))
-		if detail != "" {
-			return fmt.Errorf("%w: %s", err, detail)
-		}
 		return err
 	}
-	return nil
-}
-
-func (s Service) gatewayInstallEnv() []string {
-	extra := []string{"GIT_TERMINAL_PROMPT=0"}
-	if strings.TrimSpace(strs.EnvValue(s.Env, "GIT_SSH_COMMAND")) == "" && strings.TrimSpace(os.Getenv("GIT_SSH_COMMAND")) == "" {
-		extra = append(extra, "GIT_SSH_COMMAND=ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new")
-	}
-	return s.processEnv(extra...)
+	return s.installGatewayVerifiedArchive(archive, pin)
 }
 
 func (s Service) GatewayDownloadAvailable() bool {
 	if available, ok := s.seamGatewayDownloadAvailable(); ok {
 		return available
 	}
+	_, err := embeddedGatewayReleasePin(runtime.GOOS, runtime.GOARCH)
+	return err == nil
+}
+
+func embeddedGatewayReleasePin(goos, goarch string) (gatewayResolvedPin, error) {
+	raw, err := gatewayReleaseFiles.ReadFile("gateway-release.json")
+	if err != nil {
+		return gatewayResolvedPin{}, fmt.Errorf("read embedded gateway release pins: %w", err)
+	}
+	return decodeGatewayReleasePin(raw, goos, goarch)
+}
+
+func decodeGatewayReleasePin(raw []byte, goos, goarch string) (gatewayResolvedPin, error) {
+	manifest, err := decodeAirplaneReleaseManifest(raw)
+	if err != nil {
+		return gatewayResolvedPin{}, err
+	}
+	if manifest.Schema != gatewayReleaseSchema {
+		return gatewayResolvedPin{}, errors.New("embedded airplane release manifest has an unsupported schema")
+	}
+	if err := validateAirplaneModelPin(manifest.Model); err != nil {
+		return gatewayResolvedPin{}, fmt.Errorf("embedded airplane model pin is invalid: %w", err)
+	}
+	platform := goos + "/" + goarch
+	llamaPin, ok := manifest.LlamaCpp.Platforms[platform]
+	if manifest.LlamaCpp.Repository != "ggml-org/llama.cpp" || strings.TrimSpace(manifest.LlamaCpp.Version) == "" || !ok {
+		return gatewayResolvedPin{}, fmt.Errorf("embedded airplane release has no qualified llama.cpp pin for %s", platform)
+	}
+	if err := validateLlamaCppPlatformPin(llamaPin); err != nil {
+		return gatewayResolvedPin{}, fmt.Errorf("embedded llama.cpp pin for %s is invalid: %w", platform, err)
+	}
+	document := manifest.Gateway
+	if document.Repository != DefaultGatewayRepo {
+		return gatewayResolvedPin{}, errors.New("embedded gateway release repository is not approved")
+	}
+	if !gatewaySemver.MatchString(document.Version) {
+		return gatewayResolvedPin{}, errors.New("embedded gateway release version is not approved")
+	}
+	pin, ok := document.Platforms[platform]
+	if !ok {
+		return gatewayResolvedPin{}, fmt.Errorf("embedded gateway release has no approved pin for %s", platform)
+	}
+	if err := validateGatewayPlatformPin(pin); err != nil {
+		return gatewayResolvedPin{}, fmt.Errorf("embedded gateway release pin for %s is invalid: %w", platform, err)
+	}
+	if !manifest.Qualified {
+		return gatewayResolvedPin{}, errors.New("embedded airplane release closure is a candidate and has not passed qualification")
+	}
+	asset := fmt.Sprintf("%s_%s_%s_%s.tar.gz", GatewayBinaryName, document.Version, goos, goarch)
+	return gatewayResolvedPin{
+		Repository:         document.Repository,
+		Version:            document.Version,
+		GOOS:               goos,
+		GOARCH:             goarch,
+		AssetName:          asset,
+		URL:                "https://github.com/" + document.Repository + "/releases/download/v" + document.Version + "/" + asset,
+		gatewayPlatformPin: pin,
+	}, nil
+}
+
+func decodeAirplaneReleaseManifest(raw []byte) (airplaneReleaseManifest, error) {
+	var manifest airplaneReleaseManifest
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&manifest); err != nil {
+		return airplaneReleaseManifest{}, fmt.Errorf("decode embedded airplane release manifest: %w", err)
+	}
+	if err := ensureGatewayJSONEOF(decoder); err != nil {
+		return airplaneReleaseManifest{}, fmt.Errorf("decode embedded airplane release manifest: %w", err)
+	}
+	return manifest, nil
+}
+
+func embeddedAirplaneReleaseManifest() (airplaneReleaseManifest, error) {
+	raw, err := gatewayReleaseFiles.ReadFile("gateway-release.json")
+	if err != nil {
+		return airplaneReleaseManifest{}, fmt.Errorf("read embedded airplane release manifest: %w", err)
+	}
+	return decodeAirplaneReleaseManifest(raw)
+}
+
+func validateAirplaneModelPin(pin airplaneModelPin) error {
+	const modelSHA256 = "d14ba9edee1bb4c4996a726deb81e49ae81800a3216f0774634238c380aee496"
+	const modelSize = int64(14_334_446_752)
+	if pin.ID != LocalModelID || pin.BackendModel != BackendModel || pin.FileName != GGUFModelFile || pin.SHA256 != modelSHA256 || pin.Size != modelSize {
+		return errors.New("model identity does not match the exact Devstral airplane artifact")
+	}
+	return nil
+}
+
+func validateLlamaCppPlatformPin(pin llamaCppPlatformPin) error {
+	if strings.TrimSpace(pin.AssetName) == "" || filepath.Base(pin.AssetName) != pin.AssetName {
+		return errors.New("assetName must be a base filename")
+	}
+	if strings.TrimSpace(pin.VersionOutput) == "" {
+		return errors.New("versionOutput is required")
+	}
+	if pin.InventorySchema != llamaCppInventorySchema {
+		return fmt.Errorf("inventorySchema must be %q", llamaCppInventorySchema)
+	}
+	if !validLowerSHA256(pin.InventorySHA256) {
+		return errors.New("inventorySha256 must be exactly 64 lowercase hexadecimal characters")
+	}
+	return validateGatewayPlatformPin(gatewayPlatformPin{ArchiveSHA256: pin.ArchiveSHA256, ArchiveSize: pin.ArchiveSize, BinarySHA256: pin.BinarySHA256, BinarySize: pin.BinarySize})
+}
+
+func validateGatewayPlatformPin(pin gatewayPlatformPin) error {
+	for name, value := range map[string]string{"archiveSha256": pin.ArchiveSHA256, "binarySha256": pin.BinarySHA256} {
+		if !validLowerSHA256(value) {
+			return fmt.Errorf("%s must be exactly 64 lowercase hexadecimal characters", name)
+		}
+	}
+	if pin.ArchiveSize <= 0 || pin.ArchiveSize > gatewayArchiveMaxBytes {
+		return fmt.Errorf("archiveSize %d is outside the accepted bound", pin.ArchiveSize)
+	}
+	if pin.BinarySize <= 0 || pin.BinarySize > gatewayBinaryMaxBytes {
+		return fmt.Errorf("binarySize %d is outside the accepted bound", pin.BinarySize)
+	}
+	return nil
+}
+
+func validLowerSHA256(value string) bool {
+	if len(value) != sha256.Size*2 || strings.ToLower(value) != value {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
+}
+
+func ensureGatewayJSONEOF(decoder *json.Decoder) error {
+	var extra any
+	if err := decoder.Decode(&extra); errors.Is(err, io.EOF) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	return errors.New("unexpected trailing JSON value")
+}
+
+func (s Service) loadGatewayArchive(ctx context.Context, pin gatewayResolvedPin) ([]byte, error) {
+	cachePath := s.gatewayArchiveCachePath()
+	if archive, err := readPinnedGatewayArchive(cachePath, pin); err == nil {
+		return archive, nil
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("verify cached gateway archive: %w", err)
+	}
 	if strs.Truthy(strs.EnvValue(s.Env, "S46_OFFLINE")) {
-		return false
+		return nil, fmt.Errorf("approved gateway archive is not cached at %s and network access is disabled", cachePath)
 	}
-	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
-		return false
-	}
-	return runtime.GOARCH == "amd64" || runtime.GOARCH == "arm64"
-}
-
-func (s Service) gatewayDownload(ctx context.Context) (gatewayDownload, error) {
-	if downloadURL := strings.TrimSpace(strs.EnvValue(s.Env, "S46_API_GATEWAY_DOWNLOAD_URL")); downloadURL != "" {
-		checksum, err := normalizeGatewaySHA256(strs.EnvValue(s.Env, "S46_API_GATEWAY_SHA256"))
-		if err != nil {
-			return gatewayDownload{}, fmt.Errorf("%w: S46_API_GATEWAY_SHA256: %w", errGatewayVerification, err)
-		}
-		if checksum == "" {
-			return gatewayDownload{}, fmt.Errorf("%w: S46_API_GATEWAY_SHA256 is required when S46_API_GATEWAY_DOWNLOAD_URL is set", errGatewayVerification)
-		}
-		allowedHost := gatewayDownloadHost(downloadURL)
-		if err := validateGatewayDownloadURL(downloadURL, allowedHost); err != nil {
-			return gatewayDownload{}, fmt.Errorf("%w: gateway release asset URL is not trusted: %w", errGatewayVerification, err)
-		}
-		return gatewayDownload{Name: gatewayDownloadName(downloadURL), URL: downloadURL, SHA256: checksum, AllowedHost: allowedHost}, nil
-	}
-	requestCtx, cancel := contextx.WithMaxTimeout(ctx, gatewayRequestTimeout)
-	defer cancel()
-	latestURL := s.gatewayLatestReleaseURL()
-	request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, latestURL, nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, pin.URL, nil)
 	if err != nil {
-		return gatewayDownload{}, fmt.Errorf("build gateway release check GET %s request: %w", latestURL, err)
+		return nil, fmt.Errorf("build gateway release request: %w", err)
 	}
-	s.setGitHubHeaders(request, "application/vnd.github+json")
-	response, err := contextx.WithoutHTTPTimeout(s.httpClient()).Do(request)
-	if err != nil {
-		if ctxErr := contextx.Done(request.Context(), err); ctxErr != nil {
-			return gatewayDownload{}, ctxErr
-		}
-		return gatewayDownload{}, fmt.Errorf("gateway release check GET %s: %w", latestURL, err)
+	request.Header.Set("Accept", "application/octet-stream")
+	request.Header.Set("Accept-Encoding", "identity")
+	request.Header.Set("User-Agent", "s46-airplane")
+	if token := strings.TrimSpace(strs.EnvValue(s.Env, "GITHUB_TOKEN")); token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
 	}
-	defer response.Body.Close()
-	if response.StatusCode == http.StatusNotFound {
-		return gatewayDownload{}, fmt.Errorf("no gateway release found for %s", s.gatewayGitHubRepo())
-	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return gatewayDownload{}, gatewayStatusError("gateway release check", request, response)
-	}
-	var release gatewayRelease
-	if err := json.NewDecoder(io.LimitReader(response.Body, gatewayReleaseMaxBytes)).Decode(&release); err != nil {
-		return gatewayDownload{}, fmt.Errorf("decode gateway release check GET %s response: %w", latestURL, err)
-	}
-	version := normalizeReleaseVersion(strs.FirstNonEmpty(release.TagName, release.Name))
-	asset := selectGatewayAsset(release.Assets, version)
-	if asset.BrowserDownloadURL == "" {
-		return gatewayDownload{}, fmt.Errorf("gateway release %s has no %s/%s archive", strs.FirstNonEmpty(release.TagName, release.Name, "latest"), runtime.GOOS, runtime.GOARCH)
-	}
-	allowedHost := gatewayDownloadHost(latestURL)
-	if err := validateGatewayDownloadURL(asset.BrowserDownloadURL, allowedHost); err != nil {
-		return gatewayDownload{}, fmt.Errorf("%w: gateway release asset URL is not trusted: %w", errGatewayVerification, err)
-	}
-	checksum, err := s.gatewayAssetSHA256(ctx, release.Assets, asset, version, allowedHost)
-	if err != nil {
-		return gatewayDownload{}, err
-	}
-	return gatewayDownload{Name: asset.Name, URL: asset.BrowserDownloadURL, SHA256: checksum, AllowedHost: allowedHost}, nil
-}
-
-func gatewayDownloadName(downloadURL string) string {
-	withoutQuery, _, _ := strings.Cut(downloadURL, "?")
-	name := filepath.Base(strings.TrimRight(withoutQuery, "/"))
-	if name == "." || name == string(filepath.Separator) || name == "" {
-		return GatewayBinaryName + ".tar.gz"
-	}
-	return name
-}
-
-func (s Service) gatewayAssetSHA256(ctx context.Context, assets []gatewayAsset, archive gatewayAsset, version string, allowedHost string) (string, error) {
-	if strings.TrimSpace(archive.Digest) != "" {
-		checksum, err := gatewaySHA256FromDigest(archive.Digest)
-		if err != nil {
-			return "", fmt.Errorf("%w: gateway release asset %s has invalid digest: %w", errGatewayVerification, archive.Name, err)
-		}
-		return checksum, nil
-	}
-	checksumAsset := selectGatewayChecksumAsset(assets, archive.Name, version)
-	if checksumAsset.BrowserDownloadURL == "" {
-		return "", fmt.Errorf("%w: gateway release asset %s has no sha256 digest or checksum asset", errGatewayVerification, archive.Name)
-	}
-	content, err := s.downloadGatewayChecksum(ctx, checksumAsset.BrowserDownloadURL, allowedHost)
-	if err != nil {
-		return "", fmt.Errorf("%w: %w", errGatewayVerification, err)
-	}
-	checksum, err := parseGatewayChecksum(content, archive.Name)
-	if err != nil {
-		return "", fmt.Errorf("%w: gateway checksum asset %s: %w", errGatewayVerification, checksumAsset.Name, err)
-	}
-	return checksum, nil
-}
-
-func gatewaySHA256FromDigest(digest string) (string, error) {
-	algorithm, value, ok := strings.Cut(strings.TrimSpace(digest), ":")
-	if !ok || !strings.EqualFold(algorithm, "sha256") {
-		return "", fmt.Errorf("unsupported digest %q", digest)
-	}
-	return normalizeGatewaySHA256(value)
-}
-
-func (s Service) downloadGatewayChecksum(ctx context.Context, checksumURL string, allowedHost string) ([]byte, error) {
-	if err := validateGatewayDownloadURL(checksumURL, allowedHost); err != nil {
-		return nil, fmt.Errorf("gateway checksum URL is not trusted: %w", err)
-	}
-	requestCtx, cancel := contextx.WithMaxTimeout(ctx, gatewayRequestTimeout)
-	defer cancel()
-	request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, checksumURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("build gateway checksum GET %s request: %w", checksumURL, err)
-	}
-	s.setGitHubHeaders(request, "text/plain, application/octet-stream")
-	response, err := gatewayHTTPClient(s.httpClient(), allowedHost).Do(request)
+	response, err := gatewayHTTPClient(s.httpClient()).Do(request)
 	if err != nil {
 		if ctxErr := contextx.Done(request.Context(), err); ctxErr != nil {
 			return nil, ctxErr
 		}
-		return nil, fmt.Errorf("gateway checksum GET %s: %w", checksumURL, err)
+		return nil, fmt.Errorf("download pinned gateway archive: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return nil, gatewayStatusError("download gateway checksum", request, response)
+		return nil, gatewayStatusError("download pinned gateway archive", request, response)
 	}
-	content, err := io.ReadAll(io.LimitReader(response.Body, gatewayChecksumMaxBytes+1))
+	archive, err := readAndVerifyGatewayBytes(response.Body, pin.ArchiveSHA256, pin.ArchiveSize, gatewayArchiveMaxBytes, "gateway archive")
 	if err != nil {
-		if ctxErr := contextx.Done(request.Context(), err); ctxErr != nil {
-			return nil, ctxErr
-		}
-		return nil, fmt.Errorf("read gateway checksum GET %s response: %w", checksumURL, err)
+		return nil, err
 	}
-	if len(content) > gatewayChecksumMaxBytes {
-		return nil, fmt.Errorf("gateway checksum is larger than %d bytes", gatewayChecksumMaxBytes)
+	if err := config.WriteFileAtomic(cachePath, archive, 0o600); err != nil {
+		return nil, fmt.Errorf("cache pinned gateway archive: %w", err)
+	}
+	return archive, nil
+}
+
+func readPinnedGatewayArchive(path string, pin gatewayResolvedPin) ([]byte, error) {
+	return readVerifiedRegularFile(path, pin.ArchiveSHA256, pin.ArchiveSize, gatewayArchiveMaxBytes, "cached gateway archive")
+}
+
+func readVerifiedRegularFile(path, expectedSHA256 string, expectedSize, maximum int64, label string) ([]byte, error) {
+	before, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !before.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s must be a regular file, not a link or special file", label)
+	}
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open %s without following links: %w", label, err)
+	}
+	file := os.NewFile(uintptr(fd), path)
+	if file == nil {
+		_ = syscall.Close(fd)
+		return nil, fmt.Errorf("create descriptor for %s", label)
+	}
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(before, opened) {
+		_ = file.Close()
+		return nil, errors.Join(fmt.Errorf("%s changed while opening", label), err)
+	}
+	content, verifyErr := readAndVerifyGatewayBytes(file, expectedSHA256, expectedSize, maximum, label)
+	after, statErr := file.Stat()
+	closeErr := file.Close()
+	current, currentErr := os.Lstat(path)
+	if verifyErr != nil || statErr != nil || closeErr != nil || currentErr != nil {
+		return nil, errors.Join(verifyErr, statErr, closeErr, currentErr)
+	}
+	if !os.SameFile(before, after) || !os.SameFile(after, current) || before.Size() != after.Size() || after.Size() != current.Size() || before.Mode() != after.Mode() || after.Mode() != current.Mode() || !before.ModTime().Equal(after.ModTime()) || !after.ModTime().Equal(current.ModTime()) {
+		return nil, fmt.Errorf("%s changed while being read", label)
 	}
 	return content, nil
 }
 
-func selectGatewayChecksumAsset(assets []gatewayAsset, archiveName string, version string) gatewayAsset {
-	candidates := []string{archiveName + ".sha256", archiveName + ".sha256sum"}
-	if version != "" {
-		candidates = append(candidates, fmt.Sprintf("%s_%s_checksums.txt", GatewayBinaryName, version))
-	}
-	candidates = append(candidates, GatewayBinaryName+"_checksums.txt", "checksums.txt")
-	for _, candidate := range candidates {
-		for _, asset := range assets {
-			if strings.EqualFold(asset.Name, candidate) {
-				return asset
-			}
-		}
-	}
-	for _, asset := range assets {
-		name := strings.ToLower(asset.Name)
-		checksumLike := strings.Contains(name, "checksum") || strings.Contains(name, "sha256")
-		textLike := strings.HasSuffix(name, ".txt") || strings.HasSuffix(name, ".sum") || strings.HasSuffix(name, ".sums") || strings.HasSuffix(name, ".sha256") || strings.HasSuffix(name, ".sha256sum")
-		if checksumLike && textLike {
-			return asset
-		}
-	}
-	return gatewayAsset{}
-}
-
-func parseGatewayChecksum(content []byte, archiveName string) (string, error) {
-	named := []string{}
-	unnamed := []string{}
-	for _, raw := range strings.Split(string(content), "\n") {
-		line := strings.TrimSpace(raw)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		checksum, target, ok := parseGatewayChecksumLine(line)
-		if !ok {
-			continue
-		}
-		if target == "" {
-			unnamed = append(unnamed, checksum)
-			continue
-		}
-		if checksumTargetMatches(target, archiveName) {
-			named = append(named, checksum)
-		}
-	}
-	if checksum, ok := singleGatewayChecksum(named); ok {
-		return checksum, nil
-	}
-	if len(named) > 1 {
-		return "", fmt.Errorf("multiple checksums for %s", archiveName)
-	}
-	if checksum, ok := singleGatewayChecksum(unnamed); ok {
-		return checksum, nil
-	}
-	return "", fmt.Errorf("no checksum for %s", archiveName)
-}
-
-func parseGatewayChecksumLine(line string) (checksum string, target string, ok bool) {
-	upper := strings.ToUpper(line)
-	if strings.HasPrefix(upper, "SHA256 (") {
-		close := strings.Index(line, ") = ")
-		if close > len("SHA256 (") {
-			checksum, ok := validGatewaySHA256(line[close+4:])
-			if ok {
-				return checksum, line[len("SHA256 ("):close], true
-			}
-		}
-	}
-	fields := strings.Fields(line)
-	if len(fields) == 0 {
-		return "", "", false
-	}
-	checksum, ok = validGatewaySHA256(fields[0])
-	if !ok {
-		return "", "", false
-	}
-	if len(fields) == 1 {
-		return checksum, "", true
-	}
-	return checksum, fields[1], true
-}
-
-func singleGatewayChecksum(values []string) (string, bool) {
-	if len(values) == 0 {
-		return "", false
-	}
-	first := values[0]
-	for _, value := range values[1:] {
-		if value != first {
-			return "", false
-		}
-	}
-	return first, true
-}
-
-func checksumTargetMatches(target string, archiveName string) bool {
-	cleaned := strings.Trim(strings.TrimPrefix(strings.TrimSpace(target), "*"), "\"'")
-	return cleaned == archiveName || filepath.Base(cleaned) == archiveName
-}
-
-func validGatewaySHA256(value string) (string, bool) {
-	checksum, err := normalizeGatewaySHA256(value)
-	return checksum, err == nil && checksum != ""
-}
-
-func normalizeGatewaySHA256(value string) (string, error) {
-	checksum := strings.ToLower(strings.TrimSpace(value))
-	checksum = strings.TrimPrefix(checksum, "sha256:")
-	if checksum == "" {
-		return "", nil
-	}
-	if len(checksum) != sha256.Size*2 {
-		return "", fmt.Errorf("invalid sha256 checksum length")
-	}
-	if _, err := hex.DecodeString(checksum); err != nil {
-		return "", fmt.Errorf("invalid sha256 checksum: %w", err)
-	}
-	return checksum, nil
-}
-
-func (s Service) gatewayLatestReleaseURL() string {
-	if url := strings.TrimSpace(strs.EnvValue(s.Env, "S46_API_GATEWAY_LATEST_URL")); url != "" {
-		return url
-	}
-	return "https://api.github.com/repos/" + escapedGatewayRepoPath(s.gatewayGitHubRepo()) + "/releases/latest"
-}
-
-func escapedGatewayRepoPath(repo string) string {
-	parts := strings.Split(strings.Trim(repo, "/"), "/")
-	for i, part := range parts {
-		parts[i] = url.PathEscape(part)
-	}
-	return strings.Join(parts, "/")
-}
-
-func (s Service) gatewayGitHubRepo() string {
-	return strs.FirstNonEmpty(strs.EnvValue(s.Env, "S46_API_GATEWAY_REPO"), DefaultGatewayRepo)
-}
-
-func (s Service) gatewayCloneURLs() []string {
-	if cloneURL := strings.TrimSpace(strs.EnvValue(s.Env, "S46_API_GATEWAY_CLONE_URL")); cloneURL != "" {
-		return []string{cloneURL}
-	}
-	repo := s.gatewayGitHubRepo()
-	return []string{
-		fmt.Sprintf("git@github.com:%s.git", repo),
-		fmt.Sprintf("https://github.com/%s.git", repo),
-	}
-}
-
-func selectGatewayAsset(assets []gatewayAsset, version string) gatewayAsset {
-	exact := fmt.Sprintf("%s_%s_%s_%s.tar.gz", GatewayBinaryName, version, runtime.GOOS, runtime.GOARCH)
-	for _, asset := range assets {
-		if asset.Name == exact {
-			return asset
-		}
-	}
-	osArch := fmt.Sprintf("_%s_%s", runtime.GOOS, runtime.GOARCH)
-	versionPart := "_" + version + "_"
-	for _, asset := range assets {
-		if strings.HasPrefix(asset.Name, GatewayBinaryName+"_") && strings.Contains(asset.Name, versionPart) && strings.Contains(asset.Name, osArch) && strings.HasSuffix(asset.Name, ".tar.gz") {
-			return asset
-		}
-	}
-	return gatewayAsset{}
-}
-
-func normalizeReleaseVersion(version string) string {
-	trimmed := strings.TrimSpace(version)
-	trimmed = strings.TrimPrefix(trimmed, "v")
-	if plus := strings.IndexByte(trimmed, '+'); plus >= 0 {
-		trimmed = trimmed[:plus]
-	}
-	return trimmed
-}
-
-func (s Service) installGatewayArchive(body io.Reader) (err error) {
-	var gzipReader *gzip.Reader
-	gzipReader, err = gzip.NewReader(body)
+func readAndVerifyGatewayBytes(reader io.Reader, expectedSHA256 string, expectedSize, maximum int64, label string) ([]byte, error) {
+	limited := io.LimitReader(reader, maximum+1)
+	content, err := io.ReadAll(limited)
 	if err != nil {
-		return fmt.Errorf("open gateway archive gzip stream: %w", err)
+		return nil, fmt.Errorf("read %s: %w", label, err)
+	}
+	if int64(len(content)) > maximum {
+		return nil, fmt.Errorf("%s exceeds %d bytes", label, maximum)
+	}
+	if int64(len(content)) != expectedSize {
+		return nil, fmt.Errorf("%s size mismatch: got %d, want %d", label, len(content), expectedSize)
+	}
+	digest := sha256.Sum256(content)
+	if hex.EncodeToString(digest[:]) != expectedSHA256 {
+		return nil, fmt.Errorf("%s SHA-256 mismatch", label)
+	}
+	return content, nil
+}
+
+func (s Service) installGatewayVerifiedArchive(archive []byte, pin gatewayResolvedPin) error {
+	binary, err := gatewayBinaryFromArchive(archive)
+	if err != nil {
+		return err
+	}
+	if _, err := readAndVerifyGatewayBytes(bytes.NewReader(binary), pin.BinarySHA256, pin.BinarySize, gatewayBinaryMaxBytes, "gateway binary"); err != nil {
+		return err
+	}
+	target := s.managedGatewayBinaryPath()
+	if err := config.WriteFileAtomic(target, binary, 0o755); err != nil {
+		return fmt.Errorf("install pinned gateway binary: %w", err)
+	}
+	if err := os.Chmod(target, 0o755); err != nil {
+		return fmt.Errorf("set pinned gateway binary executable mode: %w", err)
+	}
+	if err := clearExtendedAttributes(target, true); err != nil {
+		return fmt.Errorf("normalize pinned gateway binary metadata: %w", err)
+	}
+	return s.verifyManagedGateway(pin)
+}
+
+func gatewayBinaryFromArchive(archive []byte) (result []byte, err error) {
+	gzipReader, err := gzip.NewReader(bytes.NewReader(archive))
+	if err != nil {
+		return nil, fmt.Errorf("open gateway archive gzip stream: %w", err)
 	}
 	defer func() {
 		if closeErr := gzipReader.Close(); closeErr != nil {
-			err = errors.Join(err, fmt.Errorf("close gateway archive gzip stream: %w", closeErr))
-		}
-	}()
-	target := s.managedGatewayBinaryPath()
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return err
-	}
-	tmp := target + ".tmp"
-	defer func() {
-		if err != nil {
-			if removeErr := config.RemoveIfExists(tmp); removeErr != nil {
-				err = errors.Join(err, removeErr)
-			}
+			err = errors.Join(err, closeErr)
 		}
 	}()
 	tarReader := tar.NewReader(gzipReader)
+	found := false
+	members := 0
+	var total int64
 	for {
-		header, err := tarReader.Next()
-		if errors.Is(err, io.EOF) {
+		header, nextErr := tarReader.Next()
+		if errors.Is(nextErr, io.EOF) {
 			break
 		}
-		if err != nil {
-			return err
+		if nextErr != nil {
+			return nil, fmt.Errorf("read gateway archive: %w", nextErr)
+		}
+		members++
+		if members > 64 {
+			return nil, errors.New("gateway archive exceeds 64 members")
+		}
+		if len(header.Name) == 0 || len(header.Name) > archivePathMaxBytes || len(header.Linkname) > archiveLinkMaxBytes || len(header.PAXRecords) != 0 || len(header.Xattrs) != 0 {
+			return nil, errors.New("gateway archive contains oversized or extended metadata")
+		}
+		clean := filepath.Clean(filepath.FromSlash(header.Name))
+		if clean == "." || filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+			return nil, fmt.Errorf("gateway archive has unsafe path %q", header.Name)
+		}
+		if header.Typeflag == tar.TypeDir {
+			continue
 		}
 		if header.Typeflag != tar.TypeReg && header.Typeflag != tar.TypeRegA {
-			continue
+			return nil, fmt.Errorf("gateway archive has unsupported link or special member %q", header.Name)
 		}
-		if filepath.Base(header.Name) != GatewayBinaryName {
-			continue
+		if filepath.Base(clean) != GatewayBinaryName {
+			return nil, fmt.Errorf("gateway archive contains unexpected regular member %q", header.Name)
 		}
-		file, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755)
+		if found {
+			return nil, fmt.Errorf("gateway archive contains multiple %s files", GatewayBinaryName)
+		}
+		if header.Size <= 0 || header.Size > gatewayBinaryMaxBytes-total {
+			return nil, fmt.Errorf("gateway binary size %d is outside the accepted bound", header.Size)
+		}
+		total += header.Size
+		result, err = io.ReadAll(io.LimitReader(tarReader, gatewayBinaryMaxBytes+1))
 		if err != nil {
-			return err
+			return nil, fmt.Errorf("extract gateway binary: %w", err)
 		}
-		_, copyErr := io.Copy(file, tarReader)
-		closeErr := file.Close()
-		if copyErr != nil {
-			return fmt.Errorf("extract gateway binary: %w", copyErr)
+		if int64(len(result)) != header.Size {
+			return nil, errors.New("gateway binary archive member is truncated")
 		}
-		if closeErr != nil {
-			return fmt.Errorf("close gateway binary temp file: %w", closeErr)
-		}
-		if err := os.Chmod(tmp, 0o755); err != nil {
-			return fmt.Errorf("chmod gateway binary temp file: %w", err)
-		}
-		return os.Rename(tmp, target)
+		found = true
 	}
-	return fmt.Errorf("gateway archive did not contain %s", GatewayBinaryName)
+	if !found {
+		return nil, fmt.Errorf("gateway archive did not contain %s", GatewayBinaryName)
+	}
+	return result, nil
+}
+
+func (s Service) verifyManagedGateway(pin gatewayResolvedPin) error {
+	path := s.managedGatewayBinaryPath()
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return errors.New("managed gateway must be a regular executable file")
+	}
+	_, err = readVerifiedRegularFile(path, pin.BinarySHA256, pin.BinarySize, gatewayBinaryMaxBytes, "managed gateway binary")
+	return err
+}
+
+func (s Service) gatewayArchiveCachePath() string {
+	return filepath.Join(cacheDir(s.Env), "s46", "gateway", "pinned-release.tar.gz")
+}
+
+func (s Service) managedGatewayBinaryPath() string {
+	return filepath.Join(s.gatewayInstallDir(), "bin", GatewayBinaryName)
+}
+
+func (s Service) gatewayInstallDir() string {
+	if dir := strings.TrimSpace(strs.EnvValue(s.Env, "S46_GATEWAY_DIR")); dir != "" {
+		return dir
+	}
+	return filepath.Join(dataDir(s.Env), "s46", "gateway", GatewayBinaryName)
 }
 
 func gatewayStatusError(operation string, request *http.Request, response *http.Response) error {
@@ -595,85 +482,26 @@ func gatewayStatusError(operation string, request *http.Request, response *http.
 	return fmt.Errorf("%s GET %s failed: %s", operation, request.URL, response.Status)
 }
 
-func gatewayHTTPClient(client *http.Client, allowedHost string) *http.Client {
+func gatewayHTTPClient(client *http.Client) *http.Client {
 	configured := *contextx.WithoutHTTPTimeout(client)
 	configured.CheckRedirect = func(request *http.Request, via []*http.Request) error {
 		if len(via) >= 10 {
-			return fmt.Errorf("stopped after 10 redirects")
+			return errors.New("stopped after 10 redirects")
 		}
-		return validateGatewayDownloadURL(request.URL.String(), allowedHost)
+		return validatePinnedGatewayURL(request.URL)
 	}
 	return &configured
 }
 
-func validateGatewayDownloadURL(rawURL string, allowedHost string) error {
-	parsed, err := url.Parse(strings.TrimSpace(rawURL))
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return fmt.Errorf("invalid URL %q", rawURL)
+func validatePinnedGatewayURL(value *url.URL) error {
+	if value == nil || value.User != nil || value.Scheme != "https" {
+		return errors.New("gateway release URL must use https without user info")
 	}
-	if parsed.User != nil {
-		return fmt.Errorf("URL must not include user info")
-	}
-	host := strings.ToLower(parsed.Hostname())
-	if parsed.Scheme == "http" && isLoopbackHost(host) {
+	host := strings.ToLower(value.Hostname())
+	if host == "github.com" || host == "objects.githubusercontent.com" || host == "release-assets.githubusercontent.com" || strings.HasSuffix(host, ".githubusercontent.com") {
 		return nil
 	}
-	if parsed.Scheme != "https" {
-		return fmt.Errorf("URL must use https")
-	}
-	if host != allowedHost && !isGatewayDownloadHost(host) {
-		return fmt.Errorf("untrusted host %q", host)
-	}
-	return nil
-}
-
-func gatewayDownloadHost(rawURL string) string {
-	parsed, err := url.Parse(strings.TrimSpace(rawURL))
-	if err != nil {
-		return ""
-	}
-	return strings.ToLower(parsed.Hostname())
-}
-
-func isGatewayDownloadHost(host string) bool {
-	return isGitHubHost(host) || host == "objects.githubusercontent.com" || host == "release-assets.githubusercontent.com" || isLoopbackHost(host)
-}
-
-func isLoopbackHost(host string) bool {
-	host = strings.Trim(strings.ToLower(host), "[]")
-	if host == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
-}
-
-func (s Service) setGitHubHeaders(request *http.Request, accept string) {
-	request.Header.Set("Accept", accept)
-	request.Header.Set("User-Agent", "s46-airplane")
-	if token := strings.TrimSpace(strs.EnvValue(s.Env, "GITHUB_TOKEN")); token != "" && isGitHubHost(request.URL.Hostname()) {
-		request.Header.Set("Authorization", "Bearer "+token)
-	}
-}
-
-func isGitHubHost(host string) bool {
-	host = strings.ToLower(strings.TrimSpace(host))
-	return host == "github.com" || strings.HasSuffix(host, ".github.com")
-}
-
-func (s Service) managedGatewayBinaryPath() string {
-	return filepath.Join(s.gatewayInstallDir(), "bin", GatewayBinaryName)
-}
-
-func (s Service) managedGatewaySourceDir() string {
-	return filepath.Join(s.gatewayInstallDir(), "source")
-}
-
-func (s Service) gatewayInstallDir() string {
-	if dir := strings.TrimSpace(strs.EnvValue(s.Env, "S46_GATEWAY_DIR")); dir != "" {
-		return dir
-	}
-	return filepath.Join(dataDir(s.Env), "s46", "gateway", GatewayBinaryName)
+	return fmt.Errorf("gateway release redirected to untrusted host %q", host)
 }
 
 func executableFile(path string) bool {

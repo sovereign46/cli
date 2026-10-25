@@ -99,6 +99,10 @@ func (s Service) freeDiskBytes() int64 {
 	if path == "" {
 		path = "."
 	}
+	return freeDiskBytesAt(path)
+}
+
+func freeDiskBytesAt(path string) int64 {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		abs = path
@@ -107,31 +111,39 @@ func (s Service) freeDiskBytes() int64 {
 	if err := syscall.Statfs(abs, &stat); err != nil {
 		return 0
 	}
+	if stat.Bsize <= 0 || uint64(stat.Bavail) > uint64(^uint64(0)>>1)/uint64(stat.Bsize) {
+		return 0
+	}
 	return int64(stat.Bavail) * int64(stat.Bsize)
 }
 
 // startDetached launches cmd as a detached background process, redirecting
 // stdout/stderr to a per-process log file under the s46 cache dir.
 func (s Service) startDetached(cmd *exec.Cmd, logName string) error {
+	_, err := s.startDetachedProcess(cmd, logName)
+	return err
+}
+
+func (s Service) startDetachedProcess(cmd *exec.Cmd, logName string) (int, error) {
 	logPath := filepath.Join(cacheDir(s.Env), logName)
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
-		return err
+		return 0, err
 	}
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer logFile.Close()
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
-		return err
+		return 0, err
 	}
 	out := s.Stderr
 	if out == nil {
 		out = io.Discard
 	}
 	_, _ = fmt.Fprintf(out, "%s started %s (pid %d, log %s)\n", s.logPrefix(), filepath.Base(cmd.Path), cmd.Process.Pid, logPath)
-	return nil
+	return cmd.Process.Pid, nil
 }

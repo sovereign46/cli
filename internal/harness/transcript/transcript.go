@@ -170,10 +170,10 @@ func ListJSONLSessions(ctx context.Context, root string, parse func(string) (Sou
 		}
 		source, err := parse(path)
 		if err != nil {
-			if errors.Is(err, ErrUnrecognized) {
-				return nil
-			}
-			return err
+			// A single truncated or incompatible transcript must not hide every
+			// other local session. Explicit sharing of this path still returns
+			// the parse error to the user.
+			return nil
 		}
 		id := strings.TrimSpace(source.ID)
 		if id == "" {

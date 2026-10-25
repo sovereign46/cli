@@ -95,7 +95,11 @@ func runConnect(ctx context.Context, app *app, req connectRequest) error {
 	if err != nil {
 		return err
 	}
-	req, err = fillMissingTeamForConnect(cfg, req)
+	state, err := app.config.LoadState()
+	if err != nil {
+		return err
+	}
+	req, err = fillMissingTeamForConnect(cfg, state, req)
 	if err != nil {
 		return err
 	}
@@ -165,12 +169,22 @@ func selectConnectHarness(ctx context.Context, app *app, req connectRequest) (st
 	if err != nil {
 		return "", nil, err
 	}
+	detection, err := adapter.Detect(ctx, app.runtime.Env)
+	if err != nil {
+		return "", nil, fmt.Errorf("detect %s: %w", name, err)
+	}
+	if !detection.Installed {
+		return "", nil, fmt.Errorf("harness %s is not installed; install it and retry", name)
+	}
 	return name, adapter, nil
 }
 
-func fillMissingTeamForConnect(cfg config.Config, req connectRequest) (connectRequest, error) {
+func fillMissingTeamForConnect(cfg config.Config, state config.State, req connectRequest) (connectRequest, error) {
 	if req.TeamName == "" && (cfg.ActiveMode() == config.ModeAirplane || req.Mode == config.ModeAirplane) {
 		req.TeamName = strs.FirstNonEmpty(cfg.ActiveTeam, localAirplaneTeamName)
+	}
+	if req.TeamName == "" {
+		req.TeamName = strs.FirstNonEmpty(cfg.ActiveTeam, state.CurrentTeam)
 	}
 	if req.TeamName == "" {
 		return req, fmt.Errorf("team is required; pass `s46 connect <team>` or run bare `s46 connect` interactively")
@@ -238,11 +252,11 @@ func joinAtomicErrors(op string, primary error, rollbackErr, saveErr error) erro
 }
 
 func resolveConnectMode(cfg config.Config, existing config.TeamConfig, req connectRequest) string {
-	if req.Mode == config.ModeAirplane || isLocalEndpoint(req.Endpoint) {
-		return config.ModeAirplane
-	}
 	if req.Mode == config.ModeCloud {
 		return config.ModeCloud
+	}
+	if req.Mode == config.ModeAirplane || isLocalEndpoint(req.Endpoint) {
+		return config.ModeAirplane
 	}
 	if cfg.ActiveMode() == config.ModeAirplane {
 		return config.ModeAirplane
@@ -292,7 +306,12 @@ func renderConnectApplied(app *app, team api.Team, plan harness.Plan, applied ha
 			lines = append(lines, fmt.Sprintf("[s46] backup: %s", file.BackupPath))
 		}
 	}
-	lines = append(lines, connectNextSteps(plan.Harness, team.Name, team.DefaultModel)...)
+	if isLocalEndpoint(team.Endpoint) {
+		lines = append(lines, "[s46] airplane harness configuration only; local runtime setup and readiness were not verified")
+		lines = append(lines, "[s46] next: run `s46 airplane setup`, then `s46 status`")
+	} else {
+		lines = append(lines, connectNextSteps(plan.Harness, team.Name, team.DefaultModel)...)
+	}
 	return app.renderer.Lines(lines...)
 }
 

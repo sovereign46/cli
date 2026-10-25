@@ -13,12 +13,13 @@ func (Service) seamModelProbe() (bool, string, bool) { return false, "", false }
 func (Service) seamLlamacppServingVerifiedModel() (bool, string, bool) {
 	return false, "", false
 }
-func (Service) seamGatewayReady() (bool, bool)             { return false, false }
-func (Service) seamGatewayResponding() (bool, bool)        { return false, false }
-func (Service) seamGatewayDownloadAvailable() (bool, bool) { return false, false }
-func (Service) seamHomebrewAvailable() (bool, bool)        { return false, false }
-func (Service) seamLlamacppPath() (string, bool, bool)     { return "", false, false }
-func (Service) seamGatewayBinary() (string, bool, bool)    { return "", false, false }
+func (Service) seamGatewayReady() (bool, bool)              { return false, false }
+func (Service) seamGatewayResponding() (bool, bool)         { return false, false }
+func (Service) seamLlamacppDownloadAvailable() (bool, bool) { return false, false }
+func (Service) seamGatewayDownloadAvailable() (bool, bool)  { return false, false }
+func (Service) seamHomebrewAvailable() (bool, bool)         { return false, false }
+func (Service) seamLlamacppPath() (string, bool, bool)      { return "", false, false }
+func (Service) seamGatewayBinary() (string, bool, bool)     { return "", false, false }
 func (Service) seamLlamacppServeProcess() (llamacppProcess, bool, bool) {
 	return llamacppProcess{}, false, false
 }

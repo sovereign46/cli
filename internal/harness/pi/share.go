@@ -2,6 +2,7 @@ package pi
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -78,7 +79,7 @@ type piEvent struct {
 
 type piMessage struct {
 	Role       string               `json:"role"`
-	Content    []piContent          `json:"content"`
+	Content    piContentList        `json:"content"`
 	ToolCallID string               `json:"toolCallId"`
 	ToolName   string               `json:"toolName"`
 	IsError    bool                 `json:"isError"`
@@ -86,6 +87,30 @@ type piMessage struct {
 	Model      string               `json:"model"`
 	Usage      piUsage              `json:"usage"`
 	Timestamp  transcript.Timestamp `json:"timestamp"`
+}
+
+type piContentList []piContent
+
+func (content *piContentList) UnmarshalJSON(raw []byte) error {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		*content = nil
+		return nil
+	}
+	if trimmed[0] == '"' {
+		var text string
+		if err := json.Unmarshal(trimmed, &text); err != nil {
+			return err
+		}
+		*content = piContentList{{Type: "text", Text: text}}
+		return nil
+	}
+	var items []piContent
+	if err := json.Unmarshal(trimmed, &items); err != nil {
+		return fmt.Errorf("Pi message content must be a string or array: %w", err)
+	}
+	*content = items
+	return nil
 }
 
 type piContent struct {
@@ -326,7 +351,7 @@ func (c piCost) total() float64 {
 	return c.Input + c.Output + c.CacheRead + c.CacheWrite
 }
 
-func piContentText(items []piContent) string {
+func piContentText(items piContentList) string {
 	parts := []string{}
 	for _, item := range items {
 		if item.Text == "" {

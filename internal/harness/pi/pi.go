@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 
@@ -47,14 +46,19 @@ func New() Adapter { return Adapter{} }
 func (a Adapter) Name() string { return "pi" }
 
 func (a Adapter) Detect(ctx context.Context, env map[string]string) (harness.Detection, error) {
-	path := modelsPath(env)
-	if _, err := os.Stat(path); err == nil {
-		return harness.Detection{Installed: true, Path: config.DisplayPath(path, env)}, nil
-	}
-	if binary, err := exec.LookPath("pi"); err == nil {
+	if binary, ok := harness.ExecutablePath(env, "pi"); ok {
 		return harness.Detection{Installed: true, Path: binary}, nil
 	}
-	return harness.Detection{Installed: false, Path: config.DisplayPath(path, env)}, nil
+	return harness.Detection{Installed: false}, nil
+}
+
+func (a Adapter) Launch(ctx context.Context, req harness.LaunchRequest) error {
+	args := []string{"--provider", "s46", "--model", req.Model}
+	if req.SessionID != "" {
+		args = append(args, "--session-id", req.SessionID)
+	}
+	args = append(args, "--", req.Task)
+	return harness.LaunchExecutable(ctx, "pi", args, req)
 }
 
 func (a Adapter) PlanConnect(ctx context.Context, req harness.ConnectRequest) (harness.Plan, error) {

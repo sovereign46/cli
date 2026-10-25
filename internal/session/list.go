@@ -150,15 +150,9 @@ func (s Service) remoteSessionEntries(ctx context.Context, ctxState workspaceCon
 
 func (s Service) addRemoteSessionEntries(ctx context.Context, entries *[]ListedSession, ctxState workspaceContext, result remoteSessionEntriesResult) error {
 	if result.tokenErr != nil {
-		if len(*entries) > 0 {
-			return nil
-		}
 		return fmt.Errorf("could not obtain s46 access token: %w; run `s46 login` if your session expired", result.tokenErr)
 	}
 	if result.err != nil {
-		if len(*entries) > 0 {
-			return nil
-		}
 		if errors.Is(result.err, api.ErrForbidden) {
 			return s.sessionsForbiddenError(ctx, ctxState, result.accessToken)
 		}

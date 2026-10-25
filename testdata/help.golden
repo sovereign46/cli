@@ -19,10 +19,10 @@ Available Commands:
   logout      clear local credentials
   mode        view or set operating mode
   models      verify attested model registry artifacts
-  run         run a task in a local s46 session
+  run         launch the active real coding harness
   sessions    list local and remote sessions
   share       share a session as an encrypted static page
-  status      show active team, region, harness, mode, and checks
+  status      probe live authentication, gateway, model, inference, and harness status
   teams       list and switch connected teams
   token       print a bearer token for harness helpers
   update      check for updates using Homebrew-safe instructions

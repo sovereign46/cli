@@ -56,8 +56,8 @@ func (s Service) check(ctx context.Context, assumeVerifiedModel bool) Report {
 
 	report := Report{Mode: ModeAirplane, Model: LocalModelID, BackendModel: s.backendModel(), GatewayURL: s.gatewayURL(), LlamacppURL: LlamacppURL(s.Env), ModelPath: s.modelPath()}
 
-	osOK := runtime.GOOS == "darwin" || runtime.GOOS == "linux"
-	report.add(Check{Name: "os/arch", OK: osOK, Required: true, Message: runtime.GOOS + "/" + runtime.GOARCH})
+	platformOK, platformMessage := airplanePlatform(ctx)
+	report.add(Check{Name: "os/arch", OK: platformOK, Required: true, Message: platformMessage})
 
 	memory := s.memoryBytes(ctx)
 	report.MemoryGB = gb(memory)
@@ -144,6 +144,29 @@ func (s Service) skippedReport() Report {
 	return Report{Mode: ModeAirplane, Model: LocalModelID, BackendModel: s.backendModel(), GatewayURL: s.gatewayURL(), LlamacppURL: LlamacppURL(s.Env), ModelPath: s.modelPath(), Ready: true, Checks: checks, MemoryGB: 64, FreeDiskGB: 30}
 }
 
+func airplanePlatform(ctx context.Context) (bool, string) {
+	platform := runtime.GOOS + "/" + runtime.GOARCH
+	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
+		return airplanePlatformPolicy(runtime.GOOS, runtime.GOARCH, "")
+	}
+	output, err := contextx.CommandOutput(ctx, "/usr/bin/sw_vers", "-productVersion")
+	if err != nil {
+		return false, platform + "; could not determine macOS version"
+	}
+	return airplanePlatformPolicy(runtime.GOOS, runtime.GOARCH, strings.TrimSpace(string(output)))
+}
+
+func airplanePlatformPolicy(goos, goarch, version string) (bool, string) {
+	platform := goos + "/" + goarch
+	if goos != "darwin" || goarch != "arm64" {
+		return false, platform + "; airplane mode requires darwin/arm64 on macOS 26"
+	}
+	if strings.SplitN(version, ".", 2)[0] != "26" {
+		return false, platform + " macOS " + version + "; airplane mode requires macOS 26"
+	}
+	return true, platform + " macOS " + version
+}
+
 func (s Service) runBoolCheck(ctx context.Context, timeout time.Duration, check func(context.Context) bool) bool {
 	checkCtx, cancel := contextx.WithMaxTimeout(ctx, timeout)
 	defer cancel()
@@ -188,9 +211,22 @@ func (s Service) llamacppSettingsCheck(ctx context.Context, llamacppModelOK bool
 	}
 	runtimeReport := s.LlamacppRuntime(ctx)
 	if strings.TrimSpace(runtimeReport.Command) == "" {
-		return true, "could not inspect process flags; verified model is running"
+		if exactProcessInspectionRequired() {
+			return false, "could not inspect verified llama-server process flags"
+		}
+		return true, "could not inspect process flags; development runtime is responding"
 	}
 	mismatches := []string{}
+	advertisedAlias := false
+	for _, model := range runtimeReport.AdvertisedModels {
+		if model == s.backendModel() {
+			advertisedAlias = true
+			break
+		}
+	}
+	if !advertisedAlias && exactProcessInspectionRequired() {
+		mismatches = append(mismatches, fmt.Sprintf("advertised model missing %s", s.backendModel()))
+	}
 	for _, setting := range runtimeReport.Settings {
 		if setting.OK {
 			continue
@@ -302,6 +338,13 @@ func (s Service) modelProbe(ctx context.Context) (bool, string) {
 func (s Service) gatewayReady(ctx context.Context) bool {
 	if ready, ok := s.seamGatewayReady(); ok {
 		return ready
+	}
+	if pin, err := embeddedGatewayReleasePin(runtime.GOOS, runtime.GOARCH); err == nil {
+		if !s.verifiedGatewayProcess(ctx, pin) {
+			return false
+		}
+	} else if gatewayProcessIdentityRequired() {
+		return false
 	}
 	type payload struct {
 		Workers []struct {

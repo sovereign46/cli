@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"testing"
 	"time"
 
@@ -94,7 +93,7 @@ func TestResolveJSONLFallsBackToHeaderAndExplicitPath(t *testing.T) {
 	}
 }
 
-func TestListJSONLSessionsIgnoresUnrecognizedAndSurfacesErrors(t *testing.T) {
+func TestListJSONLSessionsIsolatesPerSessionParseErrors(t *testing.T) {
 	root := t.TempDir()
 	mustWriteFile(t, filepath.Join(root, "recognized.jsonl"), "recognized")
 	mustWriteFile(t, filepath.Join(root, "ignored.jsonl"), "ignored")
@@ -117,11 +116,11 @@ func TestListJSONLSessionsIgnoresUnrecognizedAndSurfacesErrors(t *testing.T) {
 		t.Fatalf("unexpected metas: %#v", metas)
 	}
 
-	_, err = ListJSONLSessions(context.Background(), root, func(path string) (Source, error) {
+	metas, err = ListJSONLSessions(context.Background(), root, func(path string) (Source, error) {
 		return Source{}, errors.New("parse failed")
 	})
-	if err == nil || !strings.Contains(err.Error(), "parse failed") {
-		t.Fatalf("expected parse error, got %v", err)
+	if err != nil || len(metas) != 0 {
+		t.Fatalf("per-session parse errors were not isolated: metas=%#v err=%v", metas, err)
 	}
 }
 

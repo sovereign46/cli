@@ -2,102 +2,32 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"net/url"
-	"os/exec"
 	"strings"
 
 	"github.com/spf13/cobra"
-	"golang.org/x/sync/errgroup"
 
 	"github.com/sovereign46/cli/internal/airplane"
-	"github.com/sovereign46/cli/internal/api"
 	"github.com/sovereign46/cli/internal/config"
-	"github.com/sovereign46/cli/internal/contextx"
 	"github.com/sovereign46/cli/internal/harness"
-	"github.com/sovereign46/cli/internal/strs"
 )
 
-type statusCheck struct {
-	Name    string `json:"name"`
-	OK      bool   `json:"ok"`
-	Message string `json:"message"`
+type statusResult struct {
+	OK     bool                  `json:"ok"`
+	Mode   string                `json:"mode"`
+	Team   string                `json:"team,omitempty"`
+	Checks []harness.StatusCheck `json:"checks"`
 }
 
-func statusChecks(ctx context.Context, app *app, teamName string, teamConfig config.TeamConfig) []statusCheck {
-	checks := []statusCheck{
-		{Name: "gateway", OK: tenantEndpointOK(app.runtime.Env, teamName, teamConfig.Endpoint), Message: teamConfig.Endpoint},
-	}
-	harnessName := strs.FirstNonEmpty(teamConfig.DefaultHarness, harness.DefaultName)
-	teamConfig.DefaultHarness = harnessName
-	adapter, err := app.harness.Get(harnessName)
-	if err != nil {
-		checks = append(checks, statusCheck{Name: "harness", OK: false, Message: err.Error()})
-		return checks
-	}
-	detection, err := adapter.Detect(ctx, app.runtime.Env)
-	if err != nil {
-		checks = append(checks, statusCheck{Name: "harness", OK: false, Message: err.Error()})
-		return checks
-	}
-	checks = append(checks, statusCheck{Name: "harness", OK: detection.Installed || harnessName == "standard", Message: strs.FirstNonEmpty(detection.Path, harnessName)})
-	checks = append(checks, statusHarnessConfig(ctx, app, teamName, teamConfig)...)
-	return checks
-}
+type renderedStatusError struct{}
 
-func tenantEndpointOK(env map[string]string, teamName string, endpoint string) bool {
-	if endpoint == api.DefaultGatewayURL {
-		return true
-	}
-	if endpoint == airplane.LocalGatewayURL {
-		return true
-	}
-	if origin, ok := api.LocalDevelopmentOrigin(env["S46_API_BASE_URL"]); ok && endpoint == origin {
-		return true
-	}
-	if strs.Truthy(env["S46_DEV_SHELL"]) {
-		if origin, ok := api.LocalDevelopmentOrigin(env["S46_DEV_BASE_URL"]); ok && endpoint == origin {
-			return true
-		}
-	}
-	return false
-}
-
-func statusHarnessConfig(ctx context.Context, app *app, teamName string, teamConfig config.TeamConfig) []statusCheck {
-	adapter, err := app.harness.Get(teamConfig.DefaultHarness)
-	if err != nil {
-		return []statusCheck{{Name: "harness-config", OK: false, Message: "unknown harness " + teamConfig.DefaultHarness}}
-	}
-	req := harness.StatusRequest{
-		Env:          app.runtime.Env,
-		TeamName:     teamName,
-		Endpoint:     teamConfig.Endpoint,
-		DefaultModel: teamConfig.DefaultModel,
-	}
-	out := adapter.Status(ctx, req)
-	checks := make([]statusCheck, len(out))
-	for i, c := range out {
-		checks[i] = statusCheck{Name: c.Name, OK: c.OK, Message: c.Message}
-	}
-	return checks
-}
-
-type localServerStatus struct {
-	Name    string `json:"name"`
-	URL     string `json:"url"`
-	Host    string `json:"host,omitempty"`
-	Port    string `json:"port,omitempty"`
-	Status  string `json:"status"`
-	PID     string `json:"pid,omitempty"`
-	Process string `json:"process,omitempty"`
-	Message string `json:"message,omitempty"`
-}
+func (renderedStatusError) Error() string    { return "status checks failed" }
+func (renderedStatusError) AlreadyRendered() {}
 
 func statusCommand(runtime Runtime, opts *options) *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
-		Short: "show active team, region, harness, mode, and checks",
+		Short: "probe live authentication, gateway, model, inference, and harness status",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			app, err := newApp(runtime, opts)
@@ -112,393 +42,129 @@ func statusCommand(runtime Runtime, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			var team *config.TeamConfig
-			checks := []statusCheck{{Name: "active-team", OK: false, Message: "none; run `s46 login` or `s46 connect <team>` first"}}
-			if cfg.ActiveTeam != "" {
-				teamConfig, ok := cfg.Teams[cfg.ActiveTeam]
-				if ok {
-					team = &teamConfig
-					checks = statusChecks(cmd.Context(), app, cfg.ActiveTeam, teamConfig)
-					if cfg.ActiveMode() == config.ModeCloud && !state.Authenticated {
-						checks = append([]statusCheck{{Name: "auth", OK: false, Message: "not authenticated; run `s46 login` before using cloud harnesses"}}, checks...)
-					}
-				} else {
-					checks = []statusCheck{{Name: "active-team", OK: false, Message: fmt.Sprintf("%q is missing from config", cfg.ActiveTeam)}}
-				}
-			}
-			showLocalRuntime := cfg.ActiveMode() == config.ModeAirplane || opts.verbose
-			var localServers []localServerStatus
-			var llamacppRuntime airplane.LlamacppRuntime
-			if showLocalRuntime {
-				parentCtx := cmd.Context()
-				g, ctx := errgroup.WithContext(parentCtx)
-				g.Go(func() error {
-					var err error
-					localServers, err = statusLocalServers(ctx, app.runtime.Env, team)
-					return err
-				})
-				g.Go(func() error {
-					llamacppRuntime = airplane.Service{Env: app.runtime.Env}.LlamacppRuntime(ctx)
-					// Keep sibling errors authoritative; parent cancellation is checked after Wait.
-					return nil
-				})
-				if err := g.Wait(); err != nil {
-					return err
-				}
-				if err := parentCtx.Err(); err != nil {
-					return err
-				}
-			}
-			result := map[string]any{
-				"authenticated": state.Authenticated,
-				"user":          state.CurrentUser,
-				"activeTeam":    cfg.ActiveTeam,
-				"team":          team,
-				"sessions":      len(state.Sessions),
-				"configPath":    config.DisplayPath(app.config.ConfigPath, runtime.Env),
-				"statePath":     config.DisplayPath(app.config.StatePath, runtime.Env),
-				"checks":        checks,
-				"ok":            !statusChecksFailed(checks),
-			}
-			if showLocalRuntime {
-				result["localServers"] = localServers
-				result["llamacpp"] = llamacppRuntime
-			}
+			result := collectStatus(cmd.Context(), app, cfg, state)
 			if ok, err := app.writeStructured(result); ok {
-				return err
+				if err != nil {
+					return err
+				}
+				if !result.OK {
+					return renderedStatusError{}
+				}
+				return nil
 			}
-			var lines []string
-			if opts.verbose {
-				lines = renderStatusVerbose(app, cfg, state, team, localServers, llamacppRuntime, checks)
-			} else {
-				lines = renderStatusConcise(app, cfg, state, team, localServers, llamacppRuntime, checks)
+			lines := []string{fmt.Sprintf("[s46] mode: %s", result.Mode)}
+			if result.Team != "" {
+				team := cfg.Teams[result.Team]
+				lines = append(lines, fmt.Sprintf("[s46] team:    %s · %s · %s", result.Team, team.Region, result.Mode))
+				lines = append(lines, fmt.Sprintf("[s46] harness: %s · %s", team.DefaultHarness, team.DefaultModel))
+			}
+			for _, check := range result.Checks {
+				state := "ok"
+				if !check.OK {
+					state = "fail"
+				}
+				lines = append(lines, fmt.Sprintf("[s46] [%s] %s: %s", state, check.Name, check.Message))
 			}
 			if err := app.renderer.Lines(lines...); err != nil {
 				return err
 			}
-			if statusChecksFailed(checks) {
-				return fmt.Errorf("status found configuration problems")
+			if !result.OK {
+				return renderedStatusError{}
 			}
 			return nil
 		},
 	}
 }
 
-func renderStatusConcise(app *app, cfg config.Config, state config.State, team *config.TeamConfig, localServers []localServerStatus, llamacppRuntime airplane.LlamacppRuntime, checks []statusCheck) []string {
-	lines := []string{fmt.Sprintf("[s46] auth:    %s", authStatus(state))}
-	if team == nil {
-		lines = append(lines, "[s46] team:    none")
+func collectStatus(ctx context.Context, app *app, cfg config.Config, state config.State) statusResult {
+	mode := cfg.ActiveMode()
+	teamName := cfg.ActiveTeam
+	teamCfg, hasTeam := cfg.Teams[teamName]
+	checks := make([]harness.StatusCheck, 0, 16)
+	token, tokenErr := app.authService().Token(ctx, false)
+
+	if mode == config.ModeAirplane {
+		checks = append(checks, airplaneAuthCheck(token))
+		probe := airplaneStatusProbe(app.runtime.Env, token)
+		checks = appendGatewayProbeChecks(checks, probe.Checks(ctx))
+		service := airplane.Service{Env: app.runtime.Env}
+		report := service.Check(ctx)
+		for _, check := range report.Checks {
+			checks = append(checks, harness.StatusCheck{Name: check.Name, OK: check.OK, Message: check.Message})
+		}
 	} else {
-		harnessName := strs.FirstNonEmpty(team.DefaultHarness, harness.DefaultName)
-		lines = append(lines,
-			fmt.Sprintf("[s46] team:    %s · %s · %s", cfg.ActiveTeam, team.Region, cfg.ActiveMode()),
-			fmt.Sprintf("[s46] harness: %s · %s", harnessName, team.DefaultModel),
-			fmt.Sprintf("[s46] api:     %s", team.Endpoint),
-		)
-	}
-	if cfg.ActiveMode() == config.ModeAirplane {
-		lines = append(lines, renderLlamacppRuntimeConcise(llamacppRuntime))
-		for _, server := range localServers {
-			if server.Name == "llamacpp" {
-				continue
-			}
-			lines = append(lines, renderLocalServerStatusConcise(server))
+		checks = append(checks, cloudAuthCheck(ctx, app, state, token, tokenErr))
+		probe := gatewayStatusProbe{Env: app.runtime.Env, Token: token}
+		if hasTeam {
+			probe.Endpoint = teamCfg.Endpoint
+			probe.Model = teamCfg.DefaultModel
 		}
+		checks = appendGatewayProbeChecks(checks, probe.Checks(ctx))
 	}
-	lines = append(lines, renderStatusChecksConcise(checks))
-	if statusChecksFailed(checks) {
-		lines = append(lines, "[s46] re-run with --verbose for details")
-	}
-	lines = append(lines, fmt.Sprintf("[s46] sessions:%2d", len(state.Sessions)))
-	return lines
-}
 
-func renderStatusVerbose(app *app, cfg config.Config, state config.State, team *config.TeamConfig, localServers []localServerStatus, llamacppRuntime airplane.LlamacppRuntime, checks []statusCheck) []string {
-	lines := []string{
-		fmt.Sprintf("[s46] auth:    %s", authStatus(state)),
-		fmt.Sprintf("[s46] config:  %s", config.DisplayPath(app.config.ConfigPath, app.runtime.Env)),
-	}
-	if team != nil {
-		lines = append(lines,
-			fmt.Sprintf("[s46] team:    %s", cfg.ActiveTeam),
-			fmt.Sprintf("[s46] region:    %s", team.Region),
-			fmt.Sprintf("[s46] mode:    %s", cfg.ActiveMode()),
-			fmt.Sprintf("[s46] harness: %s", strs.FirstNonEmpty(team.DefaultHarness, harness.DefaultName)),
-			fmt.Sprintf("[s46] model:   %s", team.DefaultModel),
-			fmt.Sprintf("[s46] api:     %s", team.Endpoint),
-		)
-	} else {
-		lines = append(lines, "[s46] team:    none")
-	}
-	for _, server := range localServers {
-		lines = append(lines, renderLocalServerStatus(server))
-	}
-	lines = append(lines, renderLlamacppRuntime(llamacppRuntime)...)
-	lines = append(lines, renderStatusChecks(checks)...)
-	lines = append(lines, fmt.Sprintf("[s46] sessions:%2d", len(state.Sessions)))
-	return lines
-}
-
-func renderStatusChecksConcise(checks []statusCheck) string {
-	if len(checks) == 0 {
-		return "[s46] checks:  none"
-	}
-	pass := 0
-	var firstFail string
-	for _, check := range checks {
-		if check.OK {
-			pass++
-		} else if firstFail == "" {
-			firstFail = check.Name
-		}
-	}
-	if pass == len(checks) {
-		return fmt.Sprintf("[s46] checks:  %d/%d ok", pass, len(checks))
-	}
-	return fmt.Sprintf("[s46] checks:  %d/%d ok (first fail: %s)", pass, len(checks), firstFail)
-}
-
-func renderLocalServerStatusConcise(status localServerStatus) string {
-	label := status.Name + ":"
-	switch status.Status {
-	case "listening":
-		if status.PID != "" {
-			return fmt.Sprintf("[s46] %-9sok · pid %s", label, status.PID)
-		}
-		return fmt.Sprintf("[s46] %-9sok", label)
-	case "not_listening":
-		return fmt.Sprintf("[s46] %-9snot running", label)
-	default:
-		return fmt.Sprintf("[s46] %-9s%s", label, strs.FirstNonEmpty(status.Message, "unknown"))
-	}
-}
-
-func renderLlamacppRuntimeConcise(runtimeReport airplane.LlamacppRuntime) string {
-	if !runtimeReport.Running {
-		return "[s46] llama.cpp: not running"
-	}
-	return "[s46] llama.cpp: ok"
-}
-
-func renderStatusChecks(checks []statusCheck) []string {
-	if len(checks) == 0 {
-		return nil
-	}
-	lines := []string{"[s46] checks:"}
-	for _, check := range checks {
-		status := "ok"
-		if !check.OK {
-			status = "fail"
-		}
-		lines = append(lines, fmt.Sprintf("[s46]   [%s] %s: %s", status, check.Name, check.Message))
-	}
-	return lines
-}
-
-func statusChecksFailed(checks []statusCheck) bool {
-	for _, check := range checks {
-		if !check.OK {
-			return true
-		}
-	}
-	return false
-}
-
-func statusLocalServers(ctx context.Context, env map[string]string, team *config.TeamConfig) ([]localServerStatus, error) {
-	tasks := []localServerStatus{}
-	llamacppURL := airplane.LlamacppURL(env)
-	if isLocalURL(llamacppURL) {
-		tasks = append(tasks, localServerStatus{Name: "llamacpp", URL: llamacppURL})
-	}
-	if apiURL := statusLocalAPIURL(env, team); apiURL != "" {
-		name := "api"
-		if env["S46_AIRPLANE_GATEWAY_URL"] != "" || teamEndpoint(team) == airplane.LocalGatewayURL {
-			name = "gateway"
-		}
-		tasks = append(tasks, localServerStatus{Name: name, URL: apiURL})
-	}
-	servers := make([]localServerStatus, len(tasks))
-	g, ctx := errgroup.WithContext(ctx)
-	for i, task := range tasks {
-		i, task := i, task
-		g.Go(func() error {
-			server, err := describeLocalServer(ctx, env, task.Name, task.URL)
-			if err != nil {
-				return err
-			}
-			servers[i] = server
-			return nil
-		})
-	}
-	if err := g.Wait(); err != nil {
-		return nil, err
-	}
-	return servers, nil
-}
-
-func statusLocalAPIURL(env map[string]string, team *config.TeamConfig) string {
-	for _, candidate := range []string{
-		env["S46_AIRPLANE_GATEWAY_URL"],
-		teamEndpoint(team),
-		localAPIOrigin(env["S46_API_BASE_URL"]),
-		localAPIOrigin(env["S46_DEV_BASE_URL"]),
-		airplane.LocalGatewayURL,
-	} {
-		if candidate != "" && isLocalURL(candidate) {
-			return candidate
-		}
-	}
-	return ""
-}
-
-func teamEndpoint(team *config.TeamConfig) string {
-	if team == nil {
-		return ""
-	}
-	return team.Endpoint
-}
-
-func localAPIOrigin(rawURL string) string {
-	origin, ok := api.LocalDevelopmentOrigin(rawURL)
-	if !ok {
-		return ""
-	}
-	return origin
-}
-
-func describeLocalServer(ctx context.Context, env map[string]string, name string, rawURL string) (localServerStatus, error) {
-	status := localServerStatus{Name: name, URL: rawURL, Status: "unknown"}
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
-		status.Message = "invalid URL: " + err.Error()
-		return status, nil
-	}
-	status.Host = parsed.Hostname()
-	status.Port = parsed.Port()
-	if status.Port == "" {
-		status.Port = defaultPort(parsed.Scheme)
-	}
-	if status.Port == "" {
-		status.Message = "port unknown"
-		return status, nil
-	}
-	process, err := listeningProcess(ctx, env, status.Port)
-	if err != nil {
-		return status, err
-	}
-	status.Status = process.Status
-	status.PID = process.PID
-	status.Process = process.Command
-	status.Message = process.Message
-	return status, nil
-}
-
-func renderLocalServerStatus(status localServerStatus) string {
-	parts := []string{status.URL}
-	if status.Port != "" {
-		parts = append(parts, "port "+status.Port)
-	}
-	switch status.Status {
-	case "listening":
-		process := strs.FirstNonEmpty(status.Process, "unknown")
-		if status.PID != "" {
-			parts = append(parts, fmt.Sprintf("pid %s (%s)", status.PID, process))
+	if hasTeam && strings.TrimSpace(teamCfg.DefaultHarness) != "" {
+		adapter, err := app.harness.Get(teamCfg.DefaultHarness)
+		if err != nil {
+			checks = append(checks, harness.StatusCheck{Name: "harness", OK: false, Message: err.Error()})
 		} else {
-			parts = append(parts, process)
+			detection, detectErr := adapter.Detect(ctx, app.runtime.Env)
+			installed := detectErr == nil && detection.Installed
+			detectMessage := detection.Path
+			if detectErr != nil {
+				detectMessage = detectErr.Error()
+			} else if !detection.Installed {
+				detectMessage = teamCfg.DefaultHarness + " executable not found"
+			} else if detectMessage == "" {
+				detectMessage = teamCfg.DefaultHarness + " built-in"
+			}
+			checks = append(checks, harness.StatusCheck{Name: "harness-installed", OK: installed, Message: detectMessage})
+			harnessChecks := adapter.Status(ctx, harness.StatusRequest{Env: app.runtime.Env, TeamName: teamName, Endpoint: teamCfg.Endpoint, DefaultModel: teamCfg.DefaultModel})
+			checks = append(checks, harnessChecks...)
+			checks = append(checks, harness.StatusCheck{Name: "harness", OK: installed && checksPassed(harnessChecks), Message: teamCfg.DefaultHarness + " executable and configuration"})
 		}
-	case "not_listening":
-		parts = append(parts, "not listening")
-	default:
-		parts = append(parts, strs.FirstNonEmpty(status.Message, "process unknown"))
+	} else {
+		checks = append(checks, harness.StatusCheck{Name: "harness", OK: false, Message: "no harness is connected"})
 	}
-	return fmt.Sprintf("[s46] local %-7s %s", status.Name+":", strings.Join(parts, " · "))
+
+	return statusResult{OK: checksPassed(checks), Mode: mode, Team: teamName, Checks: checks}
 }
 
-func isLocalURL(rawURL string) bool {
-	parsed, err := url.Parse(rawURL)
+func cloudAuthCheck(ctx context.Context, app *app, state config.State, token string, tokenErr error) harness.StatusCheck {
+	if tokenErr != nil {
+		return harness.StatusCheck{Name: "auth", OK: false, Message: tokenErr.Error()}
+	}
+	if strings.TrimSpace(token) == "" {
+		return harness.StatusCheck{Name: "auth", OK: false, Message: "no bearer token is available; run `s46 login`"}
+	}
+	user, err := app.api.Me(ctx, token)
 	if err != nil {
-		return false
+		return harness.StatusCheck{Name: "auth", OK: false, Message: "live /v1/me probe failed: " + err.Error()}
 	}
-	switch strings.ToLower(parsed.Hostname()) {
-	case "localhost", "127.0.0.1", "::1", "0.0.0.0":
-		return true
-	default:
-		return false
+	if state.CurrentUser != "" && user.Email != state.CurrentUser {
+		return harness.StatusCheck{Name: "auth", OK: false, Message: fmt.Sprintf("live /v1/me returned %s, expected %s", user.Email, state.CurrentUser)}
 	}
+	return harness.StatusCheck{Name: "auth", OK: true, Message: "authenticated as " + user.Email}
 }
 
-func defaultPort(scheme string) string {
-	switch strings.ToLower(scheme) {
-	case "http":
-		return "80"
-	case "https":
-		return "443"
-	default:
-		return ""
-	}
-}
-
-type listeningProcessStatus struct {
-	Status  string
-	PID     string
-	Command string
-	Message string
-}
-
-func listeningProcess(ctx context.Context, env map[string]string, port string) (listeningProcessStatus, error) {
-	if err := ctx.Err(); err != nil {
-		return listeningProcessStatus{}, err
-	}
-	if override, ok := seamListeningProcess(env, port); ok {
-		return parseListeningProcessOverride(override), nil
-	}
-	output, err := runLsofOutput(ctx, "-nP", "-iTCP:"+port, "-sTCP:LISTEN", "-Fp", "-Fc")
-	if errors.Is(err, exec.ErrNotFound) {
-		return listeningProcessStatus{Status: "unknown", Message: "process unknown (lsof not found)"}, nil
-	}
-	if errors.Is(err, errLsofTimedOut) {
-		return listeningProcessStatus{Status: "unknown", Message: "process lookup timed out"}, nil
-	}
-	if err != nil {
-		if ctxErr := contextx.Done(ctx, err); ctxErr != nil {
-			return listeningProcessStatus{}, ctxErr
-		}
-		return listeningProcessStatus{Status: "not_listening"}, nil
-	}
-	if len(output) == 0 {
-		return listeningProcessStatus{Status: "not_listening"}, nil
-	}
-	return parseLsofProcess(output), nil
-}
-
-func parseListeningProcessOverride(value string) listeningProcessStatus {
-	value = strings.TrimSpace(value)
-	if value == "" || value == "0" || strings.EqualFold(value, "none") || strings.EqualFold(value, "missing") {
-		return listeningProcessStatus{Status: "not_listening"}
-	}
-	fields := strings.Fields(value)
-	if len(fields) == 0 {
-		return listeningProcessStatus{Status: "not_listening"}
-	}
-	status := listeningProcessStatus{Status: "listening", PID: fields[0]}
-	if len(fields) > 1 {
-		status.Command = strings.Join(fields[1:], " ")
-	}
-	return status
-}
-
-func parseLsofProcess(output []byte) listeningProcessStatus {
-	status := listeningProcessStatus{Status: "listening"}
-	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
-		if strings.HasPrefix(line, "p") && status.PID == "" {
-			status.PID = strings.TrimPrefix(line, "p")
-		}
-		if strings.HasPrefix(line, "c") && status.Command == "" {
-			status.Command = strings.TrimPrefix(line, "c")
-		}
-		if status.PID != "" && status.Command != "" {
+func appendGatewayProbeChecks(checks, probeChecks []harness.StatusCheck) []harness.StatusCheck {
+	checks = append(checks, probeChecks...)
+	for _, check := range probeChecks {
+		if check.Name == "readiness" {
+			checks = append(checks, harness.StatusCheck{Name: "gateway", OK: check.OK, Message: check.Message})
 			break
 		}
 	}
-	return status
+	return checks
+}
+
+func checksPassed(checks []harness.StatusCheck) bool {
+	if len(checks) == 0 {
+		return false
+	}
+	for _, check := range checks {
+		if !check.OK {
+			return false
+		}
+	}
+	return true
 }

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -29,14 +28,19 @@ func userSettingsPath(env map[string]string) string {
 }
 
 func (a Adapter) Detect(ctx context.Context, env map[string]string) (harness.Detection, error) {
-	path := userSettingsPath(env)
-	if _, err := os.Stat(path); err == nil {
-		return harness.Detection{Installed: true, Path: config.DisplayPath(path, env)}, nil
-	}
-	if binary, err := exec.LookPath("claude"); err == nil {
+	if binary, ok := harness.ExecutablePath(env, "claude"); ok {
 		return harness.Detection{Installed: true, Path: binary}, nil
 	}
-	return harness.Detection{Installed: false, Path: config.DisplayPath(path, env)}, nil
+	return harness.Detection{Installed: false}, nil
+}
+
+func (a Adapter) Launch(ctx context.Context, req harness.LaunchRequest) error {
+	args := []string{"--model", req.Model}
+	if req.SessionID != "" {
+		args = append(args, "--session-id", req.SessionID)
+	}
+	args = append(args, req.Task)
+	return harness.LaunchExecutable(ctx, "claude", args, req)
 }
 
 func (a Adapter) PlanConnect(ctx context.Context, req harness.ConnectRequest) (harness.Plan, error) {

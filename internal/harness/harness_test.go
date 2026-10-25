@@ -19,6 +19,7 @@ func (s stubAdapter) Name() string { return s.name }
 func (stubAdapter) Detect(ctx context.Context, env map[string]string) (Detection, error) {
 	return Detection{Installed: true}, nil
 }
+func (stubAdapter) Launch(ctx context.Context, req LaunchRequest) error { return nil }
 func (stubAdapter) PlanConnect(ctx context.Context, req ConnectRequest) (Plan, error) {
 	return Plan{}, nil
 }

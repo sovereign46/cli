@@ -1,8 +1,13 @@
 package cli
 
-import (
-	"github.com/spf13/cobra"
-)
+import "github.com/spf13/cobra"
+
+type airplaneSetupIncompleteError struct{}
+
+func (airplaneSetupIncompleteError) Error() string {
+	return "airplane setup is incomplete or unsupported"
+}
+func (airplaneSetupIncompleteError) AlreadyRendered() {}
 
 func airplaneCommand(runtime Runtime, opts *options) *cobra.Command {
 	cmd := &cobra.Command{Use: "airplane", Short: "manage local airplane mode"}
@@ -28,10 +33,22 @@ func airplaneCommand(runtime Runtime, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if ok, err := app.writeStructured(report); ok {
+			if ok, writeErr := app.writeStructured(report); ok {
+				if writeErr != nil {
+					return writeErr
+				}
+				if setupOptions.AssumeYes && !report.Ready {
+					return airplaneSetupIncompleteError{}
+				}
+				return nil
+			}
+			if err := offerAirplaneModeOnAfterSetupWithOptions(cmd.Context(), app, report, setupOptions); err != nil {
 				return err
 			}
-			return offerAirplaneModeOnAfterSetupWithOptions(cmd.Context(), app, report, setupOptions)
+			if setupOptions.AssumeYes && !report.Ready {
+				return airplaneSetupIncompleteError{}
+			}
+			return nil
 		},
 	}
 	setup.Flags().StringVar(&setupMode, "mode", "", "set mode after setup (on)")

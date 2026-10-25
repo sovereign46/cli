@@ -2,6 +2,7 @@ package standard
 
 import (
 	"context"
+	"errors"
 
 	"github.com/sovereign46/cli/internal/harness"
 	"github.com/sovereign46/cli/internal/share"
@@ -15,6 +16,10 @@ func (a Adapter) Name() string { return "standard" }
 
 func (a Adapter) Detect(ctx context.Context, env map[string]string) (harness.Detection, error) {
 	return harness.Detection{Installed: true}, nil
+}
+
+func (a Adapter) Launch(ctx context.Context, req harness.LaunchRequest) error {
+	return errors.New("the standard profile has no real coding harness to launch; connect pi, claude-code, or codex")
 }
 
 func (a Adapter) PlanConnect(ctx context.Context, req harness.ConnectRequest) (harness.Plan, error) {

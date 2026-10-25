@@ -40,7 +40,7 @@ type RunResult struct {
 	Region   string `json:"region"`
 }
 
-func (s Service) Run(ctx context.Context, task string, model string, sessionID string) (RunResult, error) {
+func (s Service) RecordCompletedLaunch(ctx context.Context, task string, model string, sessionID string, harnessName string) (RunResult, error) {
 	ctxState, err := s.contextState()
 	if err != nil {
 		return RunResult{}, fmt.Errorf("resolve workspace: %w", err)
@@ -49,14 +49,20 @@ func (s Service) Run(ctx context.Context, task string, model string, sessionID s
 		model = ctxState.Team.DefaultModel
 	}
 	if sessionID == "" {
-		sessionID = IDForTask(ctxState.State.CurrentUser, task)
+		return RunResult{}, fmt.Errorf("completed launch has no transcript-backed harness session id")
 	}
 	location := "local"
 	if ctxState.Config.ActiveMode() == config.ModeAirplane {
 		location = "localhost"
 	}
-	result := RunResult{ID: sessionID, Task: task, State: "local", Location: location, Harness: "s46", Model: model, Region: ctxState.Team.Region}
-	ctxState.State.Sessions[sessionID] = api.Session{ID: sessionID, State: "local", Harness: "s46", Location: location, Region: ctxState.Team.Region, Model: model, Age: "0m", Spent: "€0.00", Task: task}
+	if harnessName == "" {
+		return RunResult{}, fmt.Errorf("completed launch has no harness identity")
+	}
+	if _, exists := ctxState.State.Sessions[sessionID]; exists {
+		return RunResult{}, fmt.Errorf("transcript-backed harness session %s is already recorded", sessionID)
+	}
+	result := RunResult{ID: sessionID, Task: task, State: "local", Location: location, Harness: harnessName, Model: model, Region: ctxState.Team.Region}
+	ctxState.State.Sessions[sessionID] = api.Session{ID: sessionID, State: "local", Harness: harnessName, Location: location, Region: ctxState.Team.Region, Model: model, Age: "0m", Spent: "€0.00", Task: task}
 	if err := s.Config.SaveState(ctxState.State); err != nil {
 		return RunResult{}, err
 	}

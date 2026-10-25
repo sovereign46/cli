@@ -49,20 +49,30 @@ func runAirplaneSetupWithOptions(ctx context.Context, app *app, options airplane
 }
 
 func continueAirplaneSetup(ctx context.Context, app *app, service airplane.Service, report airplane.Report, options airplaneSetupOptions) (airplane.Report, error) {
-	if !options.AllowPrompts || !checkOK(report, "memory") || !checkOK(report, "disk") {
+	if !options.AllowPrompts {
+		return report, nil
+	}
+	if missingCheck(report, "llamacpp-installed") && !service.LlamacppDownloadAvailable() {
+		if err := app.renderer.Lines("[s46] airplane runtime unavailable: " + service.LlamacppInstallDescription()); err != nil {
+			return report, err
+		}
+		return report, nil
+	}
+	if !checkOK(report, "memory") || !checkOK(report, "disk") {
 		return report, nil
 	}
 
 	changed := false
-	if missingCheck(report, "llamacpp-installed") && service.HomebrewAvailable() {
-		if yes, err := confirmAirplaneSetup(app, options, "[s46] llama.cpp is not installed.\n[s46] Install with Homebrew? [Y/n] ", true); err != nil {
+	if missingCheck(report, "llamacpp-installed") && service.LlamacppDownloadAvailable() {
+		description := service.LlamacppInstallDescription()
+		if yes, err := confirmAirplaneSetup(app, options, fmt.Sprintf("[s46] The qualified llama-server runtime is not installed.\n[s46] Install %s? [Y/n] ", description), true); err != nil {
 			return report, err
 		} else if yes {
-			if err := app.renderer.Lines("[s46] installing llama.cpp with Homebrew..."); err != nil {
+			if err := app.renderer.Lines("[s46] installing exact pinned llama.cpp distribution..."); err != nil {
 				return report, err
 			}
 			if err := service.InstallLlamacpp(ctx); err != nil {
-				return report, fmt.Errorf("failed to install llama.cpp with Homebrew: %w", err)
+				return report, fmt.Errorf("failed to install pinned llama.cpp distribution: %w", err)
 			}
 			changed = true
 			if checkOK(report, "model-downloaded") {
@@ -177,10 +187,8 @@ func continueAirplaneSetup(ctx context.Context, app *app, service airplane.Servi
 				}
 			}
 		} else if err := app.renderer.Lines(
-			"[s46] Local s46 gateway is not installed or running.",
-			"[s46] In development, set S46_API_REPO=/path/to/api or use make shell with ../s46-api present.",
-			"[s46] In production, connect to the network and rerun setup to install the verified gateway release.",
-			"[s46] Or set S46_API_BINARY=/path/to/s46-gateway.",
+			"[s46] Local s46 gateway is unavailable: "+service.GatewayInstallDescription()+".",
+			"[s46] Airplane setup remains disabled until the complete model/runtime/gateway closure is qualified.",
 		); err != nil {
 			return report, err
 		}
