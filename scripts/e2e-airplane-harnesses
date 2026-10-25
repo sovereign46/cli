@@ -566,6 +566,26 @@ if pgid <= 1 or pgid == os.getpgrp():
     raise SystemExit(f"refusing unsafe process group {pgid}")
 
 def exists():
+    if sys.platform.startswith("linux") and os.path.isdir("/proc"):
+        for name in os.listdir("/proc"):
+            if not name.isdigit():
+                continue
+            try:
+                with open(f"/proc/{name}/stat", encoding="ascii") as source:
+                    raw = source.read()
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            except PermissionError as error:
+                raise SystemExit(f"cannot inspect process {name}: {error}")
+            end = raw.rfind(")")
+            if end < 0:
+                raise SystemExit(f"malformed process status for {name}")
+            fields = raw[end + 2:].split()
+            if len(fields) < 3:
+                raise SystemExit(f"malformed process status for {name}")
+            if int(fields[2]) == pgid and fields[0] != "Z":
+                return True
+        return False
     try:
         os.killpg(pgid, 0)
         return True
@@ -1365,9 +1385,10 @@ import subprocess
 import sys
 
 ps_path = sys.argv[1]
+ps_arguments = ["eww", "-axo", "pid=,pgid=,comm=,args="] if sys.platform == "darwin" else ["eww", "-e", "-o", "pid=,pgid=,comm=,args="]
 try:
     process = subprocess.run(
-        [ps_path, "eww", "-axo", "pid=,pgid=,comm=,args="],
+        [ps_path, *ps_arguments],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -1410,11 +1431,12 @@ import time
 runner_id, runner_pid_text, ps_path = sys.argv[1:]
 runner_pid = int(runner_pid_text)
 marker = re.compile(r"(?:^| )S46_E2E_RUNNER_ID=" + re.escape(runner_id) + r"(?: |$)")
+ps_arguments = ["eww", "-axo", "pid=,pgid=,args="] if sys.platform == "darwin" else ["eww", "-e", "-o", "pid=,pgid=,args="]
 
 def snapshot():
     try:
         process = subprocess.Popen(
-            [ps_path, "eww", "-axo", "pid=,pgid=,args="],
+            [ps_path, *ps_arguments],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,

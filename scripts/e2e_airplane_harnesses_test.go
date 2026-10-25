@@ -925,6 +925,15 @@ func processExists(pid int) bool {
 		if err != nil {
 			return false
 		}
+		if raw, readErr := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat")); readErr == nil {
+			end := bytes.LastIndexByte(raw, ')')
+			if end >= 0 {
+				fields := strings.Fields(string(raw[end+1:]))
+				if len(fields) > 0 && fields[0] == "Z" {
+					return false
+				}
+			}
+		}
 		time.Sleep(100 * time.Millisecond)
 	}
 	return true
