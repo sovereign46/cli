@@ -55,7 +55,7 @@ func buildReleaseCandidate(ctx context.Context, tag, preparedCommit, bundleDirec
 	if _, err := loadReleaseEvidenceTrust(); err != nil {
 		return fmt.Errorf("release evidence trust is not approved: %w", err)
 	}
-	if err := runReleaseChecks(ctx); err != nil {
+	if err := runReleaseChecks(ctx, preparedCommit); err != nil {
 		return fmt.Errorf("release policy gate failed before candidate build: %w", err)
 	}
 	if err := os.Mkdir(bundleDirectory, 0o700); err != nil {

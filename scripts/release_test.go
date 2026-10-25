@@ -70,6 +70,115 @@ func TestBumpVersion(t *testing.T) {
 	}
 }
 
+func TestBumpVersionSupportsArbitrarySemVerNumericIdentifiers(t *testing.T) {
+	cases := []struct {
+		current string
+		target  string
+		want    string
+	}{
+		{"9223372036854775807.0.0", "major", "9223372036854775808.0.0"},
+		{"1.999999999999999999999999999999.0", "minor", "1.1000000000000000000000000000000.0"},
+		{"1.2.999999999999999999999999999999", "patch", "1.2.1000000000000000000000000000000"},
+	}
+	for _, tc := range cases {
+		got, err := bumpVersion(tc.current, tc.target)
+		if err != nil || got != tc.want {
+			t.Fatalf("bumpVersion(%q, %q) = %q, %v; want %q", tc.current, tc.target, got, err, tc.want)
+		}
+	}
+	if comparison, err := compareVersions("100000000000000000000.0.0", "99999999999999999999.999.999"); err != nil || comparison <= 0 {
+		t.Fatalf("arbitrary-precision version comparison failed: comparison=%d err=%v", comparison, err)
+	}
+}
+
+func TestReleaseVersionsRejectLeadingZeros(t *testing.T) {
+	for _, version := range []string{"01.2.3", "1.02.3", "1.2.03", "00.0.0"} {
+		if semverPattern.MatchString(version) {
+			t.Errorf("semverPattern accepted non-canonical version %q", version)
+		}
+		if _, err := parseVersion(version); err == nil {
+			t.Errorf("parseVersion accepted non-canonical version %q", version)
+		}
+		if _, err := bumpVersion("1.2.3", version); err == nil {
+			t.Errorf("bumpVersion accepted non-canonical target %q", version)
+		}
+	}
+	for _, version := range []string{"0.0.0", "1.2.3", "10.20.30"} {
+		if !semverPattern.MatchString(version) {
+			t.Errorf("semverPattern rejected canonical version %q", version)
+		}
+	}
+	for length := 41; length < 64; length++ {
+		if preparedCommitRegexp.MatchString(strings.Repeat("a", length)) {
+			t.Errorf("prepared commit validator accepted ambiguous %d-character object ID", length)
+		}
+	}
+}
+
+func TestActivationPolicyGateRequiresNamedTestToRunAndPass(t *testing.T) {
+	valid := "=== RUN   TestReleaseCandidateActivationPolicy\n--- PASS: TestReleaseCandidateActivationPolicy (0.00s)\nPASS\n"
+	if err := validateActivationPolicyTestOutput(valid); err != nil {
+		t.Fatalf("valid activation-policy test output was rejected: %v", err)
+	}
+	for _, output := range []string{
+		"testing: warning: no tests to run\nPASS\n",
+		"=== RUN   TestReleaseCandidateActivationPolicy\n--- FAIL: TestReleaseCandidateActivationPolicy (0.00s)\nFAIL\n",
+		"=== RUN   TestReleaseCandidateActivationPolicy\n=== RUN   TestReleaseCandidateActivationPolicy/smoke\n--- PASS: TestReleaseCandidateActivationPolicy/smoke (0.00s)\n--- SKIP: TestReleaseCandidateActivationPolicy (0.00s)\nPASS\n",
+		"=== RUN   TestReleaseCandidateActivationPolicyExtra\n--- PASS: TestReleaseCandidateActivationPolicyExtra (0.00s)\nPASS\n",
+		"PASS\n",
+	} {
+		if err := validateActivationPolicyTestOutput(output); err == nil {
+			t.Fatalf("activation-policy gate accepted output that does not prove execution and success: %q", output)
+		}
+	}
+}
+
+func TestReleaseChecksRunInExactIsolatedCheckout(t *testing.T) {
+	withReleaseRepository(t, func(commit string) {
+		repository, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(versionFile, []byte("9.9.9\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		logPath := filepath.Join(t.TempDir(), "go-invocations")
+		fakeBin := t.TempDir()
+		goPath := filepath.Join(fakeBin, "go")
+		script := fmt.Sprintf(`#!/bin/sh
+set -eu
+printf '%%s\n' "$PWD" >> %q
+test "$(cat VERSION)" = 1.2.3
+case "$*" in
+  *releasecandidate*)
+    printf '=== RUN   TestReleaseCandidateActivationPolicy\n'
+    printf '%%s\n' '--- PASS: TestReleaseCandidateActivationPolicy (0.00s)'
+    ;;
+esac
+`, logPath)
+		if err := os.WriteFile(goPath, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+		if err := runReleaseChecks(context.Background(), commit); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := os.ReadFile(logPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines := strings.Fields(string(raw))
+		if len(lines) != 3 {
+			t.Fatalf("release checks invoked go from %d directories, want 3: %q", len(lines), raw)
+		}
+		for _, directory := range lines {
+			if directory == repository || !strings.Contains(directory, "s46-release-checkout-") {
+				t.Fatalf("release check ran outside exact isolated checkout: %q (source %q)", directory, repository)
+			}
+		}
+	})
+}
+
 func TestRequireUnreleasedChangelogEntries(t *testing.T) {
 	withTempDir(t, func() {
 		writeChangelog(t, "## [Unreleased]\n\n### Fixed\n\n- Fixed release tests.\n\n## [0.0.1] - 2026-01-01\n")
@@ -242,6 +351,27 @@ func TestValidatePublishStateRejectsDirtyOrDisagreeingRelease(t *testing.T) {
 	})
 }
 
+func TestValidatePreparedReleaseRejectsHiddenIndexEntries(t *testing.T) {
+	withReleaseRepository(t, func(commit string) {
+		runGitTest(t, "update-index", "--assume-unchanged", versionFile)
+		if err := os.WriteFile(versionFile, []byte("9.9.9\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := validatePublishState(context.Background(), "v1.2.3", commit); err == nil || !strings.Contains(err.Error(), "assume-unchanged or skip-worktree") {
+			t.Fatalf("modified assume-unchanged release metadata should fail, got %v", err)
+		}
+		runGitTest(t, "update-index", "--no-assume-unchanged", versionFile)
+		runGitTest(t, "checkout", "--", versionFile)
+		runGitTest(t, "update-index", "--skip-worktree", qualificationRunnerSource)
+		if err := os.WriteFile(qualificationRunnerSource, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := validatePublishState(context.Background(), "v1.2.3", commit); err == nil || !strings.Contains(err.Error(), "assume-unchanged or skip-worktree") {
+			t.Fatalf("modified skip-worktree non-metadata file should fail, got %v", err)
+		}
+	})
+}
+
 func TestValidateQualificationBundleBindsEveryPublishedArchive(t *testing.T) {
 	commit := strings.Repeat("a", 40)
 	bundle := writeReleaseBundle(t, "1.2.3", commit)
@@ -340,6 +470,40 @@ func TestValidateQualificationBundleRejectsMissingExtraAndForgedEvidence(t *test
 		}
 	})
 
+	t.Run("wrong runtime input", func(t *testing.T) {
+		bundle := writeReleaseBundle(t, "1.2.3", commit)
+		evidence := filepath.Join(bundle, expectedReleaseArchives("1.2.3")[0]+qualificationSuffix)
+		raw, err := os.ReadFile(evidence)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw = bytes.Replace(raw, []byte(qualifiedDevstralGGUFSHA256), []byte(strings.Repeat("f", 64)), 1)
+		if err := os.WriteFile(evidence, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		writeTestReleaseEvidenceSignature(t, evidence, testQualificationPrivateKey)
+		if _, err := validateQualificationBundle(bundle, "1.2.3", commit, strings.Repeat("d", 40)); err == nil || !strings.Contains(err.Error(), "historical Devstral GGUF") {
+			t.Fatalf("wrong runtime input should fail, got %v", err)
+		}
+	})
+
+	t.Run("cleanup not verified", func(t *testing.T) {
+		bundle := writeReleaseBundle(t, "1.2.3", commit)
+		evidence := filepath.Join(bundle, expectedReleaseArchives("1.2.3")[0]+qualificationSuffix)
+		raw, err := os.ReadFile(evidence)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw = bytes.Replace(raw, []byte(`"verifiedNoSurvivors": true`), []byte(`"verifiedNoSurvivors": false`), 1)
+		if err := os.WriteFile(evidence, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		writeTestReleaseEvidenceSignature(t, evidence, testQualificationPrivateKey)
+		if _, err := validateQualificationBundle(bundle, "1.2.3", commit, strings.Repeat("d", 40)); err == nil || !strings.Contains(err.Error(), "no-survivor cleanup") {
+			t.Fatalf("unverified cleanup should fail, got %v", err)
+		}
+	})
+
 	t.Run("forged qualification signature", func(t *testing.T) {
 		bundle := writeReleaseBundle(t, "1.2.3", commit)
 		signature := filepath.Join(bundle, expectedReleaseArchives("1.2.3")[0]+qualificationSuffix+releaseEvidenceSignatureSuffix)
@@ -407,6 +571,45 @@ func TestTagValidationRequiresPreparedCommitOnOriginMain(t *testing.T) {
 	})
 }
 
+func TestQualifiedReleaseTagMustTargetPreparedCommitDirectly(t *testing.T) {
+	withReleaseRepository(t, func(commit string) {
+		digest := strings.Repeat("d", 64)
+		runGitTest(t, "tag", "--annotate", "--message", "inner", "inner-v1.2.3", commit)
+		record, err := json.Marshal(qualifiedReleaseTag{Schema: releaseTagSchema, Tag: "v1.2.3", Commit: commit, BundleSHA256: digest})
+		if err != nil {
+			t.Fatal(err)
+		}
+		runGitTest(t, "tag", "--annotate", "--message", string(record), "v1.2.3", "inner-v1.2.3")
+		if err := validateQualifiedReleaseTag(context.Background(), "v1.2.3", commit, digest); err == nil || !strings.Contains(err.Error(), "target prepared commit") {
+			t.Fatalf("indirect annotated tag was accepted: %v", err)
+		}
+	})
+}
+
+func TestQualifiedReleaseTagRetryReusesCapturedObject(t *testing.T) {
+	withReleaseRepository(t, func(commit string) {
+		digest := strings.Repeat("d", 64)
+		first, err := ensureQualifiedReleaseTag(context.Background(), "v1.2.3", commit, digest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		other := t.TempDir()
+		runGitTestInDirectory(t, other, "init")
+		t.Setenv("GIT_DIR", filepath.Join(other, ".git"))
+		t.Setenv("GIT_WORK_TREE", other)
+		second, err := ensureQualifiedReleaseTag(context.Background(), "v1.2.3", commit, digest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if first != second {
+			t.Fatalf("retry changed annotated tag object: first=%s second=%s", first, second)
+		}
+		if err := validateQualifiedReleaseTagObject(context.Background(), first, "v1.2.3", commit, digest); err != nil {
+			t.Fatalf("captured annotated tag object is invalid: %v", err)
+		}
+	})
+}
+
 func TestCandidateReleaseAdoptionRequiresExactDraftAndCommit(t *testing.T) {
 	valid := candidateRelease{IsDraft: true, TagName: "candidate-v1.2.3-abc", TargetCommitish: strings.Repeat("a", 40)}
 	if err := validateCandidateRelease(valid, valid.TagName, valid.TargetCommitish); err != nil {
@@ -463,6 +666,15 @@ func withReleaseRepository(t *testing.T, fn func(commit string)) {
 		if err := os.MkdirAll(filepath.Dir(versionGoFile), 0o755); err != nil {
 			t.Fatal(err)
 		}
+		if err := os.MkdirAll(filepath.Dir(qualificationRunnerSource), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(qualificationRunnerSource, []byte("#!/usr/bin/env bash\nset -euo pipefail\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(qualificationRunnerSource, 0o755); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.WriteFile(versionFile, []byte("1.2.3\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -484,6 +696,16 @@ func withReleaseRepository(t *testing.T, fn func(commit string)) {
 func writeReleaseBundle(t *testing.T, version string, commit string) string {
 	t.Helper()
 	directory := t.TempDir()
+	runnerDigest := strings.Repeat("d", 64)
+	runnerSize := int64(54_000)
+	if _, err := os.Lstat(qualificationRunnerSource); err == nil {
+		runnerDigest, runnerSize, err = hashRegularFile(qualificationRunnerSource, qualificationRunnerMaxSize)
+		if err != nil {
+			t.Fatal(err)
+		}
+	} else if !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
 	var checksums strings.Builder
 	for _, name := range expectedReleaseArchives(version) {
 		content := []byte("qualified archive " + name + "\n")
@@ -505,6 +727,21 @@ func writeReleaseBundle(t *testing.T, version string, commit string) string {
 				ExpectedCommit:    commit,
 				NetworkIsolation:  "external",
 				AirplaneHarnesses: []string{"pi", "claude-code", "codex"},
+				Runtime: qualificationRuntime{
+					Model:       qualifiedInput{Name: qualifiedDevstralGGUFName, SHA256: qualifiedDevstralGGUFSHA256, Size: qualifiedDevstralGGUFSize},
+					LlamaServer: qualifiedInput{Name: "llama-server", SHA256: strings.Repeat("b", 64), Size: 12_345},
+					Gateway:     qualifiedInput{Name: "s46-gateway", SHA256: strings.Repeat("c", 64), Size: 23_456},
+				},
+				Runner: qualificationRunner{
+					Script:              qualifiedInput{Name: "e2e-airplane-harnesses", SHA256: runnerDigest, Size: runnerSize},
+					ID:                  "12345-0123456789abcdef0123456789abcdef",
+					ProcessCohortSHA256: strings.Repeat("e", 64),
+					ProcessCount:        6,
+					HarnessProcessCount: 3,
+					ServiceProcessCount: 2,
+					VerifiedNoSurvivors: true,
+					CleanupVerifiedAt:   "2026-05-20T10:59:59Z",
+				},
 			},
 		}
 		raw, err := json.MarshalIndent(record, "", "  ")
@@ -565,7 +802,13 @@ func writeTestReleaseEvidenceSignature(t *testing.T, path string, privateKey ed2
 
 func runGitTest(t *testing.T, args ...string) string {
 	t.Helper()
+	return runGitTestInDirectory(t, "", args...)
+}
+
+func runGitTestInDirectory(t *testing.T, directory string, args ...string) string {
+	t.Helper()
 	cmd := exec.Command("git", args...)
+	cmd.Dir = directory
 	cmd.Env = withoutRepositoryGitEnvironment(os.Environ())
 	output, err := cmd.CombinedOutput()
 	if err != nil {

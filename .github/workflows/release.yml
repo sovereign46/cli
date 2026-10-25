@@ -112,8 +112,8 @@ jobs:
           endpoint="repos/sovereign46/tap/contents/Formula/s46.rb"
           current_sha="$(gh api "$endpoint?ref=main" --jq .sha)"
           gh api "$endpoint?ref=main" --jq .content | tr -d '\n' | base64 --decode > "$existing"
-          test "$(grep -Ec '^  version "[0-9]+\.[0-9]+\.[0-9]+"$' "$existing")" = 1
-          existing_version="$(sed -n 's/^  version "\([0-9][0-9.]*\)"$/\1/p' "$existing")"
+          test "$(grep -Ec '^  version "(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"$' "$existing")" = 1
+          existing_version="$(sed -En 's/^  version "((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))"$/\1/p' "$existing")"
           target_version="${GITHUB_REF_NAME#v}"
           if [ "$existing_version" != "$target_version" ]; then
             test "$(printf '%s\n%s\n' "$existing_version" "$target_version" | sort -V | tail -n 1)" = "$target_version"
