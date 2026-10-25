@@ -84,7 +84,7 @@ func BuildArtifact(source Source, fallback api.Session, opts share.BuildOptions)
 		now = time.Now().UTC()
 	}
 	id := First(source.ID, fallback.ID, "s46 session")
-	model := First(source.Model, fallback.Model, api.DefaultModel)
+	model := First(source.Model, fallback.Model, "unknown")
 	harnessName := First(source.Harness, fallback.Harness, "s46")
 	region := First(fallback.Region, "s46")
 	status := statusFor(fallback.State)

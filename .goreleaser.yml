@@ -4,7 +4,7 @@ project_name: s46
 
 before:
   hooks:
-    - go mod tidy
+    - env GOWORK=off go mod verify
 
 builds:
   - id: s46
@@ -12,6 +12,7 @@ builds:
     binary: s46
     env:
       - CGO_ENABLED=0
+      - GOWORK=off
     goos:
       - darwin
       - linux
@@ -35,23 +36,11 @@ archives:
 checksum:
   name_template: checksums.txt
 
+# Release publication is deliberately handled only after qualification by the
+# tag workflow. GoReleaser builds the candidate bundle but cannot publish or
+# replace its bytes.
 release:
-  replace_existing_artifacts: true
-
-brews:
-  - name: s46
-    repository:
-      owner: sovereign46
-      name: tap
-    directory: Formula
-    homepage: https://sovereign46.com
-    description: Sovereign46 CLI control plane for coding-agent harnesses
-    license: Apache-2.0
-    install: |
-      bin.install "s46"
-      generate_completions_from_executable(bin/"s46", "completion")
-    test: |
-      system "#{bin}/s46", "--help"
+  disable: true
 
 changelog:
   sort: asc

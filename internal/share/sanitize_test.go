@@ -31,6 +31,13 @@ func TestBuildArtifactSanitizesTaskAndHome(t *testing.T) {
 	}
 }
 
+func TestBuildArtifactDoesNotInventCloudModel(t *testing.T) {
+	artifact := BuildArtifact(api.Session{ID: "sess_1", State: "completed"}, BuildOptions{})
+	if artifact.Session.Model.Name != "unknown" {
+		t.Fatalf("missing session model became %q", artifact.Session.Model.Name)
+	}
+}
+
 func TestRedactorRemovesPrivateKeyBlocks(t *testing.T) {
 	got := (Redactor{}).String("-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----")
 	if got != redacted {

@@ -150,14 +150,15 @@ func (c *MockClient) Team(ctx context.Context, name string, opts TeamOptions) (T
 	if model == "" {
 		model = DefaultModel
 	}
+	models := c.modelList()
 	return Team{
 		Name:          team,
 		Endpoint:      endpoint,
 		Region:        region,
 		WorkerHosts:   append([]string(nil), fixtures.WorkerHosts...),
 		DefaultModel:  model,
-		Models:        c.modelList(),
-		ModelMetadata: map[string]ModelRuntime{DefaultModel: {ClosureSHA256: mockRuntimeClosureSHA256, ClosureSizeBytes: 4096, ContextWindow: 262144, MaxTokens: 32768, Reasoning: true}},
+		Models:        models,
+		ModelMetadata: mockModelMetadata(models),
 	}, nil
 }
 
@@ -166,6 +167,26 @@ func (c *MockClient) modelList() []string {
 		return c.Models
 	}
 	return DefaultModelList()
+}
+
+func mockModelMetadata(models []string) map[string]ModelRuntime {
+	metadata := make(map[string]ModelRuntime, len(models))
+	for _, model := range models {
+		runtime := ModelRuntime{ContextWindow: 65536, MaxTokens: 4096}
+		if model == DeepSeekModelID {
+			runtime = ModelRuntime{
+				Engine:           "vllm",
+				Version:          "0.31.0",
+				ClosureSHA256:    mockRuntimeClosureSHA256,
+				ClosureSizeBytes: 4096,
+				ContextWindow:    262144,
+				MaxTokens:        32768,
+				Reasoning:        true,
+			}
+		}
+		metadata[model] = runtime
+	}
+	return metadata
 }
 
 func (c *MockClient) Sessions(ctx context.Context, team Team, accessToken string) ([]Session, error) {

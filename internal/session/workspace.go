@@ -33,8 +33,8 @@ func (s Service) relaxedContextState() (workspaceContext, bool, error) {
 	if stateErr != nil {
 		return workspaceContext{}, false, stateErr
 	}
-	teamConfig := config.TeamConfig{Region: "local", DefaultModel: api.DefaultModel}
-	team := api.Team{Name: cfg.ActiveTeam, Region: "local", DefaultModel: api.DefaultModel}
+	teamConfig := config.TeamConfig{Region: "local"}
+	team := api.Team{Name: cfg.ActiveTeam, Region: "local"}
 	return workspaceContext{Config: cfg, State: state, TeamName: cfg.ActiveTeam, TeamConfig: teamConfig, Team: team, Mode: cfg.ActiveMode()}, false, nil
 }
 

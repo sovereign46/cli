@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/sovereign46/cli/internal/airplane"
@@ -85,8 +86,88 @@ func TestAirplaneRoundTripHandlesExplicitCloudDevstralAfterDefaultUpgrade(t *tes
 	}
 }
 
+func TestAirplaneModeOnRejectsInvalidSavedCloudCatalogBeforeSetupOrMutation(t *testing.T) {
+	env := testEnv(t)
+	store := config.NewStore(env, "")
+	cfg := config.DefaultConfig()
+	cfg.ActiveTeam = api.DefaultTeam
+	cfg.Mode = config.ModeCloud
+	cfg.Teams[api.DefaultTeam] = config.TeamConfig{
+		Endpoint:       api.DefaultGatewayURL,
+		DefaultHarness: "pi",
+		Models:         []string{api.DevstralModelID},
+	}
+	if err := store.SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(env["XDG_CONFIG_HOME"], "s46", "config.json")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := run(t, env, "airplane", "mode", "on")
+	if result.err == nil || !strings.Contains(result.err.Error(), "saved cloud team has no authorized default model and catalog") {
+		t.Fatalf("invalid cloud catalog was not rejected: err=%v stdout=%q stderr=%q", result.err, result.stdout, result.stderr)
+	}
+	if strings.Contains(result.stdout, "airplane setup: checking local runtime") || strings.Contains(result.stdout, "starting llama-server") {
+		t.Fatalf("runtime setup started before cloud catalog validation: %q", result.stdout)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(after, before) {
+		t.Fatal("airplane mode on mutated config after invalid cloud catalog")
+	}
+}
+
+func TestAirplaneModeOffRejectsInvalidSavedCloudCatalogWithoutDeletingTeam(t *testing.T) {
+	env := testEnv(t)
+	store := config.NewStore(env, "")
+	cfg := config.DefaultConfig()
+	cfg.ActiveTeam = api.DefaultTeam
+	cfg.Mode = config.ModeAirplane
+	cfg.Teams[api.DefaultTeam] = config.TeamConfig{
+		Endpoint:       airplane.LocalGatewayURL,
+		DefaultHarness: "standard",
+		DefaultModel:   airplane.LocalModelID,
+		Models:         []string{airplane.LocalModelID},
+		APISnapshot: api.Team{
+			Name:     api.DefaultTeam,
+			Endpoint: api.DefaultGatewayURL,
+			Models:   []string{api.DevstralModelID},
+		},
+	}
+	if err := store.SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(env["XDG_CONFIG_HOME"], "s46", "config.json")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := run(t, env, "airplane", "mode", "off")
+	if result.err == nil || !strings.Contains(result.err.Error(), "saved cloud team has no authorized default model and catalog") {
+		t.Fatalf("invalid saved cloud catalog was not rejected: err=%v stdout=%q stderr=%q", result.err, result.stdout, result.stderr)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(after, before) {
+		t.Fatal("airplane mode off mutated or deleted team after invalid cloud catalog")
+	}
+}
+
+func TestCloudTeamSnapshotRequiresSavedDefault(t *testing.T) {
+	team := config.TeamConfig{Endpoint: api.DefaultGatewayURL, Models: []string{api.DeepSeekModelID}}
+	if snapshot, ok := cloudTeamSnapshot(api.DefaultTeam, team); ok {
+		t.Fatalf("missing team default silently selected %q", snapshot.DefaultModel)
+	}
+}
+
 func TestCloudTeamSnapshotClassifiesByEndpointNotModelID(t *testing.T) {
-	for _, model := range []string{airplane.LocalModelID, api.DefaultModel} {
+	for _, model := range []string{api.DevstralModelID, api.DeepSeekModelID} {
 		for _, endpoint := range []string{airplane.LocalGatewayURL, api.DefaultGatewayURL} {
 			t.Run(model+endpoint, func(t *testing.T) {
 				snapshot, ok := cloudTeamSnapshot(api.DefaultTeam, config.TeamConfig{Endpoint: endpoint, DefaultModel: model, Models: []string{model}})

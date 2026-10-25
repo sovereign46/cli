@@ -16,6 +16,8 @@ S46_OFFLINE=1 ./s46 connect --help
 
 Compare the displayed candidate version, source identifier, and Go version with the supplied build manifest. A candidate built from an uncommitted tree must say so; it must not claim to be a published stable CLI release. Its build must use a real published `github.com/sovereign46/attest` version, without a sibling replacement or temporary Go workspace.
 
+For airplane harness testing, `scripts/e2e-airplane-harnesses` requires this exact executable or archive in `S46_E2E_CANDIDATE` and an independently supplied lowercase digest in `S46_E2E_CANDIDATE_SHA256`; it does not build or fall back to checkout output. It validates every archive member and requires one top-level regular `s46` at mode `0755`. Every candidate command, including commands resolved by a child harness through `PATH`, executes a fresh hash-verified copy. Proxy poisoning and post-execution identity checks are only defense in depth, not OS security boundaries. Qualification requires `S46_E2E_NETWORK_ISOLATION=external S46_E2E_FILESYSTEM_ISOLATION=external S46_E2E_QUALIFICATION=1`, the expected version and full prepared commit, an absolute exact Devstral GGUF path/digest, absolute llama-server and gateway paths with independently supplied digests, and an absolute `S46_E2E_QUALIFICATION_EVIDENCE=<archive>.qualification.json` path. Before launch, the operator must establish OS/VM/container enforcement that denies egress and denies candidate/child-harness writes to runner and invocation control paths; the script records but does not establish or verify those external boundaries. It stages the two support executables privately, forces the run to use the supplied model and services, and starts with no existing llama-server or gateway. The runner tracks and terminates newly detached services and all three harness process groups and verifies their absence before writing evidence during final cleanup that binds both isolation assertions, the CLI, GGUF, llama-server, gateway, runner script, tracked cohort, and no-survivor cleanup after the complete Pi, Claude Code, and Codex run and final restore. Verification-only runs cannot produce evidence. Final publication requires equivalent evidence for all four GoReleaser archives, exact detached Ed25519 signatures from the separately approved build and qualification authorities, and copies those exact bytes without rebuilding. The external qualification environment should still be destroyed after completion.
+
 ## First cloud test: Pi only
 
 Do not run this stage until all of the following have been separately approved and provisioned:
@@ -31,8 +33,9 @@ Then put the candidate directory first on `PATH`, so Pi's `!s46 token --refresh`
 export PATH="/absolute/path/to/candidate:$PATH"
 s46 version
 s46 login --user <email> --device-id <test-device>
-s46 connect @org/team --harness=pi --model=s46/deepseek-v4-flash-0731
-pi --provider s46 --model s46/deepseek-v4-flash-0731
+export MODEL_ID='<public ID returned by authorized team discovery>'
+s46 connect @org/team --harness=pi --model="$MODEL_ID"
+pi --provider s46 --model "$MODEL_ID"
 ```
 
 `connect` changes the S46 provider in `~/.pi/agent/models.json`, retaining other providers and creating a backup. It is not a sandbox: Pi's tools have the permissions of the account running Pi. Use an isolated account, container, or VM for the first real tool run. A separate working directory alone does not confine its tools.
