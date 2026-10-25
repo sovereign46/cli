@@ -24,5 +24,6 @@ func (Service) seamLlamacppServeProcess() (llamacppProcess, bool, bool) {
 	return llamacppProcess{}, false, false
 }
 func (Service) seamAdvertisedLlamacppModels() ([]string, bool) { return nil, false }
+func (Service) seamAirplanePlatformVersion() (string, bool)    { return "", false }
 func (Service) seamMemoryBytes() (int64, bool)                 { return 0, false }
 func (Service) seamFreeDiskBytes() (int64, bool)               { return 0, false }

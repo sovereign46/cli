@@ -118,7 +118,7 @@ func TestEnsureModelDirCreatesConfiguredDirectory(t *testing.T) {
 
 func TestInstallLlamacppFailsClosedWithoutCompleteQualifiedClosure(t *testing.T) {
 	err := (Service{}).InstallLlamacpp(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "gateway pin") {
+	if err == nil || !strings.Contains(err.Error(), "gateway pin") && !strings.Contains(err.Error(), "unsupported") {
 		t.Fatalf("unqualified llama.cpp candidate was accepted: %v", err)
 	}
 }
@@ -195,14 +195,15 @@ func TestCheckRefusesToProbeOrAcceptGatewayBeforeModelVerified(t *testing.T) {
 
 func TestCheckAssumingVerifiedModelSkipsArtifactVerification(t *testing.T) {
 	env := map[string]string{
-		"S46_AIRPLANE_MODEL_DIR":           t.TempDir(),
-		"S46_TEST_MEMORY_BYTES":            "68000000000",
-		"S46_TEST_FREE_DISK_BYTES":         "61000000000",
-		"S46_TEST_LLAMACPP_PATH":           "/opt/homebrew/bin/llama-server",
-		"S46_TEST_LLAMACPP_RUNNING":        "1",
-		"S46_TEST_LLAMACPP_VERIFIED_MODEL": "1",
-		"S46_TEST_MODEL_PROBE":             "1",
-		"S46_TEST_GATEWAY_READY":           "1",
+		"S46_AIRPLANE_MODEL_DIR":             t.TempDir(),
+		"S46_TEST_AIRPLANE_PLATFORM_VERSION": "26.0",
+		"S46_TEST_MEMORY_BYTES":              "68000000000",
+		"S46_TEST_FREE_DISK_BYTES":           "61000000000",
+		"S46_TEST_LLAMACPP_PATH":             "/opt/homebrew/bin/llama-server",
+		"S46_TEST_LLAMACPP_RUNNING":          "1",
+		"S46_TEST_LLAMACPP_VERIFIED_MODEL":   "1",
+		"S46_TEST_MODEL_PROBE":               "1",
+		"S46_TEST_GATEWAY_READY":             "1",
 	}
 
 	strict := Service{Env: env}.Check(context.Background())

@@ -84,21 +84,22 @@ printf '[test-harness] pi\n'
 		}
 	}
 	return map[string]string{
-		"HOME":                           home,
-		"PATH":                           bin + string(os.PathListSeparator) + os.Getenv("PATH"),
-		"XDG_CONFIG_HOME":                filepath.Join(home, ".config"),
-		"XDG_DATA_HOME":                  filepath.Join(home, ".data"),
-		"XDG_CACHE_HOME":                 filepath.Join(home, ".cache"),
-		"S46_KEYRING_BACKEND":            "file",
-		"S46_API_MODE":                   "mock",
-		"S46_SHARE_BACKEND":              "mock",
-		"S46_MOCK_GIST_ID":               "0123456789abcdef0123456789abcdef",
-		"S46_SKIP_STARTUP_UPDATE_CHECK":  "1",
-		"S46_AIRPLANE_SKIP_SETUP_CHECKS": "1",
-		"S46_TEST_GATEWAY_RESPONDING":    "0",
-		"S46_TEST_STATUS_LIVE_OK":        "1",
-		"S46_TEST_OLLAMA_RUNNING":        "0",
-		"S46_TEST_LISTENER_DEFAULT":      "missing",
+		"HOME":                               home,
+		"PATH":                               bin + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"XDG_CONFIG_HOME":                    filepath.Join(home, ".config"),
+		"XDG_DATA_HOME":                      filepath.Join(home, ".data"),
+		"XDG_CACHE_HOME":                     filepath.Join(home, ".cache"),
+		"S46_KEYRING_BACKEND":                "file",
+		"S46_API_MODE":                       "mock",
+		"S46_SHARE_BACKEND":                  "mock",
+		"S46_MOCK_GIST_ID":                   "0123456789abcdef0123456789abcdef",
+		"S46_SKIP_STARTUP_UPDATE_CHECK":      "1",
+		"S46_AIRPLANE_SKIP_SETUP_CHECKS":     "1",
+		"S46_TEST_AIRPLANE_PLATFORM_VERSION": "26.0",
+		"S46_TEST_GATEWAY_RESPONDING":        "0",
+		"S46_TEST_STATUS_LIVE_OK":            "1",
+		"S46_TEST_OLLAMA_RUNNING":            "0",
+		"S46_TEST_LISTENER_DEFAULT":          "missing",
 	}
 }
 

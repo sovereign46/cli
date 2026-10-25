@@ -203,6 +203,11 @@ func (s Service) seamAdvertisedLlamacppModels() (models []string, ok bool) {
 	return splitList(raw), true
 }
 
+func (s Service) seamAirplanePlatformVersion() (string, bool) {
+	value := strings.TrimSpace(strs.EnvValue(s.Env, "S46_TEST_AIRPLANE_PLATFORM_VERSION"))
+	return value, value != ""
+}
+
 func (s Service) seamMemoryBytes() (bytes int64, ok bool) {
 	value := strings.TrimSpace(strs.EnvValue(s.Env, "S46_TEST_MEMORY_BYTES"))
 	if value == "" {

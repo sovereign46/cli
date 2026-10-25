@@ -81,6 +81,9 @@ func TestSeamsInactiveWithEmptyEnv(t *testing.T) {
 	if _, ok := service.seamAdvertisedLlamacppModels(); ok {
 		check("seamAdvertisedLlamacppModels", true)
 	}
+	if _, ok := service.seamAirplanePlatformVersion(); ok {
+		check("seamAirplanePlatformVersion", true)
+	}
 	if _, ok := service.seamMemoryBytes(); ok {
 		check("seamMemoryBytes", true)
 	}

@@ -56,7 +56,7 @@ func (s Service) check(ctx context.Context, assumeVerifiedModel bool) Report {
 
 	report := Report{Mode: ModeAirplane, Model: LocalModelID, BackendModel: s.backendModel(), GatewayURL: s.gatewayURL(), LlamacppURL: LlamacppURL(s.Env), ModelPath: s.modelPath()}
 
-	platformOK, platformMessage := airplanePlatform(ctx)
+	platformOK, platformMessage := s.airplanePlatform(ctx)
 	report.add(Check{Name: "os/arch", OK: platformOK, Required: true, Message: platformMessage})
 
 	memory := s.memoryBytes(ctx)
@@ -144,7 +144,10 @@ func (s Service) skippedReport() Report {
 	return Report{Mode: ModeAirplane, Model: LocalModelID, BackendModel: s.backendModel(), GatewayURL: s.gatewayURL(), LlamacppURL: LlamacppURL(s.Env), ModelPath: s.modelPath(), Ready: true, Checks: checks, MemoryGB: 64, FreeDiskGB: 30}
 }
 
-func airplanePlatform(ctx context.Context) (bool, string) {
+func (s Service) airplanePlatform(ctx context.Context) (bool, string) {
+	if version, ok := s.seamAirplanePlatformVersion(); ok {
+		return airplanePlatformPolicy("darwin", "arm64", version)
+	}
 	platform := runtime.GOOS + "/" + runtime.GOARCH
 	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
 		return airplanePlatformPolicy(runtime.GOOS, runtime.GOARCH, "")
