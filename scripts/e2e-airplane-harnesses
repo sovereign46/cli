@@ -24,6 +24,7 @@ candidate_path_runner_sha256=""
 candidate_invocation_root_identity=""
 candidate_path=""
 qualification=0
+qualification_scope="airplane"
 qualification_evidence=""
 qualification_ready=0
 declare -a tracked_process_groups=()
@@ -977,19 +978,20 @@ verify_candidate_identity() {
   local expected_version="$2"
   local expected_commit="$3"
   local qualification="$4"
+  local scope="$5"
   local version_json="$sandbox/candidate-version.json"
   local version_stderr="$sandbox/candidate-version.err"
   if ! run_candidate_bounded 10 65536 "$version_json" "$version_stderr" version --json; then
     tail -80 "$version_stderr" 2>/dev/null || true
     fail "candidate version --json did not complete within its runtime and output bounds"
   fi
-  "$trusted_python" - "$metadata" "$version_json" "$sandbox/candidate-identity.json" "$expected_version" "$expected_commit" "$qualification" <<'PY'
+  "$trusted_python" - "$metadata" "$version_json" "$sandbox/candidate-identity.json" "$expected_version" "$expected_commit" "$qualification" "$scope" <<'PY'
 import datetime
 import json
 import re
 import sys
 
-metadata_path, version_path, identity_path, expected_version, expected_commit, qualification = sys.argv[1:]
+metadata_path, version_path, identity_path, expected_version, expected_commit, qualification, scope = sys.argv[1:]
 with open(metadata_path, encoding="utf-8") as source:
     identity = json.load(source)
 with open(version_path, encoding="utf-8") as source:
@@ -1012,6 +1014,12 @@ if qualification == "1":
         raise SystemExit(f"candidate version {version['version']!r} does not match expected {expected_version!r}")
     if commit != expected_commit:
         raise SystemExit(f"candidate commit {commit!r} does not match expected {expected_commit!r}")
+    source_name = str(identity.get("source", "")).rsplit("/", 1)[-1]
+    darwin_arm64 = source_name.endswith("_darwin_arm64.tar.gz")
+    if scope == "airplane" and not darwin_arm64:
+        raise SystemExit("only the darwin/arm64 archive may acquire airplane qualification")
+    if scope == "cloud" and darwin_arm64:
+        raise SystemExit("darwin/arm64 requires full airplane qualification")
 date = str(version.get("date", ""))
 try:
     datetime.datetime.fromisoformat(date.replace("Z", "+00:00"))
@@ -1020,8 +1028,13 @@ except ValueError:
 if not version.get("goVersion"):
     raise SystemExit("candidate reports an empty Go version")
 identity["build"] = version
+capabilities = ["cloud-client"]
+if qualification == "1" and scope == "airplane":
+    capabilities.append("airplane")
 identity["qualification"] = {
     "requested": qualification == "1",
+    "scope": scope if qualification == "1" else None,
+    "capabilities": capabilities if qualification == "1" else [],
     "expectedVersion": expected_version or None,
     "expectedCommit": expected_commit or None,
 }
@@ -1035,17 +1048,237 @@ print(f"candidate identity: {identity_path}")
 PY
 }
 
+stage_qualification_archive() {
+  local source="$1"
+  local expected_sha256="$2"
+  local destination="$3"
+  "$trusted_python" - "$source" "$expected_sha256" "$destination" <<'PY'
+import hashlib
+import os
+import re
+import stat
+import sys
+
+source, expected, destination = sys.argv[1:]
+if not os.path.isabs(source) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+    raise SystemExit("qualification archive requires an absolute path and canonical SHA-256")
+before = os.lstat(source)
+if not stat.S_ISREG(before.st_mode) or stat.S_IMODE(before.st_mode) & 0o022:
+    raise SystemExit("qualification archive must be a non-writable regular file")
+os.makedirs(os.path.dirname(destination), mode=0o700, exist_ok=True)
+flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+source_fd = os.open(source, flags)
+hasher = hashlib.sha256()
+try:
+    opened = os.fstat(source_fd)
+    if (opened.st_dev, opened.st_ino, opened.st_size) != (before.st_dev, before.st_ino, before.st_size):
+        raise SystemExit("qualification archive changed while opening")
+    output_fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        while chunk := os.read(source_fd, 1024 * 1024):
+            hasher.update(chunk)
+            view = memoryview(chunk)
+            while view:
+                written = os.write(output_fd, view)
+                if written <= 0:
+                    raise SystemExit("could not stage qualification archive")
+                view = view[written:]
+        os.fsync(output_fd)
+    finally:
+        os.close(output_fd)
+    after = os.fstat(source_fd)
+finally:
+    os.close(source_fd)
+if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns):
+    raise SystemExit("qualification archive changed while copying")
+if hasher.hexdigest() != expected:
+    raise SystemExit("qualification archive SHA-256 mismatch")
+PY
+}
+
+capture_cloud_qualification_identity() {
+  local runner_path="$1"
+  local identity_path="$2"
+  "$trusted_python" - "$runner_path" "$identity_path" <<'PY'
+import hashlib
+import json
+import os
+import stat
+import sys
+
+runner_path, identity_path = sys.argv[1:]
+if not os.path.isabs(runner_path) or os.path.basename(runner_path) != "e2e-airplane-harnesses":
+    raise SystemExit("qualification runner path is invalid")
+before = os.lstat(runner_path)
+if not stat.S_ISREG(before.st_mode) or stat.S_IMODE(before.st_mode) != 0o755 or before.st_nlink != 1 or before.st_size <= 0 or before.st_size > 2 * 1024 * 1024:
+    raise SystemExit("qualification runner identity is unsafe")
+flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+fd = os.open(runner_path, flags)
+hasher = hashlib.sha256()
+try:
+    opened = os.fstat(fd)
+    if (opened.st_dev, opened.st_ino, opened.st_mode, opened.st_size) != (before.st_dev, before.st_ino, before.st_mode, before.st_size):
+        raise SystemExit("qualification runner changed while opening")
+    size = 0
+    while chunk := os.read(fd, 65536):
+        size += len(chunk)
+        hasher.update(chunk)
+    after = os.fstat(fd)
+finally:
+    os.close(fd)
+current = os.lstat(runner_path)
+fields = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")
+if any(getattr(before, field) != getattr(after, field) for field in fields) or any(getattr(after, field) != getattr(current, field) for field in fields) or size != before.st_size:
+    raise SystemExit("qualification runner changed while hashing")
+identity = {
+    "schema": "s46.qualification-cloud-inputs.v1",
+    "runner": {"name": "e2e-airplane-harnesses", "sha256": hasher.hexdigest(), "size": size},
+}
+raw = (json.dumps(identity, indent=2, sort_keys=True) + "\n").encode()
+fd = os.open(identity_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0), 0o600)
+try:
+    os.write(fd, raw)
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PY
+}
+
+exercise_release_cloud_client() {
+  local probe_dir="$sandbox/cloud-client-probe"
+  local endpoint_file="$probe_dir/endpoint"
+  local receipt_file="$probe_dir/receipt.json"
+  local server_stdout="$probe_dir/server.out"
+  local server_stderr="$probe_dir/server.err"
+  local client_stdout="$probe_dir/client.out"
+  local client_stderr="$probe_dir/client.err"
+  local endpoint="" server_pid command_status server_status attempt
+  mkdir -m 0700 "$probe_dir"
+  "$trusted_python" - "$endpoint_file" "$receipt_file" >"$server_stdout" 2>"$server_stderr" <<'PY' &
+import http.server
+import json
+import os
+import sys
+
+endpoint_path, receipt_path = sys.argv[1:]
+expected = {
+    "email": "qualification-client@s46.invalid",
+    "deviceId": "qualification-client",
+    "deviceName": "Native Qualification Client",
+}
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        if self.path != "/v1/auth/device/start":
+            self.send_error(404)
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "-1"))
+        except ValueError:
+            length = -1
+        raw = self.rfile.read(length) if 0 <= length <= 65536 else b""
+        try:
+            body = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            body = None
+        if (
+            body != expected
+            or self.headers.get("Accept") != "application/json"
+            or self.headers.get("Content-Type") != "application/json"
+            or self.headers.get("User-Agent") != "s46-cli"
+            or self.headers.get("Authorization") is not None
+        ):
+            self.send_error(400)
+            return
+        response = json.dumps(
+            {"error": {"code": "not_invited", "message": "qualification client is not invited"}},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        self.send_response(403)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(response)))
+        self.end_headers()
+        self.wfile.write(response)
+        self.server.proved = True
+
+    def log_message(self, _format, *_args):
+        return
+
+server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+server.timeout = 20
+server.proved = False
+endpoint = f"http://127.0.0.1:{server.server_address[1]}\n".encode()
+fd = os.open(endpoint_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+try:
+    os.write(fd, endpoint)
+    os.fsync(fd)
+finally:
+    os.close(fd)
+server.handle_request()
+server.server_close()
+if not server.proved:
+    raise SystemExit("release client did not complete the exact qualification request")
+receipt = (json.dumps({"schema": "s46.qualification-cloud-client.v1", "request": expected, "responseStatus": 403}, sort_keys=True, separators=(",", ":")) + "\n").encode()
+fd = os.open(receipt_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+try:
+    os.write(fd, receipt)
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PY
+  server_pid=$!
+  for ((attempt = 1; attempt <= 100; attempt++)); do
+    if [ -s "$endpoint_file" ]; then
+      endpoint="$(tr -d '\r\n' <"$endpoint_file")"
+      break
+    fi
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+      break
+    fi
+    sleep 0.05
+  done
+  if [ -z "$endpoint" ]; then
+    wait "$server_pid" 2>/dev/null || true
+    cat "$server_stderr" >&2 || true
+    fail "could not start bounded loopback server for release cloud-client qualification"
+  fi
+  set +e
+  S46_API_BASE_URL="$endpoint" run_candidate_bounded 20 262144 "$client_stdout" "$client_stderr" \
+    --json login \
+    --user qualification-client@s46.invalid \
+    --device-id qualification-client \
+    --device-name "Native Qualification Client"
+  command_status=$?
+  wait "$server_pid"
+  server_status=$?
+  set -e
+  if [ "$command_status" -eq 0 ]; then
+    fail "release cloud client accepted the qualification refusal"
+  fi
+  if [ "$server_status" -ne 0 ] || [ ! -s "$receipt_file" ]; then
+    cat "$server_stderr" >&2 || true
+    fail "release cloud client did not complete the exact bounded request/response"
+  fi
+  if ! grep -Fqi 'not invited' "$client_stderr"; then
+    cat "$client_stderr" >&2 || true
+    fail "release cloud client did not decode the structured qualification refusal"
+  fi
+  log "release cloud client completed the exact bounded loopback request/response"
+}
+
 capture_qualification_runtime_identities() {
   local model_path="$1"
   local model_sha256="$2"
   local llama_path="$3"
   local llama_sha256="$4"
-  local gateway_path="$5"
-  local gateway_sha256="$6"
-  local runner_path="$7"
-  local identity_path="$8"
-  local runtime_dir="$9"
-  "$trusted_python" - "$model_path" "$model_sha256" "$llama_path" "$llama_sha256" "$gateway_path" "$gateway_sha256" "$runner_path" "$identity_path" "$runtime_dir" <<'PY'
+  local llama_inventory_sha256="$5"
+  local gateway_path="$6"
+  local gateway_sha256="$7"
+  local runner_path="$8"
+  local identity_path="$9"
+  local runtime_dir="${10}"
+  "$trusted_python" - "$model_path" "$model_sha256" "$llama_path" "$llama_sha256" "$llama_inventory_sha256" "$gateway_path" "$gateway_sha256" "$runner_path" "$identity_path" "$runtime_dir" <<'PY'
 import hashlib
 import json
 import os
@@ -1053,8 +1286,8 @@ import re
 import stat
 import sys
 
-(model_path, model_sha256, llama_path, llama_sha256, gateway_path,
- gateway_sha256, runner_path, identity_path, runtime_dir) = sys.argv[1:]
+(model_path, model_sha256, llama_path, llama_sha256, llama_inventory_sha256,
+ gateway_path, gateway_sha256, runner_path, identity_path, runtime_dir) = sys.argv[1:]
 expected_model_name = "Devstral-Small-2-24B-Instruct-2512-Q4_K_M.gguf"
 expected_model_sha256 = "d14ba9edee1bb4c4996a726deb81e49ae81800a3216f0774634238c380aee496"
 expected_model_size = 14334446752
@@ -1075,6 +1308,7 @@ for label, path in {
 for label, digest in {
     "model GGUF": model_sha256,
     "llama-server": llama_sha256,
+    "llama.cpp inventory": llama_inventory_sha256,
     "gateway": gateway_sha256,
 }.items():
     if not re.fullmatch(r"[0-9a-f]{64}", digest):
@@ -1154,6 +1388,58 @@ def inspect_and_copy(label, path, expected, maximum, executable, destination=Non
             raise SystemExit(f"staged {label} has invalid identity")
     return {"name": os.path.basename(path), "sha256": digest, "size": total}
 
+
+def inspect_runtime_inventory(root, expected):
+    records = []
+    count = 0
+    root_info = os.lstat(root)
+    if not stat.S_ISDIR(root_info.st_mode) or stat.S_IMODE(root_info.st_mode) != 0o555:
+        raise SystemExit("llama.cpp runtime root is not a non-writable real directory")
+    for base, directories, files in os.walk(root, topdown=True, followlinks=False):
+        for name in directories + files:
+            path = os.path.join(base, name)
+            relative = os.path.relpath(path, root).replace(os.sep, "/")
+            info = os.lstat(path)
+            mode = stat.S_IMODE(info.st_mode)
+            if stat.S_ISLNK(info.st_mode):
+                target = os.readlink(path)
+                if not target or target in {".", ".."} or os.path.basename(target) != target:
+                    raise SystemExit(f"unsafe llama.cpp runtime symlink: {relative}")
+                records.append(f"symlink\t{relative}\t{target}\n")
+            elif stat.S_ISDIR(info.st_mode):
+                if mode != 0o555:
+                    raise SystemExit(f"writable llama.cpp runtime directory: {relative}")
+                records.append(f"dir\t{relative}\t0555\n")
+            elif stat.S_ISREG(info.st_mode):
+                if mode not in {0o444, 0o555}:
+                    raise SystemExit(f"writable or unexpected llama.cpp runtime file mode: {relative}")
+                if info.st_nlink != 1:
+                    raise SystemExit(f"llama.cpp runtime file has multiple hard links: {relative}")
+                fd = os.open(path, flags)
+                hasher = hashlib.sha256()
+                total = 0
+                try:
+                    opened = os.fstat(fd)
+                    if (opened.st_dev, opened.st_ino, opened.st_size) != (info.st_dev, info.st_ino, info.st_size):
+                        raise SystemExit(f"llama.cpp runtime entry changed while opening: {relative}")
+                    while chunk := os.read(fd, 1024 * 1024):
+                        total += len(chunk)
+                        hasher.update(chunk)
+                    after = os.fstat(fd)
+                finally:
+                    os.close(fd)
+                if (after.st_dev, after.st_ino, after.st_size) != (info.st_dev, info.st_ino, info.st_size) or total != info.st_size:
+                    raise SystemExit(f"llama.cpp runtime entry changed while hashing: {relative}")
+                records.append(f"file\t{relative}\t{mode:04o}\t{total}\t{hasher.hexdigest()}\n")
+            else:
+                raise SystemExit(f"unsupported llama.cpp runtime entry: {relative}")
+            count += 1
+    digest = hashlib.sha256("".join(sorted(records)).encode()).hexdigest()
+    if digest != expected:
+        raise SystemExit(f"llama.cpp runtime inventory SHA-256 mismatch: {digest}")
+    return {"schema": "s46.llamacpp-runtime-inventory.v1", "sha256": digest, "entries": count}
+
+
 os.makedirs(runtime_dir, mode=0o700, exist_ok=False)
 llama_destination = os.path.join(runtime_dir, "llama-server")
 gateway_destination = os.path.join(runtime_dir, "s46-gateway")
@@ -1161,6 +1447,7 @@ identity = {
     "schema": "s46.qualification-runtime-inputs.v1",
     "model": inspect_and_copy("model GGUF", model_path, model_sha256, expected_model_size, False, expected_size=expected_model_size),
     "llamaServer": inspect_and_copy("llama-server", llama_path, llama_sha256, max_service_size, True, llama_destination),
+    "llamaRuntimeInventory": inspect_runtime_inventory(os.path.dirname(llama_path), llama_inventory_sha256),
     "gateway": inspect_and_copy("gateway", gateway_path, gateway_sha256, max_service_size, True, gateway_destination),
     "runner": inspect_and_copy("qualification runner", runner_path, None, max_runner_size, True),
 }
@@ -1186,7 +1473,8 @@ PY
 write_qualification_cleanup_identity() {
   local tracked="$1"
   local destination="$2"
-  "$trusted_python" - "$tracked" "$destination" "$runner_identity" <<'PY'
+  local scope="$3"
+  "$trusted_python" - "$tracked" "$destination" "$runner_identity" "$scope" <<'PY'
 import datetime
 import hashlib
 import json
@@ -1194,7 +1482,7 @@ import os
 import re
 import sys
 
-tracked_path, destination, runner_id = sys.argv[1:]
+tracked_path, destination, runner_id, scope = sys.argv[1:]
 if not re.fullmatch(r"[0-9]+-[0-9a-f]{32}", runner_id):
     raise SystemExit("invalid qualification runner identity")
 with open(tracked_path, "rb") as source:
@@ -1213,10 +1501,16 @@ for line in lines:
         if len(fields) != 5 or fields[4] not in {"llama-server", "s46-gateway"}:
             raise SystemExit("tracked service entry is invalid")
         services.add(fields[4])
-if counts["runner"] != 1 or counts["harness"] != 3 or counts["service"] < 2:
-    raise SystemExit(f"tracked process cohort is incomplete: {counts}")
-if services != {"llama-server", "s46-gateway"}:
-    raise SystemExit("tracked process cohort does not include both runtime services")
+if scope == "airplane":
+    if counts["runner"] != 1 or counts["harness"] != 3 or counts["service"] < 2:
+        raise SystemExit(f"tracked airplane process cohort is incomplete: {counts}")
+    if services != {"llama-server", "s46-gateway"}:
+        raise SystemExit("tracked process cohort does not include both runtime services")
+elif scope == "cloud":
+    if counts != {"runner": 1, "harness": 0, "service": 0} or services:
+        raise SystemExit(f"tracked cloud process cohort is incomplete: {counts}")
+else:
+    raise SystemExit("qualification scope is invalid")
 identity = {
     "schema": "s46.qualification-cleanup.v1",
     "runnerId": runner_id,
@@ -1262,8 +1556,31 @@ with open(runtime_identity_path, encoding="utf-8") as source:
     runtime_identity = json.load(source)
 with open(cleanup_identity_path, encoding="utf-8") as source:
     cleanup_identity = json.load(source)
-if runtime_identity.get("schema") != "s46.qualification-runtime-inputs.v1":
-    raise SystemExit("qualification runtime identity has the wrong schema")
+qualification = identity.get("qualification", {})
+scope = qualification.get("scope")
+if scope == "airplane":
+    if runtime_identity.get("schema") != "s46.qualification-runtime-inputs.v1":
+        raise SystemExit("airplane qualification runtime identity has the wrong schema")
+    capabilities = ["cloud-client", "airplane"]
+    harnesses = ["pi", "claude-code", "codex"]
+    runtime = {
+        "model": runtime_identity["model"],
+        "llamaServer": runtime_identity["llamaServer"],
+        "llamaRuntimeInventory": runtime_identity["llamaRuntimeInventory"],
+        "gateway": runtime_identity["gateway"],
+    }
+    if cleanup_identity.get("harnessProcessCount") != 3 or cleanup_identity.get("serviceProcessCount", 0) < 2:
+        raise SystemExit("airplane qualification process cohort is incomplete")
+elif scope == "cloud":
+    if runtime_identity.get("schema") != "s46.qualification-cloud-inputs.v1":
+        raise SystemExit("cloud qualification identity has the wrong schema")
+    capabilities = ["cloud-client"]
+    harnesses = []
+    runtime = None
+    if cleanup_identity.get("processCount") != 1 or cleanup_identity.get("harnessProcessCount") != 0 or cleanup_identity.get("serviceProcessCount") != 0:
+        raise SystemExit("cloud qualification process cohort is incomplete")
+else:
+    raise SystemExit("qualification scope is invalid")
 if cleanup_identity.get("schema") != "s46.qualification-cleanup.v1" or cleanup_identity.get("verifiedNoSurvivors") is not True:
     raise SystemExit("qualification cleanup identity is incomplete")
 expected_name = os.path.basename(identity["source"]) + ".qualification.json"
@@ -1271,7 +1588,6 @@ if os.path.basename(destination) != expected_name:
     raise SystemExit(f"qualification evidence filename must be {expected_name}")
 if identity.get("kind") != "archive":
     raise SystemExit("release qualification evidence requires a validated release archive")
-qualification = identity.get("qualification", {})
 if qualification.get("requested") is not True:
     raise SystemExit("cannot write qualification evidence for a non-qualification run")
 evidence = {
@@ -1295,11 +1611,30 @@ evidence = {
         "expectedCommit": qualification["expectedCommit"],
         "networkIsolation": "external",
         "filesystemIsolation": "external",
-        "airplaneHarnesses": ["pi", "claude-code", "codex"],
-        "runtime": {
-            "model": runtime_identity["model"],
-            "llamaServer": runtime_identity["llamaServer"],
-            "gateway": runtime_identity["gateway"],
+        "capabilities": capabilities,
+        "airplaneHarnesses": harnesses,
+        "execution": {
+            "runnerOs": os.environ["S46_E2E_RUNNER_OS"],
+            "runnerArch": os.environ["S46_E2E_RUNNER_ARCH"],
+            "osVersion": os.environ["S46_E2E_OS_VERSION"],
+            "runnerEnvironment": os.environ["S46_E2E_RUNNER_ENVIRONMENT"],
+            "runnerName": os.environ["S46_E2E_RUNNER_NAME"],
+            "workflowRef": os.environ["S46_E2E_WORKFLOW_REF"],
+            "workflowSha": os.environ["S46_E2E_WORKFLOW_SHA"],
+            "runId": os.environ["S46_E2E_RUN_ID"],
+            "runAttempt": os.environ["S46_E2E_RUN_ATTEMPT"],
+            "environment": os.environ["S46_E2E_ENVIRONMENT"],
+            "environmentApprover": os.environ["S46_E2E_ENVIRONMENT_APPROVER"],
+            "environmentReviewers": os.environ["S46_E2E_ENVIRONMENT_REVIEWERS"].split(","),
+            "environmentPreventSelfReview": os.environ["S46_E2E_ENVIRONMENT_PREVENT_SELF_REVIEW"] == "true",
+            "environmentAdminsBypass": os.environ["S46_E2E_ENVIRONMENT_ADMINS_BYPASS"] == "true",
+            "releaseApiVersion": os.environ["S46_E2E_RELEASE_API_VERSION"],
+            "candidateReleaseId": os.environ["S46_E2E_CANDIDATE_RELEASE_ID"],
+            "candidateDraftAssetEtagCas": os.environ["S46_E2E_CANDIDATE_DRAFT_ASSET_ETAG_CAS"] == "true",
+            "candidateDraftStaleIfMatchStatus": int(os.environ["S46_E2E_CANDIDATE_DRAFT_STALE_IF_MATCH_STATUS"]),
+            "environmentApprovalSha256": os.environ["S46_E2E_ENVIRONMENT_APPROVAL_SHA256"],
+            "runnerIdentitySha256": os.environ["S46_E2E_RUNNER_IDENTITY_SHA256"],
+            "isolationProfileSha256": os.environ["S46_E2E_ISOLATION_PROFILE_SHA256"],
         },
         "runner": {
             "script": runtime_identity["runner"],
@@ -1313,6 +1648,8 @@ evidence = {
         },
     },
 }
+if runtime is not None:
+    evidence["qualification"]["runtime"] = runtime
 flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
 try:
     output_fd = os.open(destination, flags, 0o600)
@@ -1378,32 +1715,42 @@ assert_file_matches() {
 }
 
 scan_airplane_services() {
-  "$trusted_python" - "$trusted_ps" <<'PY'
+  "$trusted_python" - "$trusted_ps" "${1:-}" <<'PY'
 import os
 import re
 import subprocess
 import sys
 
-ps_path = sys.argv[1]
+ps_path, include_pending = sys.argv[1:]
 ps_arguments = ["eww", "-axo", "pid=,pgid=,comm=,args="] if sys.platform == "darwin" else ["eww", "-e", "-o", "pid=,pgid=,comm=,args="]
 try:
-    process = subprocess.run(
+    process = subprocess.Popen(
         [ps_path, *ps_arguments],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        timeout=10,
-        check=False,
     )
-except (OSError, subprocess.TimeoutExpired) as error:
+    try:
+        stdout, stderr = process.communicate(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate()
+        raise SystemExit("cannot enumerate airplane services: ps timed out")
+except OSError as error:
     raise SystemExit(f"cannot enumerate airplane services: {error}")
 if process.returncode != 0:
-    raise SystemExit(f"cannot enumerate airplane services: ps exited {process.returncode}: {process.stderr[:512]}")
-for line in process.stdout.splitlines():
+    raise SystemExit(f"cannot enumerate airplane services: ps exited {process.returncode}: {stderr[:512]}")
+ignored = {os.getpid(), os.getppid(), process.pid}
+for line in stdout.splitlines():
     fields = line.strip().split(None, 3)
     if len(fields) < 3:
         continue
     pid, pgid, command = fields[:3]
+    try:
+        if int(pid) in ignored:
+            continue
+    except ValueError:
+        continue
     arguments = fields[3] if len(fields) == 4 else ""
     names = {os.path.basename(command)}
     if arguments:
@@ -1412,9 +1759,11 @@ for line in process.stdout.splitlines():
                 break
             names.add(os.path.basename(argument))
     kind = next((name for name in ("llama-server", "s46-gateway") if name in names), "")
+    identity = re.search(r"(?:^| )S46_E2E_RUNNER_ID=([^ ]+)", arguments)
     if kind:
-        identity = re.search(r"(?:^| )S46_E2E_RUNNER_ID=([^ ]+)", arguments)
         print(pid, pgid, kind, identity.group(1) if identity else "-")
+    elif include_pending == "include-pending" and identity:
+        print(pid, pgid, "-", identity.group(1))
 PY
 }
 
@@ -1526,47 +1875,72 @@ capture_initial_service_state() {
   if ! scan_airplane_services >"$sandbox/baseline-services.tsv"; then
     fail "could not enumerate baseline llama-server and s46-gateway services"
   fi
-  if [ "$qualification" = "1" ] && [ -s "$sandbox/baseline-services.tsv" ]; then
+  if [ "$qualification" = "1" ] && [ "$qualification_scope" = "airplane" ] && [ -s "$sandbox/baseline-services.tsv" ]; then
     fail "release qualification requires no pre-existing llama-server or s46-gateway services"
   fi
 }
 
 record_new_airplane_services() {
-  local pid pgid kind owner result=0 snapshot
-  if ! snapshot="$(scan_airplane_services)"; then
-    printf '[s46-e2e] error: could not enumerate detached airplane services\n' >&2
-    return 1
-  fi
-  while read -r pid pgid kind owner; do
-    [ -n "$pid" ] || continue
-    if is_baseline_service "$pid" || is_tracked_service "$pid"; then
-      continue
+  local pid pgid kind owner snapshot
+  local attempt added pending result=0 stable=0
+  for ((attempt = 1; attempt <= 40; attempt++)); do
+    if ! snapshot="$(scan_airplane_services include-pending)"; then
+      printf '[s46-e2e] error: could not enumerate detached airplane services\n' >&2
+      return 1
     fi
-    if [ "$owner" != "$runner_identity" ]; then
-      if [ "$qualification" = "1" ]; then
-        printf '[s46-e2e] error: new detached %s service pid %s is not bound to runner %s\n' "$kind" "$pid" "$runner_identity" >&2
-        result=1
+    added=0
+    pending=0
+    while read -r pid pgid kind owner; do
+      [ -n "$pid" ] || continue
+      if [ "$kind" = "-" ]; then
+        if [ "$owner" = "$runner_identity" ]; then
+          pending=1
+        fi
+        continue
       fi
-      continue
-    fi
-    case "$pid:$pgid" in
-      *[!0-9:]*|*:|:*)
-        printf '[s46-e2e] error: invalid detached service process identity: %s %s %s\n' "$pid" "$pgid" "$kind" >&2
+      if is_baseline_service "$pid" || is_tracked_service "$pid"; then
+        continue
+      fi
+      if [ "$owner" != "$runner_identity" ]; then
+        if [ "$qualification" = "1" ]; then
+          printf '[s46-e2e] error: new detached %s service pid %s is not bound to runner %s\n' "$kind" "$pid" "$runner_identity" >&2
+          result=1
+        fi
+        continue
+      fi
+      case "$pid:$pgid" in
+        *[!0-9:]*|*:|:*)
+          printf '[s46-e2e] error: invalid detached service process identity: %s %s %s\n' "$pid" "$pgid" "$kind" >&2
+          result=1
+          continue
+          ;;
+      esac
+      if [ "$pgid" -le 1 ] || [ "$pgid" != "$pid" ]; then
+        printf '[s46-e2e] error: detached %s service pid %s is not a safe process-group leader (group %s)\n' "$kind" "$pid" "$pgid" >&2
         result=1
         continue
-        ;;
-    esac
-    if [ "$pgid" -le 1 ] || [ "$pgid" != "$pid" ]; then
-      printf '[s46-e2e] error: detached %s service pid %s is not a safe process-group leader (group %s)\n' "$kind" "$pid" "$pgid" >&2
-      result=1
-      continue
+      fi
+      tracked_service_pids+=("$pid")
+      tracked_service_groups+=("$pgid")
+      tracked_service_kinds+=("$kind")
+      printf '%s\tservice\t%s\t%s\t%s\n' "$runner_identity" "$pid" "$pgid" "$kind" >>"$sandbox/tracked-processes.tsv"
+      log "tracking runner $runner_identity detached $kind service pid $pid process-group $pgid"
+      added=1
+    done <<<"$snapshot"
+    if [ "$pending" -eq 0 ] && [ "$added" -eq 0 ]; then
+      stable=$((stable + 1))
+      if [ "$stable" -ge 2 ]; then
+        return "$result"
+      fi
+    else
+      stable=0
     fi
-    tracked_service_pids+=("$pid")
-    tracked_service_groups+=("$pgid")
-    tracked_service_kinds+=("$kind")
-    printf '%s\tservice\t%s\t%s\t%s\n' "$runner_identity" "$pid" "$pgid" "$kind" >>"$sandbox/tracked-processes.tsv"
-    log "tracking runner $runner_identity detached $kind service pid $pid process-group $pgid"
-  done <<<"$snapshot"
+    sleep 0.05
+  done
+  if [ "$pending" -ne 0 ] && [ "$qualification" = "1" ]; then
+    printf '[s46-e2e] error: runner-owned detached process never reached a classifiable service identity\n' >&2
+    return 1
+  fi
   return "$result"
 }
 
@@ -1738,7 +2112,7 @@ cleanup_and_verify_runner_processes() {
   assert_no_new_airplane_services
   if [ "$qualification" = "1" ]; then
     [ -n "$qualification_cleanup_identity" ] || fail "qualification cleanup identity path is unavailable"
-    write_qualification_cleanup_identity "$sandbox/tracked-processes.tsv" "$qualification_cleanup_identity"
+    write_qualification_cleanup_identity "$sandbox/tracked-processes.tsv" "$qualification_cleanup_identity" "$qualification_scope"
   fi
   log "runner $runner_identity has no surviving tracked process groups, marker-bearing descendants, or newly detached airplane services"
 }
@@ -1799,16 +2173,41 @@ candidate_sha256="${S46_E2E_CANDIDATE_SHA256:-}"
 network_isolation="${S46_E2E_NETWORK_ISOLATION:-proxy}"
 filesystem_isolation="${S46_E2E_FILESYSTEM_ISOLATION:-none}"
 qualification="${S46_E2E_QUALIFICATION:-0}"
+qualification_scope="${S46_E2E_QUALIFICATION_SCOPE:-airplane}"
 expected_version="${S46_E2E_EXPECTED_VERSION:-}"
 expected_commit="${S46_E2E_EXPECTED_COMMIT:-}"
 qualification_evidence="${S46_E2E_QUALIFICATION_EVIDENCE:-}"
 verify_candidate_only="${S46_E2E_VERIFY_CANDIDATE_ONLY:-0}"
 qualification_model_path="${S46_E2E_MODEL_GGUF:-}"
 qualification_model_sha256="${S46_E2E_MODEL_SHA256:-}"
-qualification_llama_path="${S46_E2E_LLAMA_SERVER:-}"
+qualification_llama_archive="${S46_E2E_LLAMA_ARCHIVE:-}"
+qualification_llama_archive_sha256="${S46_E2E_LLAMA_ARCHIVE_SHA256:-}"
 qualification_llama_sha256="${S46_E2E_LLAMA_SERVER_SHA256:-}"
-qualification_gateway_path="${S46_E2E_GATEWAY_BINARY:-}"
+qualification_llama_inventory_sha256="${S46_E2E_LLAMA_INVENTORY_SHA256:-}"
+qualification_gateway_archive="${S46_E2E_GATEWAY_ARCHIVE:-}"
+qualification_gateway_archive_sha256="${S46_E2E_GATEWAY_ARCHIVE_SHA256:-}"
 qualification_gateway_sha256="${S46_E2E_GATEWAY_SHA256:-}"
+qualification_runner_os="${S46_E2E_RUNNER_OS:-}"
+qualification_runner_arch="${S46_E2E_RUNNER_ARCH:-}"
+qualification_os_version="${S46_E2E_OS_VERSION:-}"
+qualification_runner_environment="${S46_E2E_RUNNER_ENVIRONMENT:-}"
+qualification_runner_name="${S46_E2E_RUNNER_NAME:-}"
+qualification_workflow_ref="${S46_E2E_WORKFLOW_REF:-}"
+qualification_workflow_sha="${S46_E2E_WORKFLOW_SHA:-}"
+qualification_run_id="${S46_E2E_RUN_ID:-}"
+qualification_run_attempt="${S46_E2E_RUN_ATTEMPT:-}"
+qualification_environment="${S46_E2E_ENVIRONMENT:-}"
+qualification_environment_approver="${S46_E2E_ENVIRONMENT_APPROVER:-}"
+qualification_environment_reviewers="${S46_E2E_ENVIRONMENT_REVIEWERS:-}"
+qualification_environment_prevent_self_review="${S46_E2E_ENVIRONMENT_PREVENT_SELF_REVIEW:-}"
+qualification_environment_admins_bypass="${S46_E2E_ENVIRONMENT_ADMINS_BYPASS:-}"
+qualification_release_api_version="${S46_E2E_RELEASE_API_VERSION:-}"
+qualification_candidate_release_id="${S46_E2E_CANDIDATE_RELEASE_ID:-}"
+qualification_candidate_draft_asset_etag_cas="${S46_E2E_CANDIDATE_DRAFT_ASSET_ETAG_CAS:-}"
+qualification_candidate_draft_stale_if_match_status="${S46_E2E_CANDIDATE_DRAFT_STALE_IF_MATCH_STATUS:-}"
+qualification_environment_approval_sha256="${S46_E2E_ENVIRONMENT_APPROVAL_SHA256:-}"
+qualification_runner_identity_sha256="${S46_E2E_RUNNER_IDENTITY_SHA256:-}"
+qualification_isolation_profile_sha256="${S46_E2E_ISOLATION_PROFILE_SHA256:-}"
 resolve_trusted_support_tools
 runner_script="$("$trusted_python" - "$0" <<'PY'
 import os, sys
@@ -1839,6 +2238,10 @@ case "$verify_candidate_only" in
   0|1) ;;
   *) fail "S46_E2E_VERIFY_CANDIDATE_ONLY must be 0 or 1" ;;
 esac
+case "$qualification_scope" in
+  cloud|airplane) ;;
+  *) fail "S46_E2E_QUALIFICATION_SCOPE must be cloud or airplane" ;;
+esac
 if [ "$qualification" = "1" ] && [ "$network_isolation" != "external" ]; then
   fail "S46_E2E_QUALIFICATION=1 requires a pre-established external OS-level egress block"
 fi
@@ -1849,13 +2252,38 @@ if [ "$qualification" = "1" ]; then
   [ -n "$expected_version" ] || fail "S46_E2E_QUALIFICATION=1 requires S46_E2E_EXPECTED_VERSION"
   [ -n "$expected_commit" ] || fail "S46_E2E_QUALIFICATION=1 requires S46_E2E_EXPECTED_COMMIT"
   [ -n "$qualification_evidence" ] || fail "S46_E2E_QUALIFICATION=1 requires S46_E2E_QUALIFICATION_EVIDENCE"
-  [ "$verify_candidate_only" = "0" ] || fail "S46_E2E_QUALIFICATION=1 cannot be combined with S46_E2E_VERIFY_CANDIDATE_ONLY=1"
-  [ -n "$qualification_model_path" ] || fail "S46_E2E_QUALIFICATION=1 requires S46_E2E_MODEL_GGUF"
+  for value in "$qualification_runner_os" "$qualification_runner_arch" "$qualification_os_version" "$qualification_runner_environment" "$qualification_runner_name" "$qualification_workflow_ref" "$qualification_workflow_sha" "$qualification_run_id" "$qualification_run_attempt" "$qualification_environment" "$qualification_environment_approver" "$qualification_environment_reviewers" "$qualification_environment_prevent_self_review" "$qualification_environment_admins_bypass" "$qualification_release_api_version" "$qualification_candidate_release_id" "$qualification_candidate_draft_asset_etag_cas" "$qualification_candidate_draft_stale_if_match_status"; do
+    [ -n "$value" ] || fail "qualification requires complete runner, OS, workflow, run, and environment identity"
+  done
+  [ "$qualification_environment_reviewers" = "goncalossilva" ] || fail "qualification requires the exact protected-environment reviewer set"
+  [ "$qualification_environment_prevent_self_review" = "true" ] || fail "qualification environment must prevent self-review"
+  [ "$qualification_environment_admins_bypass" = "false" ] || fail "qualification environment must prevent administrator bypass"
+  [ "$qualification_release_api_version" = "2022-11-28" ] || fail "qualification requires the approved GitHub release API version"
+  case "$qualification_candidate_release_id" in *[!0-9]*|"") fail "qualification requires the exact numeric candidate release id" ;; esac
+  [ "$qualification_candidate_draft_asset_etag_cas" = "true" ] || fail "qualification requires successful candidate draft asset-sensitive ETag CAS proof"
+  [ "$qualification_candidate_draft_stale_if_match_status" = "412" ] || fail "qualification requires stale candidate draft If-Match rejection"
+  case "$qualification_run_id:$qualification_run_attempt" in
+    *[!0-9:]*|*:|:*) fail "qualification workflow run identity must be numeric" ;;
+  esac
+  case "$qualification_environment_approval_sha256:$qualification_runner_identity_sha256:$qualification_isolation_profile_sha256" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f]*:[0-9a-f][0-9a-f][0-9a-f][0-9a-f]*:[0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
+    *) fail "qualification requires environment approval, runner identity, and isolation profile SHA-256 identities" ;;
+  esac
+  case "$qualification_environment_approval_sha256$qualification_runner_identity_sha256$qualification_isolation_profile_sha256" in *[!0-9a-f]*) fail "qualification execution digests must be lowercase hexadecimal" ;; esac
+  [ "${#qualification_environment_approval_sha256}" -eq 64 ] && [ "${#qualification_runner_identity_sha256}" -eq 64 ] && [ "${#qualification_isolation_profile_sha256}" -eq 64 ] || fail "qualification execution digests must be SHA-256"
+fi
+if [ "$qualification" = "1" ] && [ "$qualification_scope" = "airplane" ]; then
+  [ "$verify_candidate_only" = "0" ] || fail "airplane qualification cannot be combined with S46_E2E_VERIFY_CANDIDATE_ONLY=1"
+  [ -n "$qualification_model_path" ] || fail "airplane qualification requires S46_E2E_MODEL_GGUF"
   [ -n "$qualification_model_sha256" ] || fail "S46_E2E_QUALIFICATION=1 requires S46_E2E_MODEL_SHA256"
-  [ -n "$qualification_llama_path" ] || fail "S46_E2E_QUALIFICATION=1 requires S46_E2E_LLAMA_SERVER"
+  [ -n "$qualification_llama_archive" ] || fail "S46_E2E_QUALIFICATION=1 requires S46_E2E_LLAMA_ARCHIVE"
+  [ -n "$qualification_llama_archive_sha256" ] || fail "S46_E2E_QUALIFICATION=1 requires S46_E2E_LLAMA_ARCHIVE_SHA256"
   [ -n "$qualification_llama_sha256" ] || fail "S46_E2E_QUALIFICATION=1 requires S46_E2E_LLAMA_SERVER_SHA256"
-  [ -n "$qualification_gateway_path" ] || fail "S46_E2E_QUALIFICATION=1 requires S46_E2E_GATEWAY_BINARY"
-  [ -n "$qualification_gateway_sha256" ] || fail "S46_E2E_QUALIFICATION=1 requires S46_E2E_GATEWAY_SHA256"
+  [ -n "$qualification_llama_inventory_sha256" ] || fail "S46_E2E_QUALIFICATION=1 requires S46_E2E_LLAMA_INVENTORY_SHA256"
+  [ "$qualification_llama_inventory_sha256" = "5188ea71039a80e56a3026fa4c7a823e6b550887a50475fe9c45001ee436c167" ] || fail "S46_E2E_LLAMA_INVENTORY_SHA256 does not match the reviewed candidate inventory"
+  [ -n "$qualification_gateway_archive" ] || fail "S46_E2E_QUALIFICATION=1 requires S46_E2E_GATEWAY_ARCHIVE"
+  [ -n "$qualification_gateway_archive_sha256" ] || fail "S46_E2E_QUALIFICATION=1 requires S46_E2E_GATEWAY_ARCHIVE_SHA256"
+  [ -n "$qualification_gateway_sha256" ] || fail "airplane qualification requires S46_E2E_GATEWAY_SHA256"
 fi
 
 mkdir -p "$sandbox/home" "$sandbox/bin" "$sandbox/project" "$sandbox/candidate" "$sandbox/invocations"
@@ -1881,19 +2309,6 @@ printf '%s\trunner\t%s\n' "$runner_identity" "$$" >"$sandbox/tracked-processes.t
 if [ "$qualification" = "1" ]; then
   qualification_runtime_identity="$sandbox/qualification-runtime-inputs.json"
   qualification_cleanup_identity="$sandbox/qualification-cleanup.json"
-  IFS=$'\t' read -r qualified_llama_server qualified_gateway_binary < <(
-    capture_qualification_runtime_identities \
-      "$qualification_model_path" \
-      "$qualification_model_sha256" \
-      "$qualification_llama_path" \
-      "$qualification_llama_sha256" \
-      "$qualification_gateway_path" \
-      "$qualification_gateway_sha256" \
-      "$runner_script" \
-      "$qualification_runtime_identity" \
-      "$sandbox/qualified-runtime"
-  )
-  [ -n "$qualified_llama_server" ] && [ -n "$qualified_gateway_binary" ] || fail "could not stage qualification runtime inputs"
 fi
 
 export HOME="$sandbox/home"
@@ -1902,12 +2317,11 @@ export XDG_DATA_HOME="$HOME/.local/share"
 export XDG_CACHE_HOME="$HOME/.cache"
 export S46_KEYRING_BACKEND=file
 export S46_SKIP_STARTUP_UPDATE_CHECK=1
-if [ "$qualification" = "1" ]; then
+if [ "$qualification" = "1" ] && [ "$qualification_scope" = "airplane" ]; then
   export S46_LOCAL_MODEL_PATH="$qualification_model_path"
   export S46_AIRPLANE_MODEL_PATH="$qualification_model_path"
   export S46_AIRPLANE_MODEL_DIR="$(dirname "$qualification_model_path")"
-  export S46_API_BINARY="$qualified_gateway_binary"
-  candidate_path="$sandbox/bin:$(dirname "$qualified_llama_server"):$PATH"
+  candidate_path="$sandbox/bin:$PATH"
 else
   export S46_AIRPLANE_MODEL_DIR="${S46_AIRPLANE_MODEL_DIR:-$host_home/.local/share/s46/models/devstral}"
   candidate_path="$sandbox/bin:$PATH"
@@ -1927,6 +2341,11 @@ unset OPENAI_API_KEY AZURE_OPENAI_API_KEY DEEPSEEK_API_KEY GEMINI_API_KEY GROQ_A
 unset MISTRAL_API_KEY TOGETHER_API_KEY FIREWORKS_API_KEY OPENROUTER_API_KEY
 unset XAI_API_KEY CEREBRAS_API_KEY KIMI_API_KEY MINIMAX_API_KEY ZAI_API_KEY
 
+if [ "$qualification" = "1" ] && [ "$qualification_scope" = "airplane" ]; then
+  stage_qualification_archive "$qualification_llama_archive" "$qualification_llama_archive_sha256" "$XDG_CACHE_HOME/s46/runtime/pinned-llama.cpp.tar.gz"
+  stage_qualification_archive "$qualification_gateway_archive" "$qualification_gateway_archive_sha256" "$XDG_CACHE_HOME/s46/gateway/pinned-release.tar.gz"
+fi
+
 install_candidate_path_runner
 install_smoke_proxy_poisoning
 capture_candidate_path_runner_identity
@@ -1941,8 +2360,27 @@ else
   log "filesystem isolation: identity and cleanup checks only; this mode cannot produce release qualification evidence"
 fi
 capture_initial_service_state
-verify_candidate_identity "$candidate_metadata" "$expected_version" "$expected_commit" "$qualification"
+verify_candidate_identity "$candidate_metadata" "$expected_version" "$expected_commit" "$qualification" "$qualification_scope"
 record_new_airplane_services
+if [ "$qualification" = "1" ]; then
+  exercise_release_cloud_client
+fi
+
+if [ "$qualification" = "1" ] && [ "$qualification_scope" = "cloud" ]; then
+  run_candidate_bounded 10 262144 "$sandbox/cloud-help.out" "$sandbox/cloud-help.err" --help || fail "cloud qualification candidate --help failed"
+  run_candidate_bounded 10 262144 "$sandbox/cloud-connect-help.out" "$sandbox/cloud-connect-help.err" connect --help || fail "cloud qualification candidate connect --help failed"
+  if run_candidate_bounded 30 262144 "$sandbox/cloud-airplane.out" "$sandbox/cloud-airplane.err" airplane setup --yes; then
+    fail "unsupported platform unexpectedly completed airplane setup"
+  fi
+  if ! grep -qi 'unsupported' "$sandbox/cloud-airplane.out" "$sandbox/cloud-airplane.err"; then
+    fail "unsupported platform did not fail closed with an unsupported-airplane error"
+  fi
+  capture_cloud_qualification_identity "$runner_script" "$qualification_runtime_identity"
+  cleanup_and_verify_runner_processes
+  qualification_ready=1
+  log "cloud-client qualification completed without advertising airplane capability"
+  exit 0
+fi
 
 if [ "$verify_candidate_only" = "1" ]; then
   cleanup_and_verify_runner_processes
@@ -2068,6 +2506,38 @@ assert_airplane_harness_configs
 assert_airplane_mode_off_restores_configs
 enable_airplane_harness_configs
 assert_airplane_harness_configs
+if [ "$qualification" = "1" ]; then
+  IFS=$'\t' read -r installed_llama_server installed_gateway_binary < <("$trusted_python" - "$XDG_DATA_HOME/s46/runtime" <<'PY'
+import os
+import sys
+
+root = sys.argv[1]
+found = {"llama-server": [], "s46-gateway": []}
+for base, directories, files in os.walk(root, followlinks=False):
+    directories[:] = [name for name in directories if not os.path.islink(os.path.join(base, name))]
+    for name in files:
+        if name in found:
+            found[name].append(os.path.join(base, name))
+if any(len(paths) != 1 for paths in found.values()):
+    raise SystemExit(f"expected one installed runtime binary each, found {found!r}")
+print(found["llama-server"][0], found["s46-gateway"][0], sep="\t")
+PY
+  )
+  IFS=$'\t' read -r qualified_llama_server qualified_gateway_binary < <(
+    capture_qualification_runtime_identities \
+      "$qualification_model_path" \
+      "$qualification_model_sha256" \
+      "$installed_llama_server" \
+      "$qualification_llama_sha256" \
+      "$qualification_llama_inventory_sha256" \
+      "$installed_gateway_binary" \
+      "$qualification_gateway_sha256" \
+      "$runner_script" \
+      "$qualification_runtime_identity" \
+      "$sandbox/qualified-runtime"
+  )
+  [ -n "$qualified_llama_server" ] && [ -n "$qualified_gateway_binary" ] || fail "could not record installed qualification runtime identities"
+fi
 
 run_pi() {
   log "running Pi against airplane gateway"

@@ -1,0 +1,1079 @@
+name: qualify candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Final semantic release tag (for example v0.3.0)
+        required: true
+        type: string
+      prepared_commit:
+        description: Exact full origin/main commit used to build the candidate
+        required: true
+        type: string
+      target:
+        description: Native target to qualify; reruns never replace existing evidence
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - darwin-amd64
+          - darwin-arm64-airplane
+          - linux-amd64
+          - linux-arm64
+          - qualification-signatures
+      qualification_signatures:
+        description: JSON object mapping each qualification signature asset name to its one-line base64 signature; required only for qualification-signatures
+        required: false
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  deployments: read
+
+env:
+  GH_REPO: ${{ github.repository }}
+
+concurrency:
+  # Share one cross-commit writer lock with final publication. Candidate asset
+  # probes and append-only publishers must not race a release/Homebrew writer.
+  group: release-homebrew-writer
+  cancel-in-progress: false
+
+jobs:
+  candidate-draft-cas:
+    name: prove candidate draft CAS before native execution
+    if: inputs.target != 'qualification-signatures'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    outputs:
+      api_version: ${{ steps.probe.outputs.api_version }}
+      asset_etag_sensitive: ${{ steps.probe.outputs.asset_etag_sensitive }}
+      stale_if_match_status: ${{ steps.probe.outputs.stale_if_match_status }}
+      release_id: ${{ steps.probe.outputs.release_id }}
+    steps:
+      - name: Verify exact main workflow and candidate identity
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          PREPARED_COMMIT: ${{ inputs.prepared_commit }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_SHA" = "$PREPARED_COMMIT"
+          test "$GITHUB_WORKFLOW_REF" = "sovereign46/cli/.github/workflows/qualify-candidate.yml@refs/heads/main"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$PREPARED_COMMIT"
+          candidate_tag="candidate-$RELEASE_TAG-$PREPARED_COMMIT"
+          candidate_tag_object="$(gh api --method GET "repos/$GITHUB_REPOSITORY/git/ref/tags/$candidate_tag" --jq 'select(.object.type == "tag") | .object.sha')"
+          [[ "$candidate_tag_object" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
+          gh api --method GET "repos/$GITHUB_REPOSITORY/git/tags/$candidate_tag_object" \
+            | jq -e --arg tag "$candidate_tag" --arg commit "$PREPARED_COMMIT" '
+                .tag == $tag and
+                .object.type == "commit" and
+                .object.sha == $commit and
+                (.message | fromjson) == {schema:"s46.release-candidate-tag.v1",tag:$tag,commit:$commit}
+              ' >/dev/null
+          test "$(gh release view "$candidate_tag" --json isDraft --jq .isDraft)" = true
+          test "$(gh release view "$candidate_tag" --json targetCommitish --jq .targetCommitish)" = "$PREPARED_COMMIT"
+      - name: Empirically prove candidate draft asset-sensitive ETag CAS
+        id: probe
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          PREPARED_COMMIT: ${{ inputs.prepared_commit }}
+        run: |
+          set -euo pipefail
+          api_version=2022-11-28
+          reserved_prefix=s46-release-cas-probe-
+          candidate_tag="candidate-$RELEASE_TAG-$PREPARED_COMMIT"
+          version="${RELEASE_TAG#v}"
+          endpoint="repos/$GITHUB_REPOSITORY/releases/tags/$candidate_tag"
+          url="https://api.github.com/$endpoint"
+          work="$RUNNER_TEMP/candidate-cas"
+          mkdir -m 0700 "$work"
+          probe_asset_id=""
+          probe_name=""
+          cleanup() {
+            local cleanup_id="$probe_asset_id"
+            if [ -z "$cleanup_id" ] && [ -n "$probe_name" ]; then
+              cleanup_id="$(gh api "$endpoint" --jq ".assets[] | select(.name == \"$probe_name\") | .id" 2>/dev/null || true)"
+            fi
+            if [[ "$cleanup_id" =~ ^[0-9]+$ ]]; then
+              gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$cleanup_id" >/dev/null 2>&1 || true
+            fi
+          }
+          trap cleanup EXIT
+          fetch_release() {
+            local stem="$1"
+            curl --fail --silent --show-error \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header "X-GitHub-Api-Version: $api_version" \
+              --dump-header "$work/$stem.headers" \
+              --output "$work/$stem.json" \
+              "$url"
+            tr -d '\r' < "$work/$stem.headers" | awk 'tolower($1) == "etag:" { print $2; exit }'
+          }
+          validate_candidate_assets() {
+            local release_json="$1"
+            local probes_tsv="$2"
+            python3 - "$release_json" "$probes_tsv" "$version" "$reserved_prefix" <<'PY'
+          import json, re, sys
+          source, destination, version, prefix = sys.argv[1:]
+          with open(source, encoding="utf-8") as handle:
+              release = json.load(handle)
+          archives = {f"s46_{version}_{platform}.tar.gz" for platform in ("darwin_amd64", "darwin_arm64", "linux_amd64", "linux_arm64")}
+          build = archives | {"checksums.txt", "release-build.json", "release-build.json.sig"}
+          evidence = {name + ".qualification.json" for name in archives}
+          signatures = {name + ".sig" for name in evidence}
+          assets = release.get("assets", [])
+          if not isinstance(assets, list):
+              raise SystemExit("candidate asset ledger is malformed")
+          probes = [asset for asset in assets if isinstance(asset, dict) and str(asset.get("name", "")).startswith(prefix)]
+          ordinary_assets = [asset for asset in assets if asset not in probes]
+          names = [asset.get("name") for asset in ordinary_assets if isinstance(asset, dict)]
+          all_names = [asset.get("name") for asset in assets if isinstance(asset, dict)]
+          identifiers = [asset.get("id") for asset in assets if isinstance(asset, dict)]
+          if len(names) != len(ordinary_assets) or len(all_names) != len(assets) or len(all_names) != len(set(all_names)) or len(identifiers) != len(assets) or len(identifiers) != len(set(identifiers)):
+              raise SystemExit("candidate asset ledger contains malformed or duplicate entries")
+          ordinary = set(names)
+          if not build.issubset(ordinary) or ordinary - build - evidence - signatures:
+              raise SystemExit("candidate must contain the exact build cohort and only known native evidence assets")
+          present_evidence, present_signatures = ordinary & evidence, ordinary & signatures
+          if present_signatures and present_evidence != evidence:
+              raise SystemExit("qualification signatures require the complete native evidence cohort")
+          digest = re.compile(r"sha256:[0-9a-f]{64}")
+          for asset in ordinary_assets:
+              name, identifier, size, asset_digest = asset.get("name"), asset.get("id"), asset.get("size"), asset.get("digest")
+              maximum = 256 if name in signatures else 1048576 if name in evidence or name in {"checksums.txt", "release-build.json", "release-build.json.sig"} else 268435456
+              if not isinstance(identifier, int) or isinstance(identifier, bool) or identifier <= 0 or not isinstance(size, int) or isinstance(size, bool) or size <= 0 or size > maximum or not isinstance(asset_digest, str) or not digest.fullmatch(asset_digest):
+                  raise SystemExit(f"candidate asset metadata is invalid for {name!r}")
+          if len(probes) > 8:
+              raise SystemExit("too many interrupted CAS probe assets")
+          pattern = re.compile(re.escape(prefix) + r"[0-9a-f]{24}\.txt")
+          with open(destination, "x", encoding="utf-8") as output:
+              for asset in probes:
+                  name, identifier, size = asset.get("name"), asset.get("id"), asset.get("size")
+                  if not isinstance(name, str) or not pattern.fullmatch(name) or not isinstance(identifier, int) or isinstance(identifier, bool) or identifier <= 0 or size != 65:
+                      raise SystemExit("interrupted CAS probe metadata is not canonical")
+                  output.write(f"{identifier}\t{name}\n")
+          PY
+          }
+          before_etag="$(fetch_release before)"
+          test -n "$before_etag"
+          test "$(jq -r .draft "$work/before.json")" = true
+          release_id="$(jq -r .id "$work/before.json")"
+          [[ "$release_id" =~ ^[0-9]+$ ]]
+          validate_candidate_assets "$work/before.json" "$work/reserved-probes.tsv"
+          if [ -s "$work/reserved-probes.tsv" ]; then
+            while IFS=$'\t' read -r interrupted_id interrupted_name; do
+              interrupted="$work/$interrupted_name"
+              curl --fail --location --silent --show-error \
+                --header "Accept: application/octet-stream" \
+                --header "Authorization: Bearer $GH_TOKEN" \
+                --header "X-GitHub-Api-Version: $api_version" \
+                --output "$interrupted" \
+                "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/$interrupted_id"
+              python3 - "$interrupted" "$interrupted_name" "$reserved_prefix" <<'PY'
+          import pathlib, re, sys
+          path, name, prefix = sys.argv[1:]
+          content = pathlib.Path(path).read_bytes()
+          if not re.fullmatch(b"[0-9a-f]{64}\\n", content):
+              raise SystemExit("interrupted CAS probe content is not a canonical nonce")
+          if name != prefix + content[:24].decode("ascii") + ".txt":
+              raise SystemExit("interrupted CAS probe name does not bind its nonce")
+          PY
+              gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$interrupted_id" >/dev/null
+            done < "$work/reserved-probes.tsv"
+            recovered_etag="$(fetch_release recovered)"
+            test "$recovered_etag" != "$before_etag"
+            before_etag="$recovered_etag"
+            validate_candidate_assets "$work/recovered.json" "$work/recovered-probes.tsv"
+            test ! -s "$work/recovered-probes.tsv"
+          fi
+          nonce="$(printf '%s' "$GITHUB_REPOSITORY:$candidate_tag:$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT" | sha256sum | awk '{print $1}')"
+          probe_name="$reserved_prefix${nonce:0:24}.txt"
+          probe="$work/$probe_name"
+          printf '%s\n' "$nonce" > "$probe"
+          test "$(wc -c < "$probe" | tr -d '[:space:]')" = 65
+          gh release upload "$candidate_tag" "$probe"
+          probe_asset_id="$(gh api "$endpoint" --jq ".assets[] | select(.name == \"$probe_name\") | .id")"
+          [[ "$probe_asset_id" =~ ^[0-9]+$ ]]
+          upload_etag="$(fetch_release upload)"
+          test "$upload_etag" != "$before_etag"
+          gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$probe_asset_id" >/dev/null
+          probe_asset_id=""
+          delete_etag="$(fetch_release delete)"
+          test "$delete_etag" != "$upload_etag"
+          validate_candidate_assets "$work/delete.json" "$work/final-probes.tsv"
+          test ! -s "$work/final-probes.tsv"
+          stale_status="$(curl --silent --show-error \
+            --request PATCH \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: $api_version" \
+            --header "If-Match: $upload_etag" \
+            --header "Content-Type: application/json" \
+            --data '{"draft":true}' \
+            --output "$work/stale.json" \
+            --write-out '%{http_code}' \
+            "$url")"
+          test "$stale_status" = 412
+          test "$(gh api "$endpoint" --jq .draft)" = true
+          {
+            printf 'api_version=%s\n' "$api_version"
+            printf 'asset_etag_sensitive=true\n'
+            printf 'stale_if_match_status=%s\n' "$stale_status"
+            printf 'release_id=%s\n' "$release_id"
+          } >> "$GITHUB_OUTPUT"
+          probe_name=""
+          trap - EXIT
+
+  native-cloud:
+    name: cloud-client / ${{ matrix.target }}
+    needs: candidate-draft-cas
+    if: inputs.target != 'qualification-signatures' && needs.candidate-draft-cas.result == 'success' && ( inputs.target == 'all' || inputs.target == 'darwin-amd64' || inputs.target == 'linux-amd64' || inputs.target == 'linux-arm64')
+    permissions:
+      actions: write
+      contents: read
+      deployments: read
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - target: darwin-amd64
+            runner: macos-15-intel
+            archive_platform: darwin_amd64
+          - target: linux-amd64
+            runner: ubuntu-24.04
+            archive_platform: linux_amd64
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+            archive_platform: linux_arm64
+    runs-on: ${{ matrix.runner }}
+    environment: cloud-qualification
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        if: inputs.target == 'all' || inputs.target == matrix.target
+        with:
+          ref: ${{ inputs.prepared_commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        if: inputs.target == 'all' || inputs.target == matrix.target
+        with:
+          go-version-file: go.mod
+      - name: Bind protected environment approval and ephemeral hosted runner identity
+        if: inputs.target == 'all' || inputs.target == matrix.target
+        id: provenance
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          QUALIFICATION_ENVIRONMENT: cloud-qualification
+        run: |
+          set -euo pipefail
+          approvals="$RUNNER_TEMP/environment-approvals.json"
+          policy="$RUNNER_TEMP/environment-policy.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals" > "$approvals"
+          gh api "repos/$GITHUB_REPOSITORY/environments/$QUALIFICATION_ENVIRONMENT" > "$policy"
+          python3 - "$approvals" "$policy" "$RUNNER_TEMP/provenance.json" <<'PY'
+          import hashlib, json, os, platform, sys
+          approvals_path, policy_path, output_path = sys.argv[1:]
+          with open(approvals_path, encoding="utf-8") as source:
+              approvals = json.load(source)
+          with open(policy_path, encoding="utf-8") as source:
+              policy = json.load(source)
+          environment = os.environ["QUALIFICATION_ENVIRONMENT"]
+          reviewer_rules = [rule for rule in policy.get("protection_rules", []) if rule.get("type") == "required_reviewers"]
+          reviewers = sorted(item.get("reviewer", {}).get("login", "") for item in reviewer_rules[0].get("reviewers", [])) if len(reviewer_rules) == 1 else []
+          if policy.get("can_admins_bypass") is not False or len(policy.get("protection_rules", [])) != 1 or len(reviewer_rules) != 1 or reviewer_rules[0].get("prevent_self_review") is not True or reviewers != ["goncalossilva"]:
+              raise SystemExit("qualification environment protection does not exactly match the approved policy")
+          approved = [review for review in approvals if review.get("state", "").lower() == "approved" and review.get("user", {}).get("login") == "goncalossilva" and any(item.get("name") == environment for item in review.get("environments", []))]
+          if not approved:
+              raise SystemExit("qualification run lacks approval from goncalossilva")
+          approver = "goncalossilva"
+          identity = {
+              "schema": "s46.qualification-execution-provenance.v1",
+              "environment": environment,
+              "approval": approved[-1],
+              "environmentPolicy": {"canAdminsBypass": False, "preventSelfReview": True, "reviewers": reviewers},
+              "runner": {
+                  "ephemeral": True,
+                  "environment": os.environ["RUNNER_ENVIRONMENT"],
+                  "name": os.environ["RUNNER_NAME"],
+                  "os": os.environ["RUNNER_OS"],
+                  "arch": os.environ["RUNNER_ARCH"],
+                  "runId": os.environ["GITHUB_RUN_ID"],
+                  "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              },
+          }
+          raw = (json.dumps(identity, sort_keys=True, separators=(",", ":")) + "\n").encode()
+          with open(output_path, "xb") as output:
+              output.write(raw)
+          approval = hashlib.sha256(raw).hexdigest()
+          runner_raw = (json.dumps(identity["runner"], sort_keys=True, separators=(",", ":")) + "\n").encode()
+          runner = hashlib.sha256(runner_raw).hexdigest()
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"approval_sha256={approval}\nrunner_identity_sha256={runner}\napprover={approver}\n")
+              output.write(f"os_version={platform.mac_ver()[0] if platform.system() == 'Darwin' else platform.platform()}\n")
+          PY
+      - name: Download and verify the exact create-only candidate build
+        if: inputs.target == 'all' || inputs.target == matrix.target
+        id: candidate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          PREPARED_COMMIT: ${{ inputs.prepared_commit }}
+          ARCHIVE_PLATFORM: ${{ matrix.archive_platform }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "$PREPARED_COMMIT" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
+          test "$GITHUB_SHA" = "$PREPARED_COMMIT"
+          test "$(git rev-parse HEAD)" = "$PREPARED_COMMIT"
+          git fetch --quiet --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          test "$(git rev-parse refs/remotes/origin/main)" = "$PREPARED_COMMIT"
+          version=${RELEASE_TAG#v}
+          candidate_tag="candidate-$RELEASE_TAG-$PREPARED_COMMIT"
+          bundle="$RUNNER_TEMP/candidate-build"
+          mkdir -m 0700 "$bundle"
+          for asset in \
+            "s46_${version}_darwin_amd64.tar.gz" \
+            "s46_${version}_darwin_arm64.tar.gz" \
+            "s46_${version}_linux_amd64.tar.gz" \
+            "s46_${version}_linux_arm64.tar.gz" \
+            checksums.txt release-build.json release-build.json.sig; do
+            gh release download "$candidate_tag" --dir "$bundle" --pattern "$asset"
+          done
+          go run ./scripts check-candidate "$RELEASE_TAG" "$PREPARED_COMMIT" "$bundle"
+          archive="$bundle/s46_${version}_${ARCHIVE_PLATFORM}.tar.gz"
+          evidence="$RUNNER_TEMP/$(basename "$archive").qualification.json"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+          printf 'candidate_tag=%s\n' "$candidate_tag" >> "$GITHUB_OUTPUT"
+          printf 'bundle=%s\n' "$bundle" >> "$GITHUB_OUTPUT"
+          printf 'archive=%s\n' "$archive" >> "$GITHUB_OUTPUT"
+          printf 'evidence=%s\n' "$evidence" >> "$GITHUB_OUTPUT"
+      - name: Qualify cloud-client behavior on the native OS and architecture
+        if: inputs.target == 'all' || inputs.target == matrix.target
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          VERSION: ${{ steps.candidate.outputs.version }}
+          PREPARED_COMMIT: ${{ inputs.prepared_commit }}
+          ARCHIVE: ${{ steps.candidate.outputs.archive }}
+          EVIDENCE: ${{ steps.candidate.outputs.evidence }}
+          S46_E2E_RUNNER_OS: ${{ runner.os }}
+          S46_E2E_RUNNER_ARCH: ${{ runner.arch }}
+          S46_E2E_OS_VERSION: ${{ steps.provenance.outputs.os_version }}
+          S46_E2E_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          S46_E2E_RUNNER_NAME: ${{ runner.name }}
+          S46_E2E_WORKFLOW_REF: ${{ github.workflow_ref }}
+          S46_E2E_WORKFLOW_SHA: ${{ github.sha }}
+          S46_E2E_RUN_ID: ${{ github.run_id }}
+          S46_E2E_RUN_ATTEMPT: ${{ github.run_attempt }}
+          S46_E2E_ENVIRONMENT: cloud-qualification
+          S46_E2E_ENVIRONMENT_APPROVER: ${{ steps.provenance.outputs.approver }}
+          S46_E2E_ENVIRONMENT_REVIEWERS: goncalossilva
+          S46_E2E_ENVIRONMENT_PREVENT_SELF_REVIEW: "true"
+          S46_E2E_ENVIRONMENT_ADMINS_BYPASS: "false"
+          S46_E2E_RELEASE_API_VERSION: ${{ needs.candidate-draft-cas.outputs.api_version }}
+          S46_E2E_CANDIDATE_RELEASE_ID: ${{ needs.candidate-draft-cas.outputs.release_id }}
+          S46_E2E_CANDIDATE_DRAFT_ASSET_ETAG_CAS: ${{ needs.candidate-draft-cas.outputs.asset_etag_sensitive }}
+          S46_E2E_CANDIDATE_DRAFT_STALE_IF_MATCH_STATUS: ${{ needs.candidate-draft-cas.outputs.stale_if_match_status }}
+          S46_E2E_ENVIRONMENT_APPROVAL_SHA256: ${{ steps.provenance.outputs.approval_sha256 }}
+          S46_E2E_RUNNER_IDENTITY_SHA256: ${{ steps.provenance.outputs.runner_identity_sha256 }}
+        run: |
+          set -euo pipefail
+          scripts/qualify-cloud-native "$ARCHIVE" "$EVIDENCE" "$VERSION" "$PREPARED_COMMIT"
+          go run ./scripts check-qualification "$RELEASE_TAG" "$PREPARED_COMMIT" "$ARCHIVE" "$EVIDENCE"
+      - name: Upload immutable qualification evidence artifact
+        if: inputs.target == 'all' || inputs.target == matrix.target
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: qualification-${{ matrix.target }}
+          path: ${{ steps.candidate.outputs.evidence }}
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          overwrite: false
+
+  qualification-signature-validation:
+    name: validate independently produced qualification signatures
+    if: inputs.target == 'qualification-signatures'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ inputs.prepared_commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version-file: go.mod
+      - name: Validate, append once, and re-fetch the signed qualification cohort
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          PREPARED_COMMIT: ${{ inputs.prepared_commit }}
+          SIGNATURES: ${{ inputs.qualification_signatures }}
+        run: |
+          set -euo pipefail
+          test -n "$SIGNATURES"
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_SHA" = "$PREPARED_COMMIT"
+          test "$GITHUB_WORKFLOW_REF" = "sovereign46/cli/.github/workflows/qualify-candidate.yml@refs/heads/main"
+          test "$(git rev-parse HEAD)" = "$PREPARED_COMMIT"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$PREPARED_COMMIT"
+          candidate_tag="candidate-$RELEASE_TAG-$PREPARED_COMMIT"
+          candidate_before="$RUNNER_TEMP/signature-candidate-before.json"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$candidate_tag" > "$candidate_before"
+          python3 - "$candidate_before" "$candidate_tag" "$PREPARED_COMMIT" "${RELEASE_TAG#v}" <<'PY'
+          import json, re, sys
+          source, tag, commit, version = sys.argv[1:]
+          with open(source, encoding="utf-8") as handle:
+              release = json.load(handle)
+          archives = {f"s46_{version}_{platform}.tar.gz" for platform in ("darwin_amd64", "darwin_arm64", "linux_amd64", "linux_arm64")}
+          build = archives | {"checksums.txt", "release-build.json", "release-build.json.sig"}
+          evidence = {name + ".qualification.json" for name in archives}
+          signatures = {name + ".sig" for name in evidence}
+          assets = release.get("assets", [])
+          names = [asset.get("name") for asset in assets if isinstance(asset, dict)]
+          ids = [asset.get("id") for asset in assets if isinstance(asset, dict)]
+          if release.get("draft") is not True or release.get("tag_name") != tag or release.get("target_commitish") != commit:
+              raise SystemExit("signature validation candidate identity is invalid")
+          if len(names) != len(assets) or len(names) != len(set(names)) or len(ids) != len(assets) or len(ids) != len(set(ids)):
+              raise SystemExit("signature validation candidate has malformed or duplicate assets")
+          present = set(names)
+          if not build.issubset(present) or not evidence.issubset(present) or present - build - evidence - signatures:
+              raise SystemExit("signatures require the exact build and complete native evidence cohort")
+          digest = re.compile(r"sha256:[0-9a-f]{64}")
+          for asset in assets:
+              name, identifier, size, asset_digest = asset.get("name"), asset.get("id"), asset.get("size"), asset.get("digest")
+              maximum = 256 if name in signatures else 1048576 if name in evidence or name in {"checksums.txt", "release-build.json", "release-build.json.sig"} else 268435456
+              if not isinstance(identifier, int) or isinstance(identifier, bool) or identifier <= 0 or not isinstance(size, int) or isinstance(size, bool) or size <= 0 or size > maximum or not isinstance(asset_digest, str) or not digest.fullmatch(asset_digest):
+                  raise SystemExit(f"signature validation candidate metadata is invalid for {name!r}")
+          PY
+          bundle="$RUNNER_TEMP/signed-candidate"
+          mkdir -m 0700 "$bundle"
+          version="${RELEASE_TAG#v}"
+          for asset in \
+            "s46_${version}_darwin_amd64.tar.gz" \
+            "s46_${version}_darwin_arm64.tar.gz" \
+            "s46_${version}_linux_amd64.tar.gz" \
+            "s46_${version}_linux_arm64.tar.gz" \
+            checksums.txt release-build.json release-build.json.sig \
+            "s46_${version}_darwin_amd64.tar.gz.qualification.json" \
+            "s46_${version}_darwin_arm64.tar.gz.qualification.json" \
+            "s46_${version}_linux_amd64.tar.gz.qualification.json" \
+            "s46_${version}_linux_arm64.tar.gz.qualification.json"; do
+            gh release download "$candidate_tag" --dir "$bundle" --pattern "$asset"
+          done
+          python3 - "$bundle" "$version" "$SIGNATURES" <<'PY'
+          import base64, binascii, json, os, pathlib, re, sys
+          bundle, version, raw = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+          signatures = json.loads(raw)
+          expected = {f"s46_{version}_{platform}.tar.gz.qualification.json.sig" for platform in ("darwin_amd64", "darwin_arm64", "linux_amd64", "linux_arm64")}
+          if set(signatures) != expected or not all(isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", value) for value in signatures.values()):
+              raise SystemExit("signature input must contain exactly four canonical qualification signature assets")
+          for name, value in signatures.items():
+              try:
+                  decoded = base64.b64decode(value, validate=True)
+              except (ValueError, binascii.Error) as error:
+                  raise SystemExit(f"invalid base64 signature {name}: {error}")
+              if len(decoded) != 64 or base64.b64encode(decoded).decode() != value:
+                  raise SystemExit(f"qualification signature {name} is not one canonical Ed25519 signature")
+              descriptor = os.open(bundle / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+              with os.fdopen(descriptor, "w", encoding="ascii") as output:
+                  output.write(value + "\n")
+          PY
+          go run ./scripts check-bundle "$RELEASE_TAG" "$PREPARED_COMMIT" "$bundle"
+          mkdir -m 0700 "$RUNNER_TEMP/validated-signatures"
+          cp "$bundle"/*.qualification.json.sig "$RUNNER_TEMP/validated-signatures/"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$candidate_tag" \
+            | jq -S '{id, tag_name, target_commitish, draft, updated_at, assets: [.assets[] | {id, name, size, digest, updated_at}] | sort_by(.name)}' \
+            > "$RUNNER_TEMP/validated-signatures/candidate-ledger.json"
+      - name: Upload immutable validated-signatures artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: validated-qualification-signatures
+          path: ${{ runner.temp }}/validated-signatures
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          overwrite: false
+
+  darwin-arm64-airplane:
+    name: airplane / darwin-arm64
+    needs: [candidate-draft-cas, native-cloud]
+    if: always() && needs.candidate-draft-cas.result == 'success' && (inputs.target == 'all' || inputs.target == 'darwin-arm64-airplane') && (needs.native-cloud.result == 'success' || needs.native-cloud.result == 'skipped')
+    permissions:
+      actions: write
+      contents: read
+      deployments: read
+    runs-on: [self-hosted, macOS, ARM64, s46-airplane-qualification]
+    environment: airplane-qualification
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ inputs.prepared_commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version-file: go.mod
+      - name: Bind protected approval and ephemeral self-hosted runner contract
+        id: provenance
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          QUALIFICATION_ENVIRONMENT: airplane-qualification
+          RUNNER_IDENTITY: ${{ vars.S46_AIRPLANE_RUNNER_IDENTITY }}
+        run: |
+          set -euo pipefail
+          test -n "$RUNNER_IDENTITY" && test "${RUNNER_IDENTITY#/}" != "$RUNNER_IDENTITY"
+          test -f "$RUNNER_IDENTITY" && test ! -L "$RUNNER_IDENTITY"
+          test "$(stat -f '%Su' "$RUNNER_IDENTITY")" = root
+          mode=$(stat -f '%Lp' "$RUNNER_IDENTITY")
+          test $((8#$mode & 0022)) -eq 0
+          approvals="$RUNNER_TEMP/environment-approvals.json"
+          policy="$RUNNER_TEMP/environment-policy.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals" > "$approvals"
+          gh api "repos/$GITHUB_REPOSITORY/environments/$QUALIFICATION_ENVIRONMENT" > "$policy"
+          python3 - "$approvals" "$policy" "$RUNNER_IDENTITY" "$RUNNER_TEMP/provenance.json" <<'PY'
+          import datetime, hashlib, json, os, platform, sys
+          approvals_path, policy_path, identity_path, output_path = sys.argv[1:]
+          with open(approvals_path, encoding="utf-8") as source:
+              approvals = json.load(source)
+          with open(policy_path, encoding="utf-8") as source:
+              policy = json.load(source)
+          with open(identity_path, "rb") as source:
+              identity_raw = source.read()
+          identity = json.loads(identity_raw)
+          environment = os.environ["QUALIFICATION_ENVIRONMENT"]
+          reviewer_rules = [rule for rule in policy.get("protection_rules", []) if rule.get("type") == "required_reviewers"]
+          reviewers = sorted(item.get("reviewer", {}).get("login", "") for item in reviewer_rules[0].get("reviewers", [])) if len(reviewer_rules) == 1 else []
+          if policy.get("can_admins_bypass") is not False or len(policy.get("protection_rules", [])) != 1 or len(reviewer_rules) != 1 or reviewer_rules[0].get("prevent_self_review") is not True or reviewers != ["goncalossilva"]:
+              raise SystemExit("airplane environment protection does not exactly match the approved policy")
+          approved = [review for review in approvals if review.get("state", "").lower() == "approved" and review.get("user", {}).get("login") == "goncalossilva" and any(item.get("name") == environment for item in review.get("environments", []))]
+          now = datetime.datetime.now(datetime.timezone.utc)
+          expires = datetime.datetime.fromisoformat(identity.get("expiresAt", "").replace("Z", "+00:00"))
+          if not approved:
+              raise SystemExit("airplane run lacks approval from goncalossilva")
+          approver = "goncalossilva"
+          if identity.get("schema") != "s46.ephemeral-qualification-runner.v1" or identity.get("ephemeral") is not True or identity.get("destroyAfterRun") is not True:
+              raise SystemExit("self-hosted runner does not provide the ephemeral destruction contract")
+          if identity.get("runId") != os.environ["GITHUB_RUN_ID"] or identity.get("runAttempt") != os.environ["GITHUB_RUN_ATTEMPT"] or identity.get("runnerName") != os.environ["RUNNER_NAME"] or expires <= now:
+              raise SystemExit("self-hosted runner identity is stale or belongs to another run")
+          provenance = {"schema": "s46.qualification-execution-provenance.v1", "environment": environment, "approval": approved[-1], "environmentPolicy": {"canAdminsBypass": False, "preventSelfReview": True, "reviewers": reviewers}, "runner": identity}
+          raw = (json.dumps(provenance, sort_keys=True, separators=(",", ":")) + "\n").encode()
+          with open(output_path, "xb") as output:
+              output.write(raw)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"approval_sha256={hashlib.sha256(raw).hexdigest()}\napprover={approver}\n")
+              output.write(f"runner_identity_sha256={hashlib.sha256(identity_raw).hexdigest()}\n")
+              output.write(f"os_version={platform.mac_ver()[0]}\n")
+          PY
+      - name: Download and verify the exact create-only candidate build
+        id: candidate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          PREPARED_COMMIT: ${{ inputs.prepared_commit }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "$PREPARED_COMMIT" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
+          test "$GITHUB_SHA" = "$PREPARED_COMMIT"
+          test "$(git rev-parse HEAD)" = "$PREPARED_COMMIT"
+          git fetch --quiet --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          test "$(git rev-parse refs/remotes/origin/main)" = "$PREPARED_COMMIT"
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          macos_major=$(sw_vers -productVersion | cut -d. -f1)
+          test "$macos_major" = 26
+          version=${RELEASE_TAG#v}
+          candidate_tag="candidate-$RELEASE_TAG-$PREPARED_COMMIT"
+          bundle="$RUNNER_TEMP/candidate-build"
+          mkdir -m 0700 "$bundle"
+          for asset in \
+            "s46_${version}_darwin_amd64.tar.gz" \
+            "s46_${version}_darwin_arm64.tar.gz" \
+            "s46_${version}_linux_amd64.tar.gz" \
+            "s46_${version}_linux_arm64.tar.gz" \
+            checksums.txt release-build.json release-build.json.sig; do
+            gh release download "$candidate_tag" --dir "$bundle" --pattern "$asset"
+          done
+          go run ./scripts check-candidate "$RELEASE_TAG" "$PREPARED_COMMIT" "$bundle"
+          archive="$bundle/s46_${version}_darwin_arm64.tar.gz"
+          evidence="$RUNNER_TEMP/$(basename "$archive").qualification.json"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+          printf 'candidate_tag=%s\n' "$candidate_tag" >> "$GITHUB_OUTPUT"
+          printf 'bundle=%s\n' "$bundle" >> "$GITHUB_OUTPUT"
+          printf 'archive=%s\n' "$archive" >> "$GITHUB_OUTPUT"
+          printf 'evidence=%s\n' "$evidence" >> "$GITHUB_OUTPUT"
+      - name: Run the real three-harness airplane qualification in the approved external isolator
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          VERSION: ${{ steps.candidate.outputs.version }}
+          PREPARED_COMMIT: ${{ inputs.prepared_commit }}
+          ARCHIVE: ${{ steps.candidate.outputs.archive }}
+          EVIDENCE: ${{ steps.candidate.outputs.evidence }}
+          ISOLATOR: ${{ vars.S46_AIRPLANE_QUALIFICATION_ISOLATOR }}
+          ISOLATOR_SHA256: ${{ vars.S46_AIRPLANE_QUALIFICATION_ISOLATOR_SHA256 }}
+          MODEL_GGUF: ${{ vars.S46_E2E_MODEL_GGUF }}
+          MODEL_SHA256: ${{ vars.S46_E2E_MODEL_SHA256 }}
+          LLAMA_ARCHIVE: ${{ vars.S46_E2E_LLAMA_ARCHIVE }}
+          LLAMA_ARCHIVE_SHA256: ${{ vars.S46_E2E_LLAMA_ARCHIVE_SHA256 }}
+          LLAMA_SERVER_SHA256: ${{ vars.S46_E2E_LLAMA_SERVER_SHA256 }}
+          LLAMA_INVENTORY_SHA256: ${{ vars.S46_E2E_LLAMA_INVENTORY_SHA256 }}
+          GATEWAY_ARCHIVE: ${{ vars.S46_E2E_GATEWAY_ARCHIVE }}
+          GATEWAY_ARCHIVE_SHA256: ${{ vars.S46_E2E_GATEWAY_ARCHIVE_SHA256 }}
+          GATEWAY_SHA256: ${{ vars.S46_E2E_GATEWAY_SHA256 }}
+          QUALIFICATION_APPROVAL_SHA256: ${{ steps.provenance.outputs.approval_sha256 }}
+          QUALIFICATION_APPROVER: ${{ steps.provenance.outputs.approver }}
+          RUNNER_IDENTITY_SHA256: ${{ steps.provenance.outputs.runner_identity_sha256 }}
+          OS_VERSION: ${{ steps.provenance.outputs.os_version }}
+          RELEASE_API_VERSION: ${{ needs.candidate-draft-cas.outputs.api_version }}
+          CANDIDATE_RELEASE_ID: ${{ needs.candidate-draft-cas.outputs.release_id }}
+          CANDIDATE_DRAFT_ASSET_ETAG_CAS: ${{ needs.candidate-draft-cas.outputs.asset_etag_sensitive }}
+          CANDIDATE_DRAFT_STALE_IF_MATCH_STATUS: ${{ needs.candidate-draft-cas.outputs.stale_if_match_status }}
+        run: |
+          set -euo pipefail
+          test -n "$ISOLATOR" && test "${ISOLATOR#/}" != "$ISOLATOR"
+          test -f "$ISOLATOR" && test ! -L "$ISOLATOR"
+          test "$(stat -f '%Su' "$ISOLATOR")" = root
+          mode=$(stat -f '%Lp' "$ISOLATOR")
+          test $((8#$mode & 0022)) -eq 0
+          test "$(shasum -a 256 "$ISOLATOR" | awk '{print $1}')" = "$ISOLATOR_SHA256"
+          candidate_sha=$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')
+          mkdir -m 0700 "$RUNNER_TEMP/airplane-home" "$RUNNER_TEMP/airplane-tmp"
+          "$ISOLATOR" /usr/bin/env -i \
+            HOME="$RUNNER_TEMP/airplane-home" \
+            TMPDIR="$RUNNER_TEMP/airplane-tmp" \
+            PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin \
+            S46_E2E_VERIFY_CANDIDATE_ONLY=0 \
+            S46_E2E_QUALIFICATION=1 \
+            S46_E2E_QUALIFICATION_SCOPE=airplane \
+            S46_E2E_NETWORK_ISOLATION=external \
+            S46_E2E_FILESYSTEM_ISOLATION=external \
+            S46_E2E_EXPECTED_VERSION="$VERSION" \
+            S46_E2E_EXPECTED_COMMIT="$PREPARED_COMMIT" \
+            S46_E2E_CANDIDATE="$ARCHIVE" \
+            S46_E2E_CANDIDATE_SHA256="$candidate_sha" \
+            S46_E2E_QUALIFICATION_EVIDENCE="$EVIDENCE" \
+            S46_E2E_MODEL_GGUF="$MODEL_GGUF" \
+            S46_E2E_MODEL_SHA256="$MODEL_SHA256" \
+            S46_E2E_LLAMA_ARCHIVE="$LLAMA_ARCHIVE" \
+            S46_E2E_LLAMA_ARCHIVE_SHA256="$LLAMA_ARCHIVE_SHA256" \
+            S46_E2E_LLAMA_SERVER_SHA256="$LLAMA_SERVER_SHA256" \
+            S46_E2E_LLAMA_INVENTORY_SHA256="$LLAMA_INVENTORY_SHA256" \
+            S46_E2E_GATEWAY_ARCHIVE="$GATEWAY_ARCHIVE" \
+            S46_E2E_GATEWAY_ARCHIVE_SHA256="$GATEWAY_ARCHIVE_SHA256" \
+            S46_E2E_GATEWAY_SHA256="$GATEWAY_SHA256" \
+            S46_E2E_RUNNER_OS="$RUNNER_OS" \
+            S46_E2E_RUNNER_ARCH="$RUNNER_ARCH" \
+            S46_E2E_OS_VERSION="$OS_VERSION" \
+            S46_E2E_RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            S46_E2E_RUNNER_NAME="$RUNNER_NAME" \
+            S46_E2E_WORKFLOW_REF="$GITHUB_WORKFLOW_REF" \
+            S46_E2E_WORKFLOW_SHA="$GITHUB_SHA" \
+            S46_E2E_RUN_ID="$GITHUB_RUN_ID" \
+            S46_E2E_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+            S46_E2E_ENVIRONMENT=airplane-qualification \
+            S46_E2E_ENVIRONMENT_APPROVER="$QUALIFICATION_APPROVER" \
+            S46_E2E_ENVIRONMENT_REVIEWERS=goncalossilva \
+            S46_E2E_ENVIRONMENT_PREVENT_SELF_REVIEW=true \
+            S46_E2E_ENVIRONMENT_ADMINS_BYPASS=false \
+            S46_E2E_RELEASE_API_VERSION="$RELEASE_API_VERSION" \
+            S46_E2E_CANDIDATE_RELEASE_ID="$CANDIDATE_RELEASE_ID" \
+            S46_E2E_CANDIDATE_DRAFT_ASSET_ETAG_CAS="$CANDIDATE_DRAFT_ASSET_ETAG_CAS" \
+            S46_E2E_CANDIDATE_DRAFT_STALE_IF_MATCH_STATUS="$CANDIDATE_DRAFT_STALE_IF_MATCH_STATUS" \
+            S46_E2E_ENVIRONMENT_APPROVAL_SHA256="$QUALIFICATION_APPROVAL_SHA256" \
+            S46_E2E_RUNNER_IDENTITY_SHA256="$RUNNER_IDENTITY_SHA256" \
+            S46_E2E_ISOLATION_PROFILE_SHA256="$ISOLATOR_SHA256" \
+            /bin/bash "$GITHUB_WORKSPACE/scripts/e2e-airplane-harnesses"
+          test -f "$EVIDENCE" && test ! -L "$EVIDENCE"
+          go run ./scripts check-qualification "$RELEASE_TAG" "$PREPARED_COMMIT" "$ARCHIVE" "$EVIDENCE"
+      - name: Upload immutable qualification evidence artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: qualification-darwin-arm64-airplane
+          path: ${{ steps.candidate.outputs.evidence }}
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          overwrite: false
+
+  qualification-evidence-publisher:
+    name: publish validated qualification evidence without candidate execution
+    needs: [candidate-draft-cas, native-cloud, darwin-arm64-airplane]
+    if: always() && inputs.target != 'qualification-signatures' && needs.candidate-draft-cas.result == 'success' && (needs.native-cloud.result == 'success' || needs.native-cloud.result == 'skipped') && (needs.darwin-arm64-airplane.result == 'success' || needs.darwin-arm64-airplane.result == 'skipped')
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Verify exact workflow, artifact ledger, evidence, and append release assets once
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          PREPARED_COMMIT: ${{ inputs.prepared_commit }}
+          TARGET: ${{ inputs.target }}
+          CANDIDATE_RELEASE_ID: ${{ needs.candidate-draft-cas.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_SHA" = "$PREPARED_COMMIT"
+          test "$GITHUB_WORKFLOW_REF" = "sovereign46/cli/.github/workflows/qualify-candidate.yml@refs/heads/main"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$PREPARED_COMMIT"
+          case "$TARGET" in
+            all) expected_artifacts='qualification-darwin-amd64 qualification-linux-amd64 qualification-linux-arm64 qualification-darwin-arm64-airplane' ;;
+            darwin-amd64|linux-amd64|linux-arm64) expected_artifacts="qualification-$TARGET" ;;
+            darwin-arm64-airplane) expected_artifacts='qualification-darwin-arm64-airplane' ;;
+            *) echo "unsupported evidence publication target: $TARGET" >&2; exit 1 ;;
+          esac
+          artifacts_json="$RUNNER_TEMP/artifacts.json"
+          gh api --header "X-GitHub-Api-Version: 2022-11-28" "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" > "$artifacts_json"
+          ledger="$RUNNER_TEMP/artifact-ledger.tsv"
+          python3 - "$artifacts_json" "$ledger" $expected_artifacts <<'PY'
+          import json, re, sys
+          source, destination, *expected = sys.argv[1:]
+          with open(source, encoding="utf-8") as handle:
+              document = json.load(handle)
+          artifacts = document.get("artifacts", [])
+          selected = {item.get("name"): item for item in artifacts if item.get("name", "").startswith("qualification-")}
+          if document.get("total_count") != len(expected) or len(artifacts) != len(expected) or set(selected) != set(expected):
+              raise SystemExit(f"qualification artifact set mismatch: {sorted(selected)} != {sorted(expected)}")
+          with open(destination, "x", encoding="utf-8") as output:
+              for name in sorted(expected):
+                  item = selected[name]
+                  digest = item.get("digest", "")
+                  if item.get("expired") or not isinstance(item.get("id"), int) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+                      raise SystemExit(f"invalid immutable artifact identity for {name}")
+                  output.write(f"{name}\t{item['id']}\t{digest[7:]}\n")
+          PY
+          evidence_dir="$RUNNER_TEMP/evidence"
+          archive_dir="$RUNNER_TEMP/archives"
+          mkdir -m 0700 "$evidence_dir" "$archive_dir"
+          while IFS=$'\t' read -r artifact_name artifact_id artifact_digest; do
+            zip="$RUNNER_TEMP/$artifact_name.zip"
+            curl --fail --location --silent --show-error \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              --output "$zip" \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip"
+            test "$(wc -c < "$zip" | tr -d '[:space:]')" -le 2097152
+            test "$(sha256sum "$zip" | awk '{print $1}')" = "$artifact_digest"
+            python3 - "$zip" "$artifact_name" "$evidence_dir" <<'PY'
+          import os, pathlib, stat, sys, zipfile
+          archive, artifact_name, destination = sys.argv[1:]
+          target = {
+              "qualification-darwin-amd64": "darwin_amd64",
+              "qualification-linux-amd64": "linux_amd64",
+              "qualification-linux-arm64": "linux_arm64",
+              "qualification-darwin-arm64-airplane": "darwin_arm64",
+          }[artifact_name]
+          with zipfile.ZipFile(archive) as source:
+              members = source.infolist()
+              if len(members) != 1:
+                  raise SystemExit("qualification artifact must contain exactly one file")
+              member = members[0]
+              name = pathlib.PurePosixPath(member.filename)
+              if name.name != member.filename or not member.filename.endswith(f"_{target}.tar.gz.qualification.json"):
+                  raise SystemExit("qualification artifact has an unexpected member name")
+              mode = member.external_attr >> 16
+              if stat.S_ISLNK(mode) or member.file_size <= 0 or member.file_size > 1048576 or member.flag_bits & 1:
+                  raise SystemExit("qualification artifact member is linked, empty, oversized, or encrypted")
+              content = source.read(member)
+              if len(content) != member.file_size:
+                  raise SystemExit("qualification artifact member is truncated")
+          descriptor = os.open(pathlib.Path(destination) / member.filename, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+          with os.fdopen(descriptor, "wb") as output:
+              output.write(content)
+          PY
+          done < "$ledger"
+          candidate_tag="candidate-$RELEASE_TAG-$PREPARED_COMMIT"
+          release_json="$RUNNER_TEMP/candidate-release.json"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$candidate_tag" > "$release_json"
+          test "$(jq -r .draft "$release_json")" = true
+          test "$(jq -r .target_commitish "$release_json")" = "$PREPARED_COMMIT"
+          test "$(jq -r .id "$release_json")" = "$CANDIDATE_RELEASE_ID"
+          version="${RELEASE_TAG#v}"
+          python3 - "$release_json" "$version" <<'PY'
+          import json, re, sys
+          source, version = sys.argv[1:]
+          with open(source, encoding="utf-8") as handle:
+              release = json.load(handle)
+          archives = {f"s46_{version}_{platform}.tar.gz" for platform in ("darwin_amd64", "darwin_arm64", "linux_amd64", "linux_arm64")}
+          build = archives | {"checksums.txt", "release-build.json", "release-build.json.sig"}
+          evidence = {name + ".qualification.json" for name in archives}
+          signatures = {name + ".sig" for name in evidence}
+          assets = release.get("assets", [])
+          names = [asset.get("name") for asset in assets if isinstance(asset, dict)]
+          ids = [asset.get("id") for asset in assets if isinstance(asset, dict)]
+          if len(names) != len(assets) or len(names) != len(set(names)) or len(ids) != len(assets) or len(ids) != len(set(ids)):
+              raise SystemExit("candidate asset ledger contains malformed or duplicate entries")
+          present = set(names)
+          if not build.issubset(present) or present - build - evidence - signatures:
+              raise SystemExit("candidate changed outside the exact progressive qualification cohort")
+          if present & signatures and present & evidence != evidence:
+              raise SystemExit("candidate signatures exist before the native evidence cohort is complete")
+          digest = re.compile(r"sha256:[0-9a-f]{64}")
+          for asset in assets:
+              name, identifier, size, asset_digest = asset.get("name"), asset.get("id"), asset.get("size"), asset.get("digest")
+              maximum = 256 if name in signatures else 1048576 if name in evidence or name in {"checksums.txt", "release-build.json", "release-build.json.sig"} else 268435456
+              if not isinstance(identifier, int) or isinstance(identifier, bool) or identifier <= 0 or not isinstance(size, int) or isinstance(size, bool) or size <= 0 or size > maximum or not isinstance(asset_digest, str) or not digest.fullmatch(asset_digest):
+                  raise SystemExit(f"candidate asset metadata is invalid for {name!r}")
+          PY
+          existing_evidence="$RUNNER_TEMP/existing-evidence"
+          pending_evidence="$RUNNER_TEMP/pending-evidence"
+          mkdir -m 0700 "$existing_evidence" "$pending_evidence"
+          for evidence in "$evidence_dir"/*; do
+            evidence_name=$(basename "$evidence")
+            archive_name="${evidence_name%.qualification.json}"
+            gh release download "$candidate_tag" --dir "$archive_dir" --pattern "$archive_name"
+            python3 - "$evidence" "$archive_dir/$archive_name" "$archive_name" "$version" "$PREPARED_COMMIT" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$CANDIDATE_RELEASE_ID" <<'PY'
+          import hashlib, json, os, sys
+          evidence_path, archive_path, archive_name, version, commit, run_id, attempt, release_id = sys.argv[1:]
+          with open(evidence_path, encoding="utf-8") as source:
+              record = json.load(source)
+          with open(archive_path, "rb") as source:
+              content = source.read()
+          digest = hashlib.sha256(content).hexdigest()
+          artifact = record.get("artifact", {})
+          build = record.get("build", {})
+          qualification = record.get("qualification", {})
+          execution = qualification.get("execution", {})
+          if record.get("schema") != "s46.release-qualification.v1" or record.get("result") != "passed":
+              raise SystemExit("qualification evidence is not a passed v1 record")
+          if artifact != {"name": archive_name, "sha256": digest, "size": len(content), "kind": "archive"}:
+              raise SystemExit("qualification evidence does not bind the exact archive")
+          if build.get("version") != version or build.get("commit") != commit or qualification.get("expectedVersion") != version or qualification.get("expectedCommit") != commit:
+              raise SystemExit("qualification evidence does not bind the exact source/version")
+          if execution.get("workflowSha") != commit or execution.get("workflowRef") != "sovereign46/cli/.github/workflows/qualify-candidate.yml@refs/heads/main" or execution.get("runId") != run_id or execution.get("runAttempt") != attempt:
+              raise SystemExit("qualification evidence does not bind this exact workflow run")
+          if execution.get("candidateReleaseId") != release_id or execution.get("releaseApiVersion") != "2022-11-28" or execution.get("candidateDraftAssetEtagCas") is not True or execution.get("candidateDraftStaleIfMatchStatus") != 412:
+              raise SystemExit("qualification evidence lacks the candidate draft CAS proof")
+          if execution.get("environmentApprover") != "goncalossilva" or execution.get("environmentReviewers") != ["goncalossilva"] or execution.get("environmentPreventSelfReview") is not True or execution.get("environmentAdminsBypass") is not False:
+              raise SystemExit("qualification evidence lacks exact environment protection")
+          airplane = archive_name.endswith("_darwin_arm64.tar.gz")
+          expected_capabilities = ["cloud-client", "airplane"] if airplane else ["cloud-client"]
+          expected_harnesses = ["pi", "claude-code", "codex"] if airplane else []
+          if qualification.get("capabilities") != expected_capabilities or qualification.get("airplaneHarnesses") != expected_harnesses:
+              raise SystemExit("qualification evidence has invalid capability scope")
+          if airplane != (qualification.get("runtime") is not None):
+              raise SystemExit("qualification evidence has invalid runtime scope")
+          PY
+            if jq -e --arg name "$evidence_name" 'any(.assets[]; .name == $name)' "$release_json" >/dev/null; then
+              gh release download "$candidate_tag" --dir "$existing_evidence" --pattern "$evidence_name"
+              cmp --silent "$evidence" "$existing_evidence/$evidence_name"
+            else
+              cp "$evidence" "$pending_evidence/$evidence_name"
+            fi
+          done
+          if find "$pending_evidence" -maxdepth 1 -type f -print -quit | grep -q .; then
+            gh release upload "$candidate_tag" "$pending_evidence"/*
+          fi
+          verified="$RUNNER_TEMP/verified-evidence"
+          mkdir -m 0700 "$verified"
+          for evidence in "$evidence_dir"/*; do
+            name=$(basename "$evidence")
+            gh release download "$candidate_tag" --dir "$verified" --pattern "$name"
+            cmp --silent "$evidence" "$verified/$name"
+          done
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$candidate_tag" > "$RUNNER_TEMP/candidate-after-evidence.json"
+          python3 - "$RUNNER_TEMP/candidate-after-evidence.json" "$version" "$evidence_dir" <<'PY'
+          import json, pathlib, re, sys
+          source, version, evidence_dir = sys.argv[1:]
+          with open(source, encoding="utf-8") as handle:
+              release = json.load(handle)
+          archives = {f"s46_{version}_{platform}.tar.gz" for platform in ("darwin_amd64", "darwin_arm64", "linux_amd64", "linux_arm64")}
+          build = archives | {"checksums.txt", "release-build.json", "release-build.json.sig"}
+          evidence = {name + ".qualification.json" for name in archives}
+          signatures = {name + ".sig" for name in evidence}
+          published = {path.name for path in pathlib.Path(evidence_dir).iterdir() if path.is_file() and not path.is_symlink()}
+          assets = release.get("assets", [])
+          names = [asset.get("name") for asset in assets if isinstance(asset, dict)]
+          ids = [asset.get("id") for asset in assets if isinstance(asset, dict)]
+          if len(names) != len(assets) or len(names) != len(set(names)) or len(ids) != len(assets) or len(ids) != len(set(ids)):
+              raise SystemExit("candidate cohort has malformed or duplicate assets after evidence publication")
+          present = set(names)
+          if not build.issubset(present) or not published.issubset(present) or present - build - evidence - signatures:
+              raise SystemExit("candidate cohort is not a valid progressive set after evidence publication")
+          if present & signatures and present & evidence != evidence:
+              raise SystemExit("candidate signatures exist before the native evidence cohort is complete")
+          digest = re.compile(r"sha256:[0-9a-f]{64}")
+          for asset in assets:
+              name, identifier, size, asset_digest = asset.get("name"), asset.get("id"), asset.get("size"), asset.get("digest")
+              maximum = 256 if name in signatures else 1048576 if name in evidence or name in {"checksums.txt", "release-build.json", "release-build.json.sig"} else 268435456
+              if not isinstance(identifier, int) or isinstance(identifier, bool) or identifier <= 0 or not isinstance(size, int) or isinstance(size, bool) or size <= 0 or size > maximum or not isinstance(asset_digest, str) or not digest.fullmatch(asset_digest):
+                  raise SystemExit(f"candidate metadata is invalid after evidence publication for {name!r}")
+          PY
+
+  qualification-signature-publisher:
+    name: publish validated signatures without build-context execution
+    needs: qualification-signature-validation
+    if: inputs.target == 'qualification-signatures' && needs.qualification-signature-validation.result == 'success'
+    runs-on: ubuntu-24.04
+    environment: qualification-signature-upload
+    permissions:
+      actions: read
+      contents: write
+      deployments: read
+    steps:
+      - name: Verify protected environment and immutable signature artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          PREPARED_COMMIT: ${{ inputs.prepared_commit }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_SHA" = "$PREPARED_COMMIT"
+          test "$GITHUB_WORKFLOW_REF" = "sovereign46/cli/.github/workflows/qualify-candidate.yml@refs/heads/main"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$PREPARED_COMMIT"
+          policy="$RUNNER_TEMP/signature-environment.json"
+          approvals="$RUNNER_TEMP/signature-approvals.json"
+          gh api "repos/$GITHUB_REPOSITORY/environments/qualification-signature-upload" > "$policy"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals" > "$approvals"
+          jq -e '.can_admins_bypass == false and (.protection_rules | length) == 1 and .protection_rules[0].type == "required_reviewers" and .protection_rules[0].prevent_self_review == true and ([.protection_rules[0].reviewers[] | select(.type == "User") | .reviewer.login] | sort) == ["goncalossilva"]' "$policy" >/dev/null
+          jq -e 'any(.[]; (.state | ascii_downcase) == "approved" and .user.login == "goncalossilva" and any(.environments[]?; .name == "qualification-signature-upload"))' "$approvals" >/dev/null
+          artifacts="$RUNNER_TEMP/artifacts.json"
+          gh api --header "X-GitHub-Api-Version: 2022-11-28" "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" > "$artifacts"
+          read -r artifact_id artifact_digest < <(jq -er '
+            [.artifacts[] | select(.name == "validated-qualification-signatures")] as $selected |
+            if .total_count == 1 and (.artifacts | length) == 1 and ($selected | length) == 1 and ($selected[0].expired | not) and ($selected[0].digest | test("^sha256:[0-9a-f]{64}$"))
+            then "\($selected[0].id) \($selected[0].digest[7:])" else error("invalid signature artifact ledger") end
+          ' "$artifacts")
+          zip="$RUNNER_TEMP/validated-signatures.zip"
+          curl --fail --location --silent --show-error \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --output "$zip" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip"
+          test "$(wc -c < "$zip" | tr -d '[:space:]')" -le 1048576
+          test "$(sha256sum "$zip" | awk '{print $1}')" = "$artifact_digest"
+          signatures="$RUNNER_TEMP/signatures"
+          mkdir -m 0700 "$signatures"
+          version="${RELEASE_TAG#v}"
+          python3 - "$zip" "$signatures" "$version" <<'PY'
+          import base64, binascii, os, pathlib, re, stat, sys, zipfile
+          archive, destination, version = sys.argv[1:]
+          expected_signatures = {f"s46_{version}_{platform}.tar.gz.qualification.json.sig" for platform in ("darwin_amd64", "darwin_arm64", "linux_amd64", "linux_arm64")}
+          expected = expected_signatures | {"candidate-ledger.json"}
+          with zipfile.ZipFile(archive) as source:
+              members = source.infolist()
+              if {member.filename for member in members} != expected:
+                  raise SystemExit("signature artifact does not contain the exact signatures and candidate ledger")
+              for member in members:
+                  mode = member.external_attr >> 16
+                  if stat.S_ISLNK(mode) or member.file_size <= 0 or member.file_size > 1048576 or member.flag_bits & 1:
+                      raise SystemExit("signature artifact has unsafe metadata")
+                  raw = source.read(member)
+                  if member.filename in expected_signatures:
+                      if member.file_size > 256:
+                          raise SystemExit("signature artifact member is oversized")
+                      value = raw.decode("ascii").strip()
+                      try:
+                          decoded = base64.b64decode(value, validate=True)
+                      except (ValueError, binascii.Error) as error:
+                          raise SystemExit(f"invalid signature encoding: {error}")
+                      if len(decoded) != 64 or base64.b64encode(decoded).decode() != value or raw != (value + "\n").encode():
+                          raise SystemExit("signature artifact is not canonical")
+                  descriptor = os.open(pathlib.Path(destination) / member.filename, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                  with os.fdopen(descriptor, "wb") as output:
+                      output.write(raw)
+          PY
+          candidate_tag="candidate-$RELEASE_TAG-$PREPARED_COMMIT"
+          candidate_current="$RUNNER_TEMP/signature-candidate-current.json"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$candidate_tag" > "$candidate_current"
+          python3 - "$candidate_current" "$candidate_tag" "$PREPARED_COMMIT" "$version" <<'PY'
+          import json, re, sys
+          source, tag, commit, version = sys.argv[1:]
+          with open(source, encoding="utf-8") as handle:
+              release = json.load(handle)
+          archives = {f"s46_{version}_{platform}.tar.gz" for platform in ("darwin_amd64", "darwin_arm64", "linux_amd64", "linux_arm64")}
+          build = archives | {"checksums.txt", "release-build.json", "release-build.json.sig"}
+          evidence = {name + ".qualification.json" for name in archives}
+          signatures = {name + ".sig" for name in evidence}
+          assets = release.get("assets", [])
+          names = [asset.get("name") for asset in assets if isinstance(asset, dict)]
+          ids = [asset.get("id") for asset in assets if isinstance(asset, dict)]
+          if release.get("draft") is not True or release.get("tag_name") != tag or release.get("target_commitish") != commit:
+              raise SystemExit("signature publisher candidate identity is invalid")
+          if len(names) != len(assets) or len(names) != len(set(names)) or len(ids) != len(assets) or len(ids) != len(set(ids)):
+              raise SystemExit("signature publisher candidate has malformed or duplicate assets")
+          present = set(names)
+          if not build.issubset(present) or not evidence.issubset(present) or present - build - evidence - signatures:
+              raise SystemExit("signature publisher requires the exact build and complete native evidence cohort")
+          digest = re.compile(r"sha256:[0-9a-f]{64}")
+          for asset in assets:
+              name, identifier, size, asset_digest = asset.get("name"), asset.get("id"), asset.get("size"), asset.get("digest")
+              maximum = 256 if name in signatures else 1048576 if name in evidence or name in {"checksums.txt", "release-build.json", "release-build.json.sig"} else 268435456
+              if not isinstance(identifier, int) or isinstance(identifier, bool) or identifier <= 0 or not isinstance(size, int) or isinstance(size, bool) or size <= 0 or size > maximum or not isinstance(asset_digest, str) or not digest.fullmatch(asset_digest):
+                  raise SystemExit(f"signature publisher candidate metadata is invalid for {name!r}")
+          PY
+          jq -S '{id, tag_name, target_commitish, draft, updated_at, assets: [.assets[] | {id, name, size, digest, updated_at}] | sort_by(.name)}' \
+            "$candidate_current" > "$RUNNER_TEMP/candidate-ledger-current.json"
+          cmp --silent "$signatures/candidate-ledger.json" "$RUNNER_TEMP/candidate-ledger-current.json"
+          existing_signatures="$RUNNER_TEMP/existing-signatures"
+          pending_signatures="$RUNNER_TEMP/pending-signatures"
+          mkdir -m 0700 "$existing_signatures" "$pending_signatures"
+          for signature in "$signatures"/*.qualification.json.sig; do
+            name=$(basename "$signature")
+            if jq -e --arg name "$name" 'any(.assets[]; .name == $name)' "$candidate_current" >/dev/null; then
+              gh release download "$candidate_tag" --dir "$existing_signatures" --pattern "$name"
+              cmp --silent "$signature" "$existing_signatures/$name"
+            else
+              cp "$signature" "$pending_signatures/$name"
+            fi
+          done
+          if find "$pending_signatures" -maxdepth 1 -type f -print -quit | grep -q .; then
+            gh release upload "$candidate_tag" "$pending_signatures"/*
+          fi
+          verified="$RUNNER_TEMP/verified-signatures"
+          mkdir -m 0700 "$verified"
+          for signature in "$signatures"/*.qualification.json.sig; do
+            name=$(basename "$signature")
+            gh release download "$candidate_tag" --dir "$verified" --pattern "$name"
+            cmp --silent "$signature" "$verified/$name"
+          done
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$candidate_tag" > "$RUNNER_TEMP/signed-candidate.json"
+          python3 - "$RUNNER_TEMP/signed-candidate.json" "$version" "$PREPARED_COMMIT" <<'PY'
+          import json, re, sys
+          source, version, commit = sys.argv[1:]
+          with open(source, encoding="utf-8") as handle:
+              release = json.load(handle)
+          archives = {f"s46_{version}_{platform}.tar.gz" for platform in ("darwin_amd64", "darwin_arm64", "linux_amd64", "linux_arm64")}
+          evidence = {name + ".qualification.json" for name in archives}
+          signatures = {name + ".sig" for name in evidence}
+          expected = archives | {"checksums.txt", "release-build.json", "release-build.json.sig"} | evidence | signatures
+          assets = release.get("assets", [])
+          names = [asset.get("name") for asset in assets if isinstance(asset, dict)]
+          ids = [asset.get("id") for asset in assets if isinstance(asset, dict)]
+          if release.get("draft") is not True or release.get("target_commitish") != commit or len(names) != len(assets) or len(names) != len(set(names)) or set(names) != expected or len(ids) != len(assets) or len(ids) != len(set(ids)):
+              raise SystemExit("signed candidate cohort is not exact after signature publication")
+          digest = re.compile(r"sha256:[0-9a-f]{64}")
+          for asset in assets:
+              name, identifier, size, asset_digest = asset.get("name"), asset.get("id"), asset.get("size"), asset.get("digest")
+              maximum = 256 if name in signatures else 1048576 if name in evidence or name in {"checksums.txt", "release-build.json", "release-build.json.sig"} else 268435456
+              if not isinstance(identifier, int) or isinstance(identifier, bool) or identifier <= 0 or not isinstance(size, int) or isinstance(size, bool) or size <= 0 or size > maximum or not isinstance(asset_digest, str) or not digest.fullmatch(asset_digest):
+                  raise SystemExit(f"signed candidate metadata is invalid for {name!r}")
+          PY

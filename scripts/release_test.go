@@ -46,6 +46,129 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+func TestSignEvidenceUsesRoleDomainPinnedKeyAndNoClobber(t *testing.T) {
+	directory := t.TempDir()
+	input := filepath.Join(directory, "release-build.json")
+	key := filepath.Join(directory, "build.key")
+	output := input + releaseEvidenceSignatureSuffix
+	if err := os.WriteFile(input, []byte("exact evidence bytes\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	seed := testBuildPrivateKey.Seed()
+	if err := os.WriteFile(key, []byte(base64.StdEncoding.EncodeToString(seed)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"--role", "build", "--private-key-file", key, "--input", input, "--output", output}
+	if err := signReleaseEvidence(args); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyReleaseEvidenceSignature(input, testBuildPrivateKey.Public().(ed25519.PublicKey), releaseEvidenceBuildRole); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyReleaseEvidenceSignature(input, testBuildPrivateKey.Public().(ed25519.PublicKey), releaseEvidenceQualificationRole); err == nil {
+		t.Fatal("build-domain signature was accepted as qualification evidence")
+	}
+	before, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := signReleaseEvidence(args); err == nil {
+		t.Fatal("signer replaced an existing output")
+	}
+	after, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("failed no-clobber retry changed signature output")
+	}
+	content, err := os.ReadFile(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := base64.StdEncoding.EncodeToString(ed25519.Sign(testBuildPrivateKey, content)) + "\n"
+	if err := os.WriteFile(output, []byte(plain), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyReleaseEvidenceSignature(input, testBuildPrivateKey.Public().(ed25519.PublicKey), releaseEvidenceBuildRole); err == nil {
+		t.Fatal("legacy plain-file signature was accepted")
+	}
+}
+
+func TestSignEvidenceAcceptsConsistentBase64PrivateKey(t *testing.T) {
+	directory := t.TempDir()
+	input := filepath.Join(directory, "qualification.json")
+	key := filepath.Join(directory, "qualification.key")
+	output := input + ".sig"
+	if err := os.WriteFile(input, []byte("qualification evidence\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(key, []byte(base64.StdEncoding.EncodeToString(testQualificationPrivateKey)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := signReleaseEvidence([]string{"--role", "qualification", "--private-key-file", key, "--input", input, "--output", output}); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyReleaseEvidenceSignature(input, testQualificationPrivateKey.Public().(ed25519.PublicKey), releaseEvidenceQualificationRole); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSignEvidenceRejectsUnsafeOrWrongRoleKey(t *testing.T) {
+	directory := t.TempDir()
+	input := filepath.Join(directory, "evidence.json")
+	if err := os.WriteFile(input, []byte("evidence\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name string
+		key  ed25519.PrivateKey
+		mode os.FileMode
+		role string
+	}{
+		{name: "wrong-pinned-role", key: testQualificationPrivateKey, mode: 0o600, role: releaseEvidenceBuildRole},
+		{name: "writable-key", key: testBuildPrivateKey, mode: 0o644, role: releaseEvidenceBuildRole},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			keyPath := filepath.Join(directory, test.name+".key")
+			if err := os.WriteFile(keyPath, []byte(base64.StdEncoding.EncodeToString(test.key)+"\n"), test.mode); err != nil {
+				t.Fatal(err)
+			}
+			output := filepath.Join(directory, test.name+".sig")
+			err := signReleaseEvidence([]string{"--role", test.role, "--private-key-file", keyPath, "--input", input, "--output", output})
+			if err == nil {
+				t.Fatal("unsafe signing key was accepted")
+			}
+			if _, statErr := os.Lstat(output); !os.IsNotExist(statErr) {
+				t.Fatalf("failed signing left output behind: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestSignEvidenceRejectsSymlinkedKeyFile(t *testing.T) {
+	directory := t.TempDir()
+	input := filepath.Join(directory, "evidence.json")
+	realKey := filepath.Join(directory, "real.key")
+	linkedKey := filepath.Join(directory, "linked.key")
+	if err := os.WriteFile(input, []byte("evidence\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(realKey, []byte(base64.StdEncoding.EncodeToString(testBuildPrivateKey.Seed())+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realKey, linkedKey); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(directory, "evidence.sig")
+	if err := signReleaseEvidence([]string{"--role", "build", "--private-key-file", linkedKey, "--input", input, "--output", output}); err == nil {
+		t.Fatal("symlinked signing key was accepted")
+	}
+	if _, err := os.Lstat(output); !os.IsNotExist(err) {
+		t.Fatalf("failed signing left output behind: %v", err)
+	}
+}
+
 func TestBumpVersion(t *testing.T) {
 	cases := map[string]string{
 		"patch": "1.2.4",
@@ -150,6 +273,10 @@ set -eu
 printf '%%s\n' "$PWD" >> %q
 test "$(cat VERSION)" = 1.2.3
 case "$*" in
+  *internal/airplane*)
+    printf '=== RUN   TestReleaseCandidateAirplaneClosure\n'
+    printf '%%s\n' '--- PASS: TestReleaseCandidateAirplaneClosure (0.00s)'
+    ;;
   *releasecandidate*)
     printf '=== RUN   TestReleaseCandidateActivationPolicy\n'
     printf '%%s\n' '--- PASS: TestReleaseCandidateActivationPolicy (0.00s)'
@@ -168,8 +295,8 @@ esac
 			t.Fatal(err)
 		}
 		lines := strings.Fields(string(raw))
-		if len(lines) != 3 {
-			t.Fatalf("release checks invoked go from %d directories, want 3: %q", len(lines), raw)
+		if len(lines) != 5 {
+			t.Fatalf("release checks invoked go from %d directories, want 5: %q", len(lines), raw)
 		}
 		for _, directory := range lines {
 			if directory == repository || !strings.Contains(directory, "s46-release-checkout-") {
@@ -410,6 +537,219 @@ func TestValidateQualificationBundleBindsEveryPublishedArchive(t *testing.T) {
 	}
 }
 
+func TestCandidateBuildBundleContainsOnlyExactSignedBuildBytes(t *testing.T) {
+	commit := strings.Repeat("a", 40)
+	bundle := writeReleaseBundle(t, "1.2.3", commit)
+	for _, archive := range expectedReleaseArchives("1.2.3") {
+		if err := os.Remove(filepath.Join(bundle, archive+qualificationSuffix)); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(filepath.Join(bundle, archive+qualificationSuffix+releaseEvidenceSignatureSuffix)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	trust, err := loadReleaseEvidenceTrust()
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths, err := validateCandidateBuildBundleWithTrust(bundle, "1.2.3", commit, strings.Repeat("d", 40), trust)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != len(expectedReleaseArchives("1.2.3"))+3 {
+		t.Fatalf("unexpected candidate build cohort: %v", paths)
+	}
+	if err := os.WriteFile(filepath.Join(bundle, "unexpected"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := validateCandidateBuildBundleWithTrust(bundle, "1.2.3", commit, strings.Repeat("d", 40), trust); err == nil || !strings.Contains(err.Error(), "exactly") {
+		t.Fatalf("candidate build accepted an extra asset: %v", err)
+	}
+}
+
+func TestReleaseQualificationUnsupportedPlatformsCannotAcquireAirplaneCapability(t *testing.T) {
+	commit := strings.Repeat("a", 40)
+	bundle := writeReleaseBundle(t, "1.2.3", commit)
+	unsupported := expectedReleaseArchives("1.2.3")[0]
+	path := filepath.Join(bundle, unsupported+qualificationSuffix)
+	record := readQualificationRecordForTest(t, path)
+	record.Qualification.Capabilities = []string{"cloud-client", "airplane"}
+	writeQualificationRecordForTest(t, path, record)
+	archivePath := filepath.Join(bundle, unsupported)
+	info, err := os.Stat(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateQualificationRecord(path, unsupported, fileSHA256(t, archivePath), info.Size(), "1.2.3", commit); err == nil || !strings.Contains(err.Error(), "capabilities") {
+		t.Fatalf("unsupported archive acquired airplane capability: %v", err)
+	}
+}
+
+func TestReleaseQualificationScopesMacOS26ToProtectedDarwinARM64(t *testing.T) {
+	commit := strings.Repeat("a", 40)
+	bundle := writeReleaseBundle(t, "1.2.3", commit)
+	archives := expectedReleaseArchives("1.2.3")
+
+	armPath := filepath.Join(bundle, archives[1]+qualificationSuffix)
+	armRecord := readQualificationRecordForTest(t, armPath)
+	if armRecord.Qualification.Execution.OSVersion != "26.0" {
+		t.Fatalf("darwin/arm64 fixture does not exercise macOS 26: %#v", armRecord.Qualification.Execution)
+	}
+	armArchive := filepath.Join(bundle, archives[1])
+	armInfo, err := os.Stat(armArchive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, version := range []string{"14.7", "15.7", "16.0"} {
+		armRecord.Qualification.Execution.OSVersion = version
+		writeQualificationRecordForTest(t, armPath, armRecord)
+		if err := validateQualificationRecord(armPath, archives[1], fileSHA256(t, armArchive), armInfo.Size(), "1.2.3", commit); err == nil || !strings.Contains(err.Error(), "ARM airplane qualification requires macOS 26") {
+			t.Fatalf("darwin/arm64 macOS %s was accepted for airplane qualification: %v", version, err)
+		}
+	}
+
+	intelPath := filepath.Join(bundle, archives[0]+qualificationSuffix)
+	intelRecord := readQualificationRecordForTest(t, intelPath)
+	intelRecord.Qualification.Execution.OSVersion = "26.0"
+	writeQualificationRecordForTest(t, intelPath, intelRecord)
+	intelArchive := filepath.Join(bundle, archives[0])
+	intelInfo, err := os.Stat(intelArchive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateQualificationRecord(intelPath, archives[0], fileSHA256(t, intelArchive), intelInfo.Size(), "1.2.3", commit); err == nil || !strings.Contains(err.Error(), "Intel macOS qualification requires macOS 15") {
+		t.Fatalf("macOS 26 escaped the darwin/arm64 scope: %v", err)
+	}
+}
+
+func TestReleaseQualificationRejectsWeakenedEnvironmentProtection(t *testing.T) {
+	commit := strings.Repeat("a", 40)
+	for name, mutate := range map[string]func(*qualificationExecution){
+		"wrong reviewer": func(execution *qualificationExecution) { execution.EnvironmentReviewers = []string{"someone-else"} },
+		"self review":    func(execution *qualificationExecution) { execution.EnvironmentPreventSelfReview = false },
+		"admin bypass":   func(execution *qualificationExecution) { execution.EnvironmentAdminsBypass = true },
+		"wrong approver": func(execution *qualificationExecution) { execution.EnvironmentApprover = "fredoliveira" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			bundle := writeReleaseBundle(t, "1.2.3", commit)
+			archive := expectedReleaseArchives("1.2.3")[0]
+			path := filepath.Join(bundle, archive+qualificationSuffix)
+			record := readQualificationRecordForTest(t, path)
+			mutate(&record.Qualification.Execution)
+			writeQualificationRecordForTest(t, path, record)
+			archivePath := filepath.Join(bundle, archive)
+			info, err := os.Stat(archivePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := validateQualificationRecord(path, archive, fileSHA256(t, archivePath), info.Size(), "1.2.3", commit); err == nil || !strings.Contains(err.Error(), "protected-environment") {
+				t.Fatalf("weakened environment protection was accepted: %v", err)
+			}
+		})
+	}
+}
+
+func TestReleaseQualificationRejectsInvalidCandidateReleaseID(t *testing.T) {
+	commit := strings.Repeat("a", 40)
+	bundle := writeReleaseBundle(t, "1.2.3", commit)
+	archive := expectedReleaseArchives("1.2.3")[0]
+	path := filepath.Join(bundle, archive+qualificationSuffix)
+	record := readQualificationRecordForTest(t, path)
+	record.Qualification.Execution.CandidateReleaseID = "not-numeric"
+	writeQualificationRecordForTest(t, path, record)
+	archivePath := filepath.Join(bundle, archive)
+	info, err := os.Stat(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateQualificationRecord(path, archive, fileSHA256(t, archivePath), info.Size(), "1.2.3", commit); err == nil || !strings.Contains(err.Error(), "candidate release id") {
+		t.Fatalf("invalid candidate release id was accepted: %v", err)
+	}
+}
+
+func TestReleaseQualificationBundleRequiresOneCandidateReleaseLedger(t *testing.T) {
+	commit := strings.Repeat("a", 40)
+	bundle := writeReleaseBundle(t, "1.2.3", commit)
+	archive := expectedReleaseArchives("1.2.3")[1]
+	path := filepath.Join(bundle, archive+qualificationSuffix)
+	record := readQualificationRecordForTest(t, path)
+	record.Qualification.Execution.CandidateReleaseID = "123456"
+	writeQualificationRecordForTest(t, path, record)
+	writeTestReleaseEvidenceSignature(t, path, testQualificationPrivateKey)
+	if _, err := validateQualificationBundle(bundle, "1.2.3", commit, strings.Repeat("d", 40)); err == nil || !strings.Contains(err.Error(), "one candidate release ledger") {
+		t.Fatalf("mixed candidate release ledgers were accepted: %v", err)
+	}
+}
+
+func TestReleaseQualificationRejectsMissingCandidateDraftCASProof(t *testing.T) {
+	commit := strings.Repeat("a", 40)
+	for name, mutate := range map[string]func(*qualificationExecution){
+		"wrong API": func(execution *qualificationExecution) { execution.ReleaseAPIVersion = "unsupported" },
+		"no CAS":    func(execution *qualificationExecution) { execution.CandidateDraftAssetETagCAS = false },
+		"not 412":   func(execution *qualificationExecution) { execution.CandidateDraftStaleIfMatchStatus = 200 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			bundle := writeReleaseBundle(t, "1.2.3", commit)
+			archive := expectedReleaseArchives("1.2.3")[0]
+			path := filepath.Join(bundle, archive+qualificationSuffix)
+			record := readQualificationRecordForTest(t, path)
+			mutate(&record.Qualification.Execution)
+			writeQualificationRecordForTest(t, path, record)
+			archivePath := filepath.Join(bundle, archive)
+			info, err := os.Stat(archivePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := validateQualificationRecord(path, archive, fileSHA256(t, archivePath), info.Size(), "1.2.3", commit); err == nil || !strings.Contains(err.Error(), "asset-sensitive ETag CAS proof") {
+				t.Fatalf("missing candidate draft CAS proof was accepted: %v", err)
+			}
+		})
+	}
+}
+
+func TestReleaseQualificationDarwinARM64RequiresFullAirplaneHarnessEvidence(t *testing.T) {
+	commit := strings.Repeat("a", 40)
+	bundle := writeReleaseBundle(t, "1.2.3", commit)
+	archive := expectedReleaseArchives("1.2.3")[1]
+	path := filepath.Join(bundle, archive+qualificationSuffix)
+	record := readQualificationRecordForTest(t, path)
+	record.Qualification.AirplaneHarnesses = nil
+	record.Qualification.Runtime = nil
+	writeQualificationRecordForTest(t, path, record)
+	archivePath := filepath.Join(bundle, archive)
+	info, err := os.Stat(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateQualificationRecord(path, archive, fileSHA256(t, archivePath), info.Size(), "1.2.3", commit); err == nil || (!strings.Contains(err.Error(), "harness") && !strings.Contains(err.Error(), "runtime")) {
+		t.Fatalf("darwin/arm64 archive published without full airplane evidence: %v", err)
+	}
+}
+
+func readQualificationRecordForTest(t *testing.T, path string) qualificationRecord {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record qualificationRecord
+	if err := json.Unmarshal(raw, &record); err != nil {
+		t.Fatal(err)
+	}
+	return record
+}
+
+func writeQualificationRecordForTest(t *testing.T, path string, record qualificationRecord) {
+	t.Helper()
+	raw, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(raw, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestWriteHomebrewFormulaUsesQualifiedArchiveDigests(t *testing.T) {
 	commit := strings.Repeat("a", 40)
 	bundle := writeReleaseBundle(t, "1.2.3", commit)
@@ -472,7 +812,7 @@ func TestValidateQualificationBundleRejectsMissingExtraAndForgedEvidence(t *test
 
 	t.Run("wrong runtime input", func(t *testing.T) {
 		bundle := writeReleaseBundle(t, "1.2.3", commit)
-		evidence := filepath.Join(bundle, expectedReleaseArchives("1.2.3")[0]+qualificationSuffix)
+		evidence := filepath.Join(bundle, expectedReleaseArchives("1.2.3")[1]+qualificationSuffix)
 		raw, err := os.ReadFile(evidence)
 		if err != nil {
 			t.Fatal(err)
@@ -555,6 +895,40 @@ func TestValidateQualificationBundleRejectsMissingExtraAndForgedEvidence(t *test
 	})
 }
 
+func TestCandidateReleaseTagIsAnnotatedCreateOnlyAndRetryable(t *testing.T) {
+	withReleaseRepository(t, func(commit string) {
+		tag := candidateReleaseTag("v1.2.3", commit)
+		first, err := ensureRemoteCandidateReleaseTag(context.Background(), tag, commit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if objectType := strings.TrimSpace(runGitTest(t, "cat-file", "-t", first)); objectType != "tag" {
+			t.Fatalf("candidate ref points to %s, want annotated tag", objectType)
+		}
+		second, err := ensureRemoteCandidateReleaseTag(context.Background(), tag, commit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if second != first {
+			t.Fatalf("candidate tag retry changed object: first=%s second=%s", first, second)
+		}
+		if err := validateCandidateReleaseTagObject(context.Background(), first, tag, commit); err != nil {
+			t.Fatalf("candidate tag validation failed: %v", err)
+		}
+	})
+}
+
+func TestCandidateReleaseTagRejectsLightweightRemoteSubstitution(t *testing.T) {
+	withReleaseRepository(t, func(commit string) {
+		tag := candidateReleaseTag("v1.2.3", commit)
+		runGitTest(t, "tag", tag, commit)
+		runGitTest(t, "push", "origin", "refs/tags/"+tag)
+		if _, err := ensureRemoteCandidateReleaseTag(context.Background(), tag, commit); err == nil || !strings.Contains(err.Error(), "annotated") {
+			t.Fatalf("lightweight candidate tag was accepted: %v", err)
+		}
+	})
+}
+
 func TestTagValidationRequiresPreparedCommitOnOriginMain(t *testing.T) {
 	withReleaseRepository(t, func(commit string) {
 		digest := strings.Repeat("d", 64)
@@ -627,6 +1001,61 @@ func TestQualifiedReleaseTagRetryReusesCapturedObject(t *testing.T) {
 	})
 }
 
+func TestMainBranchProtectionPreflightFailsClosed(t *testing.T) {
+	protected := `{"enforce_admins":{"enabled":true},"required_linear_history":{"enabled":true},"allow_force_pushes":{"enabled":false},"allow_deletions":{"enabled":false}}`
+	for _, test := range []struct {
+		name    string
+		output  string
+		exit    int
+		wantErr bool
+	}{
+		{name: "protected", output: protected, wantErr: false},
+		{name: "unprotected", output: `{}`, wantErr: true},
+		{name: "force-pushes", output: strings.Replace(protected, `"allow_force_pushes":{"enabled":false}`, `"allow_force_pushes":{"enabled":true}`, 1), wantErr: true},
+		{name: "missing", exit: 1, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fakeBin := t.TempDir()
+			script := fmt.Sprintf("#!/bin/sh\nprintf '%%s' %q\nexit %d\n", test.output, test.exit)
+			if err := os.WriteFile(filepath.Join(fakeBin, "gh"), []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			err := requireMainBranchProtection(context.Background(), "sovereign46/cli")
+			if (err != nil) != test.wantErr {
+				t.Fatalf("error = %v, wantErr %v", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestImmutableReleasePreflightFailsClosed(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		output  string
+		exit    int
+		wantErr bool
+	}{
+		{name: "enabled", output: `{"enabled":true}`, wantErr: false},
+		{name: "disabled", output: `{"enabled":false}`, wantErr: true},
+		{name: "missing", exit: 1, wantErr: true},
+		{name: "malformed", output: `{`, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fakeBin := t.TempDir()
+			script := fmt.Sprintf("#!/bin/sh\nprintf '%%s' %q\nexit %d\n", test.output, test.exit)
+			if err := os.WriteFile(filepath.Join(fakeBin, "gh"), []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			err := requireImmutableReleasesEnabled(context.Background(), "sovereign46/cli")
+			if (err != nil) != test.wantErr {
+				t.Fatalf("error = %v, wantErr %v", err, test.wantErr)
+			}
+		})
+	}
+}
+
 func TestCandidateReleaseAdoptionRequiresExactDraftAndCommit(t *testing.T) {
 	valid := candidateRelease{IsDraft: true, TagName: "candidate-v1.2.3-abc", TargetCommitish: strings.Repeat("a", 40)}
 	if err := validateCandidateRelease(valid, valid.TagName, valid.TargetCommitish); err != nil {
@@ -640,6 +1069,200 @@ func TestCandidateReleaseAdoptionRequiresExactDraftAndCommit(t *testing.T) {
 		if err := validateCandidateRelease(state, valid.TagName, valid.TargetCommitish); err == nil {
 			t.Fatalf("unsafe candidate release accepted: %#v", state)
 		}
+	}
+}
+
+func TestNativeQualificationWorkflowUsesExactCreateOnlyCandidateEvidence(t *testing.T) {
+	workflow, err := os.ReadFile(filepath.Join("..", ".github", "workflows", "qualify-candidate.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(workflow)
+	for _, required := range []string{
+		"runner: macos-15-intel",
+		"runner: ubuntu-24.04",
+		"runner: ubuntu-24.04-arm",
+		"runs-on: [self-hosted, macOS, ARM64, s46-airplane-qualification]",
+		"scripts/qualify-cloud-native",
+		"S46_E2E_QUALIFICATION_SCOPE=airplane",
+		"go run ./scripts check-candidate",
+		"go run ./scripts check-qualification",
+		"persist-credentials: false",
+		"environment: cloud-qualification",
+		"environment: airplane-qualification",
+		"S46_E2E_ENVIRONMENT_APPROVAL_SHA256",
+		"S46_E2E_RUNNER_IDENTITY_SHA256",
+		"macos_major\" = 26",
+		`group: release-homebrew-writer`,
+		"max-parallel: 1",
+		"needs: [candidate-draft-cas, native-cloud]",
+		"environment: qualification-signature-upload",
+		"inputs.target == 'qualification-signatures'",
+		"go run ./scripts check-bundle",
+		`reviewers != ["goncalossilva"]`,
+		`S46_E2E_ENVIRONMENT_PREVENT_SELF_REVIEW`,
+		`S46_E2E_ENVIRONMENT_ADMINS_BYPASS`,
+		`candidate-draft-cas:`,
+		`s46.release-candidate-tag.v1`,
+		`git/ref/tags/$candidate_tag`,
+		`--data '{"draft":true}'`,
+		`S46_E2E_CANDIDATE_RELEASE_ID`,
+		`S46_E2E_CANDIDATE_DRAFT_ASSET_ETAG_CAS`,
+		`S46_E2E_CANDIDATE_DRAFT_STALE_IF_MATCH_STATUS`,
+		`actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02`,
+		`qualification-evidence-publisher:`,
+		`qualification-signature-publisher:`,
+		`contents: read`,
+		`actions: write`,
+		`contents: write`,
+		`candidateDraftAssetEtagCas`,
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("native qualification workflow missing %q", required)
+		}
+	}
+	if strings.Contains(text, "--clobber") {
+		t.Fatal("native qualification workflow permits evidence replacement")
+	}
+	for _, job := range []string{"candidate-draft-cas", "qualification-evidence-publisher", "qualification-signature-publisher"} {
+		start := strings.Index(text, "  "+job+":")
+		if start < 0 {
+			t.Fatalf("missing publisher job %s", job)
+		}
+		rest := text[start+3:]
+		end := strings.Index(rest, "\n  ")
+		section := rest
+		if end >= 0 {
+			section = rest[:end]
+		}
+		for _, forbidden := range []string{"actions/checkout", "setup-go", "go run ./scripts", "e2e-airplane-harnesses", "qualify-cloud-native"} {
+			if strings.Contains(section, forbidden) {
+				t.Fatalf("write-capable publisher %s executes build context through %q", job, forbidden)
+			}
+		}
+	}
+	nativeStart := strings.Index(text, "  native-cloud:")
+	nativeEnd := strings.Index(text[nativeStart+1:], "\n  qualification-signature-validation:")
+	if nativeStart < 0 || nativeEnd < 0 {
+		t.Fatal("could not inspect native qualification job permissions")
+	}
+	nativeSection := text[nativeStart : nativeStart+1+nativeEnd]
+	if strings.Contains(nativeSection, "contents: write") || strings.Contains(nativeSection, "gh release upload") {
+		t.Fatal("native candidate execution retains repository-write capability")
+	}
+	airStart := strings.Index(text, "  darwin-arm64-airplane:")
+	airEnd := strings.Index(text[airStart+1:], "\n  qualification-evidence-publisher:")
+	if airStart < 0 || airEnd < 0 {
+		t.Fatal("could not inspect airplane qualification job permissions")
+	}
+	airSection := text[airStart : airStart+1+airEnd]
+	if strings.Contains(airSection, "contents: write") || strings.Contains(airSection, "gh release upload") {
+		t.Fatal("airplane candidate execution retains repository-write capability")
+	}
+	if count := strings.Count(text, "environment: qualification-signature-upload"); count != 1 {
+		t.Fatalf("qualification-signature-upload protects %d jobs, want only the signature publisher", count)
+	}
+	if strings.Contains(text, `test "$macos_major" = 14`) || strings.Contains(text, `test "$macos_major" = 15`) {
+		t.Fatal("airplane qualification permits a macOS version other than 26")
+	}
+	wrapper, err := os.ReadFile("qualify-cloud-native")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"unshare --net", "--no-new-privs", "sandbox-exec", "S46_E2E_ISOLATION_PROFILE_SHA256", "/usr/bin/env -i", "S46_E2E_QUALIFICATION_SCOPE=cloud"} {
+		if !strings.Contains(string(wrapper), required) {
+			t.Fatalf("native cloud isolation wrapper missing %q", required)
+		}
+	}
+	if strings.Contains(string(wrapper), "pfctl") {
+		t.Fatal("native cloud qualification mutates global PF state")
+	}
+}
+
+func TestCASWorkflowsRecoverInterruptedReservedProbes(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "interrupted-cas-probe-assets.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture struct {
+		Assets []struct {
+			ID   int    `json:"id"`
+			Name string `json:"name"`
+			Size int    `json:"size"`
+		} `json:"assets"`
+	}
+	if err := json.Unmarshal(raw, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	const prefix = "s46-release-cas-probe-"
+	probes := 0
+	for _, asset := range fixture.Assets {
+		if strings.HasPrefix(asset.Name, prefix) {
+			probes++
+			if asset.ID <= 0 || asset.Size != 65 || len(asset.Name) != len(prefix)+24+len(".txt") || !strings.HasSuffix(asset.Name, ".txt") {
+				t.Fatalf("interrupted probe fixture is not canonical: %+v", asset)
+			}
+		}
+	}
+	if probes != 1 {
+		t.Fatalf("interrupted probe fixture contains %d reserved probes, want 1", probes)
+	}
+
+	qualificationRaw, err := os.ReadFile(filepath.Join("..", ".github", "workflows", "qualify-candidate.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	qualification := string(qualificationRaw)
+	for _, required := range []string{
+		"reserved_prefix=s46-release-cas-probe-",
+		"validate_candidate_assets",
+		"interrupted CAS probe content is not a canonical nonce",
+		`name != prefix + content[:24].decode("ascii") + ".txt"`,
+		`test "$recovered_etag" != "$before_etag"`,
+		`test ! -s "$work/recovered-probes.tsv"`,
+		`test ! -s "$work/final-probes.tsv"`,
+	} {
+		if !strings.Contains(qualification, required) {
+			t.Errorf("candidate CAS recovery is missing %q", required)
+		}
+	}
+
+	releaseRaw, err := os.ReadFile(filepath.Join("..", ".github", "workflows", "release.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := string(releaseRaw)
+	for _, required := range []string{
+		"recover_reserved_probes",
+		"validate_final_assets",
+		"interrupted final CAS probe content is not a canonical nonce",
+		`test "$after_etag" != "$before_etag"`,
+		`test ! -s "$cas_work/recovery-final-probes.tsv"`,
+		`test ! -s "$cas_work/final-probes.tsv"`,
+	} {
+		if !strings.Contains(release, required) {
+			t.Errorf("final release CAS recovery is missing %q", required)
+		}
+	}
+	call := strings.Index(release, "            recover_reserved_probes")
+	if call < 0 || strings.Index(release[call:], "          verify_assets") < 0 {
+		t.Fatal("final release does not recover reserved probes before exact asset verification")
+	}
+}
+
+func TestGoReleaserCannotPublishOrReplaceAssets(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", ".goreleaser.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := string(raw)
+	for _, required := range []string{"disable: true", "replace_existing_artifacts: false", "- -tags=release"} {
+		if !strings.Contains(config, required) {
+			t.Fatalf("GoReleaser policy is missing %q", required)
+		}
+	}
+	if strings.Contains(config, "replace_existing_artifacts: true") {
+		t.Fatal("GoReleaser policy permits asset replacement")
 	}
 }
 
@@ -657,17 +1280,72 @@ func TestReleaseWorkflowUsesQualifiedBytesWithoutRebuilding(t *testing.T) {
 		"gh release download",
 		"gh release create",
 		"cmp --silent",
-		`check-tag "$GITHUB_REF_NAME" "$GITHUB_SHA" "$published"`,
-		"homebrew-final-release",
+		`check-tag "$GITHUB_REF_NAME" "$commit" "$bundle"`,
+		"validated-release-publication",
 		"homebrew-formula",
 		"secrets.GORELEASER_TOKEN",
-		"repos/sovereign46/tap/contents/Formula/s46.rb",
+		"repos/sovereign46/homebrew-tap/contents/Formula/s46.rb",
+		`--raw-field sha="$current_sha"`,
+		`repos/$GITHUB_REPOSITORY/branches/main`,
+		`--jq .protected`,
+		`repos/$GITHUB_REPOSITORY/branches/main/protection`,
+		`repos/$GITHUB_REPOSITORY/immutable-releases`,
+		`git rev-parse refs/remotes/origin/main`,
+		`= "$GITHUB_SHA"`,
+		`--jq .immutable`,
+		`group: release-homebrew-writer`,
+		`policy_api() { GH_TOKEN="$GH_TOKEN" gh api --method GET "$@"; }`,
+		`environment: release-publication`,
+		`actions/runs/$GITHUB_RUN_ID/approvals`,
+		`candidate-ledger.json`,
+		`candidate-ledger-current.json`,
+		`actions/runs?head_sha=$GITHUB_SHA&status=$state`,
+		`["fredoliveira", "goncalossilva"]`,
+		`.can_admins_bypass == false`,
+		`.prevent_self_review == true`,
+		`--header "If-Match: $final_etag"`,
+		`--data '{"draft":false}'`,
+		`test "$stale_status" = 412`,
+		`--data '{"draft":true}'`,
+		`actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02`,
+		`for attempt in 1 2 3 4`,
+		`equal Homebrew version does not match the exact qualified formula bytes`,
+		`Preserving verified newer Homebrew formula version`,
 	} {
 		if !strings.Contains(workflow, required) {
 			t.Errorf("release workflow is missing %q", required)
 		}
 	}
-	for _, forbidden := range []string{"goreleaser-action", "goreleaser release", "go build"} {
+	for _, required := range []string{
+		`test "$upload_etag" != "$before_etag"`,
+		`test "$delete_etag" != "$upload_etag"`,
+		`s46-release-cas-probe-`,
+		`X-GitHub-Api-Version: $api_version`,
+		`gh release download "$candidate_tag" --dir "$remote_candidate"`,
+		`cmp --silent "$source" "$remote_candidate/$(basename "$source")"`,
+	} {
+		if !strings.Contains(workflow, required) {
+			t.Errorf("release workflow is missing publication invariant %q", required)
+		}
+	}
+	publishStart := strings.Index(workflow, "  publish:")
+	if publishStart < 0 {
+		t.Fatal("release workflow is missing fresh publisher job")
+	}
+	publisher := workflow[publishStart:]
+	for _, forbidden := range []string{"actions/checkout", "setup-go", "go run ./scripts", "check-tag", "homebrew-formula"} {
+		if strings.Contains(publisher, forbidden) {
+			t.Errorf("write-capable release publisher executes build context through %q", forbidden)
+		}
+	}
+	validation := workflow[:publishStart]
+	if strings.Contains(validation, "contents: write") {
+		t.Error("release validation runs build context with repository-write capability")
+	}
+	if strings.Contains(validation, "GORELEASER_TOKEN") {
+		t.Error("release validation exposes a cross-repository write token to build-context code")
+	}
+	for _, forbidden := range []string{"goreleaser-action", "goreleaser release", "go build", "--clobber", `gh release edit`} {
 		if strings.Contains(workflow, forbidden) {
 			t.Errorf("release workflow must not rebuild qualified bytes; found %q", forbidden)
 		}
@@ -710,6 +1388,19 @@ func withReleaseRepository(t *testing.T, fn func(commit string)) {
 	})
 }
 
+func testQualificationPlatform(archive string) (string, string, string, string, string) {
+	switch {
+	case strings.HasSuffix(archive, "_darwin_amd64.tar.gz"):
+		return "macOS", "X64", "15.7.1", "github-hosted", "cloud-qualification"
+	case strings.HasSuffix(archive, "_darwin_arm64.tar.gz"):
+		return "macOS", "ARM64", "26.0", "self-hosted", "airplane-qualification"
+	case strings.HasSuffix(archive, "_linux_amd64.tar.gz"):
+		return "Linux", "X64", "Ubuntu 24.04", "github-hosted", "cloud-qualification"
+	default:
+		return "Linux", "ARM64", "Ubuntu 24.04", "github-hosted", "cloud-qualification"
+	}
+}
+
 func writeReleaseBundle(t *testing.T, version string, commit string) string {
 	t.Helper()
 	directory := t.TempDir()
@@ -732,6 +1423,22 @@ func writeReleaseBundle(t *testing.T, version string, commit string) string {
 		}
 		digest := fileSHA256(t, path)
 		fmt.Fprintf(&checksums, "%s  %s\n", digest, name)
+		capabilities := []string{"cloud-client"}
+		harnesses := []string{}
+		var runtime *qualificationRuntime
+		runnerOS, runnerArch, osVersion, runnerEnvironment, environment := testQualificationPlatform(name)
+		processCount, harnessProcessCount, serviceProcessCount := 1, 0, 0
+		if archiveRequiresAirplaneCapability(name) {
+			capabilities = append(capabilities, "airplane")
+			harnesses = []string{"pi", "claude-code", "codex"}
+			runtime = &qualificationRuntime{
+				Model:                 qualifiedInput{Name: qualifiedDevstralGGUFName, SHA256: qualifiedDevstralGGUFSHA256, Size: qualifiedDevstralGGUFSize},
+				LlamaServer:           qualifiedInput{Name: "llama-server", SHA256: strings.Repeat("b", 64), Size: 12_345},
+				LlamaRuntimeInventory: qualifiedRuntimeInventory{Schema: "s46.llamacpp-runtime-inventory.v1", SHA256: "5188ea71039a80e56a3026fa4c7a823e6b550887a50475fe9c45001ee436c167", Entries: 52},
+				Gateway:               qualifiedInput{Name: "s46-gateway", SHA256: strings.Repeat("c", 64), Size: 23_456},
+			}
+			processCount, harnessProcessCount, serviceProcessCount = 6, 3, 2
+		}
 		record := qualificationRecord{
 			Schema:      qualificationSchema,
 			Result:      "passed",
@@ -744,19 +1451,25 @@ func writeReleaseBundle(t *testing.T, version string, commit string) string {
 				ExpectedCommit:      commit,
 				NetworkIsolation:    "external",
 				FilesystemIsolation: "external",
-				AirplaneHarnesses:   []string{"pi", "claude-code", "codex"},
-				Runtime: qualificationRuntime{
-					Model:       qualifiedInput{Name: qualifiedDevstralGGUFName, SHA256: qualifiedDevstralGGUFSHA256, Size: qualifiedDevstralGGUFSize},
-					LlamaServer: qualifiedInput{Name: "llama-server", SHA256: strings.Repeat("b", 64), Size: 12_345},
-					Gateway:     qualifiedInput{Name: "s46-gateway", SHA256: strings.Repeat("c", 64), Size: 23_456},
+				Capabilities:        capabilities,
+				AirplaneHarnesses:   harnesses,
+				Runtime:             runtime,
+				Execution: qualificationExecution{
+					RunnerOS: runnerOS, RunnerArch: runnerArch, OSVersion: osVersion,
+					RunnerEnvironment: runnerEnvironment, RunnerName: "test-native-runner",
+					WorkflowRef: "sovereign46/cli/.github/workflows/qualify-candidate.yml@refs/heads/main", WorkflowSHA: commit,
+					RunID: "12345", RunAttempt: "1", Environment: environment, EnvironmentApprover: "goncalossilva",
+					EnvironmentReviewers: []string{"goncalossilva"}, EnvironmentPreventSelfReview: true, EnvironmentAdminsBypass: false,
+					ReleaseAPIVersion: "2022-11-28", CandidateReleaseID: "987654", CandidateDraftAssetETagCAS: true, CandidateDraftStaleIfMatchStatus: 412,
+					EnvironmentApprovalSHA256: strings.Repeat("2", 64), RunnerIdentitySHA256: strings.Repeat("3", 64), IsolationProfileSHA256: strings.Repeat("4", 64),
 				},
 				Runner: qualificationRunner{
 					Script:              qualifiedInput{Name: "e2e-airplane-harnesses", SHA256: runnerDigest, Size: runnerSize},
 					ID:                  "12345-0123456789abcdef0123456789abcdef",
 					ProcessCohortSHA256: strings.Repeat("e", 64),
-					ProcessCount:        6,
-					HarnessProcessCount: 3,
-					ServiceProcessCount: 2,
+					ProcessCount:        processCount,
+					HarnessProcessCount: harnessProcessCount,
+					ServiceProcessCount: serviceProcessCount,
 					VerifiedNoSurvivors: true,
 					CleanupVerifiedAt:   "2026-05-20T10:59:59Z",
 				},
@@ -812,7 +1525,15 @@ func writeTestReleaseEvidenceSignature(t *testing.T, path string, privateKey ed2
 	if err != nil {
 		t.Fatal(err)
 	}
-	signature := base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, content)) + "\n"
+	role := releaseEvidenceQualificationRole
+	if filepath.Base(path) == releaseBuildFile {
+		role = releaseEvidenceBuildRole
+	}
+	domain, err := releaseEvidenceSignatureDomain(role)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, signatureMessage(domain, content))) + "\n"
 	if err := os.WriteFile(path+releaseEvidenceSignatureSuffix, []byte(signature), 0o600); err != nil {
 		t.Fatal(err)
 	}

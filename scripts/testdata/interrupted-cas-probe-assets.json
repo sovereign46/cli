@@ -1,0 +1,15 @@
+{
+  "id": 246810,
+  "draft": true,
+  "probeContent": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
+  "assets": [
+    {"id": 1, "name": "s46_9.8.7_darwin_amd64.tar.gz", "size": 100},
+    {"id": 2, "name": "s46_9.8.7_darwin_arm64.tar.gz", "size": 100},
+    {"id": 3, "name": "s46_9.8.7_linux_amd64.tar.gz", "size": 100},
+    {"id": 4, "name": "s46_9.8.7_linux_arm64.tar.gz", "size": 100},
+    {"id": 5, "name": "checksums.txt", "size": 100},
+    {"id": 6, "name": "release-build.json", "size": 100},
+    {"id": 7, "name": "release-build.json.sig", "size": 89},
+    {"id": 8, "name": "s46-release-cas-probe-0123456789abcdef01234567.txt", "size": 65}
+  ]
+}

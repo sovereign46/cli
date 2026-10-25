@@ -6,17 +6,26 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Added live status probes for cloud authentication and airplane gateway readiness, model listing, minimal inference, and harness configuration; failed JSON status now exits nonzero.
+- Added real harness launching to `s46 run`, passing the exact task/model and recording only a uniquely correlated real transcript whose nonempty task and model exactly match after a successful harness exit.
+
 ### Changed
 
 - Changed cloud model selection and Pi runtime limits to use the authorized team catalog instead of client-side defaults; `connect` refuses unavailable selections before changing configuration, without silently switching models.
 - Changed Pi thinking `off` to send an explicit disable value for DeepSeek V4 Flash-0731 on vLLM 0.31.0, without changing other models or airplane mode.
 - Changed the airplane harness E2E to require an exact release-tagged candidate and independently supplied SHA-256, emit digest-bound evidence only after full externally isolated qualification, and strictly validate every archive member.
-- Split release preparation from explicit publication; candidates are built once from the exact prepared commit in an isolated clone, publication requires evidence for every archive, and CI promotes the staged qualified bytes without rebuilding or replacing them before updating Homebrew from their exact checksums.
+- Split release preparation from explicit publication; candidates are built once from the exact prepared commit in an isolated clone, the signed build cohort is staged once before native qualification, evidence and later independent signatures are appended create-only, publication requires capability-scoped evidence for every archive, preflights actual `main` protection and GitHub immutable releases, and CI publishes the verified draft bytes once without rebuilding or replacement before requiring `immutable: true` and compare-and-swap updating Homebrew.
+- Scope release qualification per archive: every exact archive must run on its native OS/architecture to prove cloud-client behavior; cross-compilation cannot qualify it. Create-only candidate jobs cover Intel macOS, amd64 Linux, public ARM Linux where available, and a protected externally isolated macOS ARM runner. Only `darwin/arm64` may advertise airplane capability, and that target still requires the complete runtime and Pi/Claude Code/Codex harness evidence.
+- Decoupled completed login from team-catalog availability; catalog resolution and authorization remain fail-closed in `connect`.
+- Isolated malformed Pi transcripts so healthy local sessions remain visible, while preserving remote session authentication and API errors.
 
 ### Fixed
 
 - Fixed airplane-mode round trips to preserve every selected cloud default, including Devstral served from a cloud endpoint.
 - Fixed project discovery to ignore repository-local Git environment inherited from parent hooks and commands.
+- Fixed noninteractive airplane setup to fail nonzero when setup remains incomplete or unsupported, and status to report missing harness executables before declaring configuration healthy.
 
 ### Security
 
@@ -24,7 +33,15 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Require API-derived runtime-closure metadata before configuring or restoring DeepSeek V4 Flash-0731 in Pi, including saved team and aliased snapshot state.
 - Recheck signed audits and advisories after artifact verification, and invalidate matching cached receipts after an authenticated policy refusal.
 - Reject native safetensors packages before downloading them through the GGUF-only airplane installer.
-- Require distinct approved Ed25519 build and qualification authorities to sign the exact release receipt and every archive qualification record.
+- Require distinct approved Ed25519 build and qualification authorities to create domain-separated signatures for the exact release receipt and every archive qualification record, with a no-clobber signer that validates protected key files against pinned role keys.
+- Require one qualified airplane closure to pin the exact GGUF, complete non-writable llama.cpp runtime inventory, and gateway; release builds reject ambient binaries, source fallback, and latest-version installation, and unsupported platforms fail closed.
+- Close model and runtime launch substitution by using a bounded unlinked GGUF descriptor plus authenticated immutable private runtime snapshots, native Darwin process-start and model-FD identity, and release-bound llama/gateway process receipts; endpoint-only loopback responders are rejected.
+- Restrict mock share uploads to development builds.
+- Bound and reject hostile runtime archive/inventory metadata, links, special objects, PAX records, and user-controlled extended attributes; bind live Darwin executable descriptors and terminate complete process groups before snapshot deletion.
+- Bind native qualification to the exact protected-environment reviewer policy and approval, ephemeral runner, OS/architecture/version, exact workflow/run, and isolation identity; use process-scoped macOS sandboxing instead of global PF mutation, and restrict airplane qualification/runtime to macOS 26 on Darwin/arm64.
+- Launch every coding harness in a private process group and terminate, kill, wait for, and verify its descendants on normal exit or cancellation.
+- Serialize candidate/release writers, bind a pre-tag candidate-draft asset-sensitive ETag/stale-`If-Match` capability proof into every qualification record, recover only bounded canonical reserved probe assets after interrupted runs while preserving exact authority cohorts, require a stable candidate asset ledger plus an exact immediate pre-publication re-fetch, repeat the probe on the final draft, and publish only through a final exact-state `If-Match` transition.
+- Separate qualification and release validation from publication credentials: candidate/build-context code runs only in read-only jobs that emit immutable Actions artifacts, while fresh no-checkout brokers validate artifact IDs/digests and exact source/run bindings before create-only writes; only decision/signature/final-publication jobs consume protected-environment approvals.
 
 ### Removed
 

@@ -6,11 +6,13 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -27,6 +29,33 @@ func TestAirplaneHarnessE2EScriptSmoke(t *testing.T) {
 	cmd.Stderr = &output
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("airplane harness E2E script smoke failed: %v\n%s", err, output.String())
+	}
+}
+
+func TestAirplaneQualificationUsesDefaultPinnedInstallers(t *testing.T) {
+	raw, err := os.ReadFile("e2e-airplane-harnesses")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(raw)
+	for _, required := range []string{
+		"S46_E2E_LLAMA_ARCHIVE",
+		"S46_E2E_LLAMA_ARCHIVE_SHA256",
+		"S46_E2E_LLAMA_INVENTORY_SHA256",
+		"s46.llamacpp-runtime-inventory.v1",
+		"S46_E2E_GATEWAY_ARCHIVE",
+		"S46_E2E_GATEWAY_ARCHIVE_SHA256",
+		`$XDG_CACHE_HOME/s46/runtime/pinned-llama.cpp.tar.gz`,
+		`$XDG_CACHE_HOME/s46/gateway/pinned-release.tar.gz`,
+	} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("qualification runner is missing default-installer binding %q", required)
+		}
+	}
+	for _, forbidden := range []string{"export S46_API_BINARY=", "S46_E2E_GATEWAY_BINARY", "S46_E2E_LLAMA_SERVER:-"} {
+		if strings.Contains(script, forbidden) {
+			t.Fatalf("qualification runner permits runtime substitution through %q", forbidden)
+		}
 	}
 }
 
@@ -275,6 +304,91 @@ chmod 0700 "$bin_dir/ps"`, helper, pidFile)
 	}
 	if processExists(pid) {
 		t.Fatalf("candidate PATH ps shadow hid surviving process %d", pid)
+	}
+}
+
+func TestCloudQualificationProducesCloudOnlyEvidenceAndProvesAirplaneUnsupported(t *testing.T) {
+	candidateBody := `#!/bin/sh
+set -eu
+case "$*" in
+  "version --json") printf '%s\n' '` + releaseCandidateJSON + `' ;;
+  "--json login --user qualification-client@s46.invalid --device-id qualification-client --device-name Native Qualification Client")
+    python3 - "$S46_API_BASE_URL" <<'PY'
+import json
+import sys
+import urllib.error
+import urllib.request
+
+base_url = sys.argv[1]
+body = json.dumps({
+    "email": "qualification-client@s46.invalid",
+    "deviceId": "qualification-client",
+    "deviceName": "Native Qualification Client",
+}, separators=(",", ":")).encode()
+request = urllib.request.Request(
+    base_url + "/v1/auth/device/start",
+    data=body,
+    headers={"Accept": "application/json", "Content-Type": "application/json", "User-Agent": "s46-cli"},
+    method="POST",
+)
+try:
+    urllib.request.urlopen(request, timeout=10)
+except urllib.error.HTTPError as error:
+    response = json.load(error)
+    if error.code == 403 and response == {"error": {"code": "not_invited", "message": "qualification client is not invited"}}:
+        print("qualification-client@s46.invalid is not invited", file=sys.stderr)
+        raise SystemExit(1)
+    raise
+raise SystemExit("qualification server unexpectedly accepted client")
+PY
+    ;;
+  "airplane setup --yes") printf '%s\n' 'airplane mode is unsupported on linux/amd64'; exit 1 ;;
+  *) exit 0 ;;
+esac
+`
+	candidate := filepath.Join(t.TempDir(), "s46_1.2.3_linux_amd64.tar.gz")
+	writeCandidateArchive(t, candidate, []byte(candidateBody), 0o755)
+	evidence := candidate + qualificationSuffix
+	output, err := runCandidateVerificationWithEnv(t, candidate, fileSHA256(t, candidate),
+		"S46_E2E_VERIFY_CANDIDATE_ONLY=0",
+		"S46_E2E_QUALIFICATION=1",
+		"S46_E2E_QUALIFICATION_SCOPE=cloud",
+		"S46_E2E_NETWORK_ISOLATION=external",
+		"S46_E2E_FILESYSTEM_ISOLATION=external",
+		"S46_E2E_EXPECTED_VERSION=1.2.3",
+		"S46_E2E_EXPECTED_COMMIT=0123456789abcdef0123456789abcdef01234567",
+		"S46_E2E_QUALIFICATION_EVIDENCE="+evidence,
+	)
+	if err != nil {
+		t.Fatalf("cloud qualification failed: %v\n%s", err, output)
+	}
+	if !strings.Contains(output, "release cloud client completed the exact bounded loopback request/response") {
+		t.Fatalf("cloud qualification did not exercise the release client:\n%s", output)
+	}
+	raw, err := os.ReadFile(evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record qualificationRecord
+	if err := json.Unmarshal(raw, &record); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(record.Qualification.Capabilities, []string{"cloud-client"}) || len(record.Qualification.AirplaneHarnesses) != 0 || record.Qualification.Runtime != nil {
+		t.Fatalf("cloud evidence acquired airplane claims: %#v", record.Qualification)
+	}
+	execution := record.Qualification.Execution
+	if execution.EnvironmentApprover != "goncalossilva" || !slices.Equal(execution.EnvironmentReviewers, []string{"goncalossilva"}) || !execution.EnvironmentPreventSelfReview || execution.EnvironmentAdminsBypass {
+		t.Fatalf("cloud evidence did not bind exact environment protection: %#v", execution)
+	}
+	if execution.ReleaseAPIVersion != "2022-11-28" || execution.CandidateReleaseID != "987654" || !execution.CandidateDraftAssetETagCAS || execution.CandidateDraftStaleIfMatchStatus != 412 {
+		t.Fatalf("cloud evidence did not bind candidate draft CAS proof: %#v", execution)
+	}
+	info, err := os.Stat(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateQualificationRecord(evidence, filepath.Base(candidate), fileSHA256(t, candidate), info.Size(), "1.2.3", "0123456789abcdef0123456789abcdef01234567"); err != nil {
+		t.Fatalf("generated cloud qualification evidence is not publishable: %v", err)
 	}
 }
 
@@ -830,6 +944,14 @@ func runCandidateVerification(t *testing.T, candidate, hash string) (string, err
 
 func runCandidateVerificationWithEnv(t *testing.T, candidate, hash string, extra ...string) (string, error) {
 	t.Helper()
+	runnerOS, runnerArch, osVersion, runnerEnvironment, environment := "macOS", "ARM64", "26.0", "self-hosted", "airplane-qualification"
+	if strings.Contains(filepath.Base(candidate), "linux_amd64") {
+		runnerOS, runnerArch, osVersion, runnerEnvironment, environment = "Linux", "X64", "Ubuntu 24.04", "github-hosted", "cloud-qualification"
+	} else if strings.Contains(filepath.Base(candidate), "linux_arm64") {
+		runnerOS, runnerArch, osVersion, runnerEnvironment, environment = "Linux", "ARM64", "Ubuntu 24.04", "github-hosted", "cloud-qualification"
+	} else if strings.Contains(filepath.Base(candidate), "darwin_amd64") {
+		runnerOS, runnerArch, osVersion, runnerEnvironment, environment = "macOS", "X64", "15.7.1", "github-hosted", "cloud-qualification"
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "bash", "./e2e-airplane-harnesses")
@@ -838,6 +960,27 @@ func runCandidateVerificationWithEnv(t *testing.T, candidate, hash string, extra
 		"S46_E2E_CANDIDATE_SHA256="+hash,
 		"S46_E2E_VERIFY_CANDIDATE_ONLY=1",
 		"S46_E2E_QUALIFICATION_EVIDENCE="+filepath.Join(t.TempDir(), "s46-qualification.json"),
+		"S46_E2E_RUNNER_OS="+runnerOS,
+		"S46_E2E_RUNNER_ARCH="+runnerArch,
+		"S46_E2E_OS_VERSION="+osVersion,
+		"S46_E2E_RUNNER_ENVIRONMENT="+runnerEnvironment,
+		"S46_E2E_RUNNER_NAME=test-native-runner",
+		"S46_E2E_WORKFLOW_REF=sovereign46/cli/.github/workflows/qualify-candidate.yml@refs/heads/main",
+		"S46_E2E_WORKFLOW_SHA=0123456789abcdef0123456789abcdef01234567",
+		"S46_E2E_RUN_ID=12345",
+		"S46_E2E_RUN_ATTEMPT=1",
+		"S46_E2E_ENVIRONMENT="+environment,
+		"S46_E2E_ENVIRONMENT_APPROVER=goncalossilva",
+		"S46_E2E_ENVIRONMENT_REVIEWERS=goncalossilva",
+		"S46_E2E_ENVIRONMENT_PREVENT_SELF_REVIEW=true",
+		"S46_E2E_ENVIRONMENT_ADMINS_BYPASS=false",
+		"S46_E2E_RELEASE_API_VERSION=2022-11-28",
+		"S46_E2E_CANDIDATE_RELEASE_ID=987654",
+		"S46_E2E_CANDIDATE_DRAFT_ASSET_ETAG_CAS=true",
+		"S46_E2E_CANDIDATE_DRAFT_STALE_IF_MATCH_STATUS=412",
+		"S46_E2E_ENVIRONMENT_APPROVAL_SHA256="+strings.Repeat("2", 64),
+		"S46_E2E_RUNNER_IDENTITY_SHA256="+strings.Repeat("3", 64),
+		"S46_E2E_ISOLATION_PROFILE_SHA256="+strings.Repeat("4", 64),
 	)
 	cmd.Env = append(cmd.Env, extra...)
 	output, err := cmd.CombinedOutput()

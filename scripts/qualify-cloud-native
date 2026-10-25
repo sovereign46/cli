@@ -1,0 +1,222 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  echo "usage: scripts/qualify-cloud-native <candidate-archive> <evidence-output> <version> <full-commit>" >&2
+  exit 2
+}
+
+[ "$#" -eq 4 ] || usage
+candidate=$1
+evidence=$2
+version=$3
+commit=$4
+script_directory=$(cd "$(dirname "$0")" && pwd -P)
+runner_source=$script_directory/e2e-airplane-harnesses
+wrapper_source=$script_directory/qualify-cloud-native
+
+[ -f "$candidate" ] && [ ! -L "$candidate" ] || { echo "candidate must be a regular non-symlink file" >&2; exit 1; }
+[ -f "$runner_source" ] && [ ! -L "$runner_source" ] || { echo "qualification runner must be a regular non-symlink file" >&2; exit 1; }
+[[ "$commit" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]] || { echo "commit must be a full lowercase object ID" >&2; exit 1; }
+[[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || { echo "version must be semantic" >&2; exit 1; }
+[ "${evidence#/}" != "$evidence" ] || { echo "evidence output must be absolute" >&2; exit 1; }
+[ ! -e "$evidence" ] && [ ! -L "$evidence" ] || { echo "evidence output already exists" >&2; exit 1; }
+
+case "$(uname -s)/$(uname -m)" in
+  Darwin/x86_64) platform=darwin_amd64 ;;
+  Linux/x86_64) platform=linux_amd64 ;;
+  Linux/aarch64|Linux/arm64) platform=linux_arm64 ;;
+  *) echo "unsupported native cloud qualification platform: $(uname -s)/$(uname -m)" >&2; exit 1 ;;
+esac
+base=$(basename "$candidate")
+[ "$base" = "s46_${version}_${platform}.tar.gz" ] || { echo "candidate $base does not match native platform $platform" >&2; exit 1; }
+[ "$(basename "$evidence")" = "$base.qualification.json" ] || { echo "evidence filename must bind the exact archive name" >&2; exit 1; }
+
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
+candidate_sha=$(sha256_file "$candidate")
+runner_sha=$(sha256_file "$runner_source")
+wrapper_sha=$(sha256_file "$wrapper_source")
+sandbox=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/s46-cloud-qualification.XXXXXX")
+qualification_pid=""
+cleanup() {
+  if [ -n "$qualification_pid" ]; then
+    sudo pkill -TERM -P "$qualification_pid" >/dev/null 2>&1 || true
+    sudo kill -TERM "$qualification_pid" >/dev/null 2>&1 || true
+    sleep 1
+    sudo pkill -KILL -P "$qualification_pid" >/dev/null 2>&1 || true
+    sudo kill -KILL "$qualification_pid" >/dev/null 2>&1 || true
+    wait "$qualification_pid" 2>/dev/null || true
+  fi
+  if [ "$(uname -s)" = Linux ] && [ -n "${qualification_user:-}" ]; then
+    sudo userdel "$qualification_user" >/dev/null 2>&1 || true
+  fi
+  sudo rm -rf "$sandbox" >/dev/null 2>&1 || rm -rf "$sandbox"
+}
+trap cleanup EXIT INT TERM
+mkdir -m 0700 "$sandbox/input" "$sandbox/output" "$sandbox/home" "$sandbox/tmp"
+stable_copy() {
+  python3 - "$1" "$2" "$3" "$4" <<'PY'
+import hashlib
+import os
+import stat
+import sys
+source, destination, expected, mode = sys.argv[1:]
+before = os.lstat(source)
+if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+    raise SystemExit("qualification input is not a singly linked regular file")
+flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+source_fd = os.open(source, flags)
+try:
+    opened = os.fstat(source_fd)
+    if (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns) != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns):
+        raise SystemExit("qualification input changed before capture")
+    destination_fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0), int(mode, 8))
+    digest = hashlib.sha256()
+    try:
+        while True:
+            chunk = os.read(source_fd, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+            view = memoryview(chunk)
+            while view:
+                written = os.write(destination_fd, view)
+                if written <= 0:
+                    raise SystemExit("short qualification input write")
+                view = view[written:]
+        os.fsync(destination_fd)
+    finally:
+        os.close(destination_fd)
+    after_fd = os.fstat(source_fd)
+    after_path = os.lstat(source)
+    identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+    if (after_fd.st_dev, after_fd.st_ino, after_fd.st_size, after_fd.st_mtime_ns) != identity or (after_path.st_dev, after_path.st_ino, after_path.st_size, after_path.st_mtime_ns) != identity:
+        raise SystemExit("qualification input changed during capture")
+    if digest.hexdigest() != expected:
+        raise SystemExit("qualification input digest changed during capture")
+finally:
+    os.close(source_fd)
+PY
+}
+stable_copy "$candidate" "$sandbox/input/$base" "$candidate_sha" 0644
+stable_copy "$runner_source" "$sandbox/input/e2e-airplane-harnesses" "$runner_sha" 0755
+
+set_isolation_profile_sha() {
+  local digest=$1
+  local index
+  for index in "${!run_qualification[@]}"; do
+    case "${run_qualification[$index]}" in
+      S46_E2E_ISOLATION_PROFILE_SHA256=*) run_qualification[$index]="S46_E2E_ISOLATION_PROFILE_SHA256=$digest"; return ;;
+    esac
+  done
+  echo "isolation profile environment slot is unavailable" >&2
+  exit 1
+}
+
+run_qualification=(
+  /usr/bin/env -i
+  "HOME=$sandbox/home"
+  "TMPDIR=$sandbox/tmp"
+  "PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  S46_E2E_VERIFY_CANDIDATE_ONLY=0
+  S46_E2E_QUALIFICATION=1
+  S46_E2E_QUALIFICATION_SCOPE=cloud
+  S46_E2E_NETWORK_ISOLATION=external
+  S46_E2E_FILESYSTEM_ISOLATION=external
+  "S46_E2E_EXPECTED_VERSION=$version"
+  "S46_E2E_EXPECTED_COMMIT=$commit"
+  "S46_E2E_CANDIDATE=$sandbox/input/$base"
+  "S46_E2E_CANDIDATE_SHA256=$candidate_sha"
+  "S46_E2E_QUALIFICATION_EVIDENCE=$sandbox/output/$base.qualification.json"
+  "S46_E2E_RUNNER_OS=${S46_E2E_RUNNER_OS:?}"
+  "S46_E2E_RUNNER_ARCH=${S46_E2E_RUNNER_ARCH:?}"
+  "S46_E2E_OS_VERSION=${S46_E2E_OS_VERSION:?}"
+  "S46_E2E_RUNNER_ENVIRONMENT=${S46_E2E_RUNNER_ENVIRONMENT:?}"
+  "S46_E2E_RUNNER_NAME=${S46_E2E_RUNNER_NAME:?}"
+  "S46_E2E_WORKFLOW_REF=${S46_E2E_WORKFLOW_REF:?}"
+  "S46_E2E_WORKFLOW_SHA=${S46_E2E_WORKFLOW_SHA:?}"
+  "S46_E2E_RUN_ID=${S46_E2E_RUN_ID:?}"
+  "S46_E2E_RUN_ATTEMPT=${S46_E2E_RUN_ATTEMPT:?}"
+  "S46_E2E_ENVIRONMENT=${S46_E2E_ENVIRONMENT:?}"
+  "S46_E2E_ENVIRONMENT_APPROVER=${S46_E2E_ENVIRONMENT_APPROVER:?}"
+  "S46_E2E_ENVIRONMENT_REVIEWERS=${S46_E2E_ENVIRONMENT_REVIEWERS:?}"
+  "S46_E2E_ENVIRONMENT_PREVENT_SELF_REVIEW=${S46_E2E_ENVIRONMENT_PREVENT_SELF_REVIEW:?}"
+  "S46_E2E_ENVIRONMENT_ADMINS_BYPASS=${S46_E2E_ENVIRONMENT_ADMINS_BYPASS:?}"
+  "S46_E2E_RELEASE_API_VERSION=${S46_E2E_RELEASE_API_VERSION:?}"
+  "S46_E2E_CANDIDATE_RELEASE_ID=${S46_E2E_CANDIDATE_RELEASE_ID:?}"
+  "S46_E2E_CANDIDATE_DRAFT_ASSET_ETAG_CAS=${S46_E2E_CANDIDATE_DRAFT_ASSET_ETAG_CAS:?}"
+  "S46_E2E_CANDIDATE_DRAFT_STALE_IF_MATCH_STATUS=${S46_E2E_CANDIDATE_DRAFT_STALE_IF_MATCH_STATUS:?}"
+  "S46_E2E_ENVIRONMENT_APPROVAL_SHA256=${S46_E2E_ENVIRONMENT_APPROVAL_SHA256:?}"
+  "S46_E2E_RUNNER_IDENTITY_SHA256=${S46_E2E_RUNNER_IDENTITY_SHA256:?}"
+  "S46_E2E_ISOLATION_PROFILE_SHA256=$wrapper_sha"
+  /bin/bash "$sandbox/input/e2e-airplane-harnesses"
+)
+
+case "$(uname -s)" in
+  Linux)
+    qualification_user="s46q$$_$RANDOM"
+    qualification_user=${qualification_user//_/}
+    qualification_user=${qualification_user:0:28}
+    sudo useradd --system --no-create-home --home-dir "$sandbox/home" --shell /usr/sbin/nologin "$qualification_user"
+    sudo chown root:root "$sandbox" "$sandbox/input" "$sandbox/input/$base" "$sandbox/input/e2e-airplane-harnesses"
+    sudo chmod 0711 "$sandbox"
+    sudo chmod 0555 "$sandbox/input" "$sandbox/input/e2e-airplane-harnesses"
+    sudo chmod 0444 "$sandbox/input/$base"
+    sudo chown -R "$qualification_user" "$sandbox/output" "$sandbox/home" "$sandbox/tmp"
+    uid=$(id -u "$qualification_user")
+    gid=$(id -g "$qualification_user")
+    sudo unshare --net --fork --kill-child /bin/bash -c '
+      set -euo pipefail
+      /usr/sbin/ip link set lo up
+      exec /usr/bin/setpriv --reuid "$1" --regid "$2" --clear-groups --no-new-privs "${@:3}"
+    ' qualification-isolation "$uid" "$gid" "${run_qualification[@]}"
+    ;;
+  Darwin)
+    profile="$sandbox/qualification.sb"
+    cat > "$profile" <<PROFILE
+(version 1)
+(deny default)
+(allow process*)
+(allow file-read*)
+(allow file-write* (subpath "$sandbox") (literal "/dev/null") (literal "/dev/tty"))
+(allow sysctl-read)
+(allow mach-lookup)
+(allow network-inbound (local ip "localhost:*"))
+(allow network-outbound (remote ip "localhost:*"))
+PROFILE
+    profile_sha=$(sha256_file "$profile")
+    set_isolation_profile_sha "$profile_sha"
+    sudo chown root:wheel "$sandbox" "$sandbox/input" "$sandbox/input/$base" "$sandbox/input/e2e-airplane-harnesses" "$profile"
+    sudo chmod 0711 "$sandbox"
+    sudo chmod 0555 "$sandbox/input" "$sandbox/input/e2e-airplane-harnesses"
+    sudo chmod 0444 "$sandbox/input/$base"
+    sudo chmod 0444 "$profile"
+    sudo chown -R nobody:staff "$sandbox/output" "$sandbox/home" "$sandbox/tmp"
+    sudo -u nobody /usr/bin/sandbox-exec -f "$profile" "${run_qualification[@]}" &
+    qualification_pid=$!
+    set +e
+    wait "$qualification_pid"
+    status=$?
+    set -e
+    qualification_pid=""
+    [ "$status" -eq 0 ] || exit "$status"
+    ;;
+  *) exit 1 ;;
+esac
+
+staged="$sandbox/output/$base.qualification.json"
+[ -f "$staged" ] && [ ! -L "$staged" ] || { echo "qualification did not produce evidence" >&2; exit 1; }
+[ "$(sha256_file "$sandbox/input/$base")" = "$candidate_sha" ] || { echo "candidate changed during qualification" >&2; exit 1; }
+[ "$(sha256_file "$sandbox/input/e2e-airplane-harnesses")" = "$runner_sha" ] || { echo "qualification runner changed during qualification" >&2; exit 1; }
+sudo chown "$(id -u):$(id -g)" "$staged"
+evidence_sha=$(sha256_file "$staged")
+stable_copy "$staged" "$evidence" "$evidence_sha" 0600
+cmp -s "$staged" "$evidence"
+echo "native cloud-client qualification evidence: $evidence"

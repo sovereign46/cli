@@ -6,126 +6,522 @@ on:
       - 'v*.*.*'
 
 permissions:
-  contents: write
+  actions: read
+  contents: read
+  deployments: read
+
+env:
+  GH_REPO: ${{ github.repository }}
 
 concurrency:
-  group: release-${{ github.ref }}
+  # Homebrew is one cross-release mutable pointer. Serialize every tag and
+  # commit against the same writer lock so an older run cannot race a newer one.
+  group: release-homebrew-writer
   cancel-in-progress: false
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
+  validate:
+    name: validate exact release bytes without repository write capability
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
           go-version-file: go.mod
-      - name: Download and verify the exact qualified release bundle
+      - name: Validate the exact qualified candidate and render publication inputs
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # Keep policy reads explicit and local to this unprivileged job. The
+          # forced method prevents an argument change from turning this helper
+          # into a repository mutation.
+          policy_api() { GH_TOKEN="$GH_TOKEN" gh api --method GET "$@"; }
           git fetch --quiet --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          test "$(git rev-parse refs/remotes/origin/main)" = "$GITHUB_SHA"
           git fetch --quiet --force --no-tags origin \
             "refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME"
           test "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" = tag
           commit="$(git rev-parse HEAD)"
           test "$commit" = "$GITHUB_SHA"
           candidate_tag="candidate-$GITHUB_REF_NAME-$commit"
-          bundle="$RUNNER_TEMP/qualified-release"
-          mkdir -p "$bundle"
+          candidate_endpoint="repos/$GITHUB_REPOSITORY/releases/tags/$candidate_tag"
+          publication="$RUNNER_TEMP/publication"
+          bundle="$publication/qualified-release"
+          mkdir -m 0700 -p "$bundle"
+          policy_api "$candidate_endpoint" | jq -S '{id, tag_name, target_commitish, draft, updated_at, assets: [.assets[] | {id, name, size, digest, updated_at}] | sort_by(.name)}' > "$publication/candidate-ledger.json"
+          test "$(jq -r .draft "$publication/candidate-ledger.json")" = true
+          test "$(jq -r .target_commitish "$publication/candidate-ledger.json")" = "$commit"
           gh release download "$candidate_tag" --dir "$bundle"
           go run ./scripts check-tag "$GITHUB_REF_NAME" "$commit" "$bundle"
           tag_object="$(git rev-parse "refs/tags/$GITHUB_REF_NAME")"
           test "$(git ls-remote origin "refs/tags/$GITHUB_REF_NAME" | awk '{print $1}')" = "$tag_object"
-          printf '%s\n' "$tag_object" > "$RUNNER_TEMP/qualified-tag-object"
-      - name: Publish the verified bytes without rebuilding
+          go run ./scripts homebrew-formula "$GITHUB_REF_NAME" "$bundle" > "$publication/s46.rb"
+          jq -n \
+            --arg schema s46.validated-release-publication.v1 \
+            --arg tag "$GITHUB_REF_NAME" \
+            --arg commit "$commit" \
+            --arg candidateTag "$candidate_tag" \
+            --arg tagObject "$tag_object" \
+            '{schema:$schema,tag:$tag,commit:$commit,candidateTag:$candidateTag,tagObject:$tagObject}' \
+            > "$publication/publication.json"
+      - name: Upload immutable validated publication artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: validated-release-publication
+          path: ${{ runner.temp }}/publication
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          overwrite: false
+
+  publish:
+    name: publish validated bytes without build-context execution
+    needs: validate
+    runs-on: ubuntu-24.04
+    environment: release-publication
+    permissions:
+      actions: read
+      contents: write
+      deployments: read
+    steps:
+      - name: Verify immutable validation artifact and publish with exact-state CAS
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_POLICY_TOKEN: ${{ secrets.GORELEASER_TOKEN }}
         run: |
           set -euo pipefail
-          bundle="$RUNNER_TEMP/qualified-release"
+          test -n "${RELEASE_POLICY_TOKEN:-}"
+          policy_api() { GH_TOKEN="$RELEASE_POLICY_TOKEN" gh api --method GET "$@"; }
+          environment_policy="$RUNNER_TEMP/release-environment.json"
+          run_approvals="$RUNNER_TEMP/release-approvals.json"
+          policy_api "repos/$GITHUB_REPOSITORY/environments/release-publication" > "$environment_policy"
+          policy_api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals" > "$run_approvals"
+          jq -e '
+            .can_admins_bypass == false and
+            (.protection_rules | length) == 1 and
+            .protection_rules[0].type == "required_reviewers" and
+            .protection_rules[0].prevent_self_review == true and
+            ([.protection_rules[0].reviewers[] | select(.type == "User") | .reviewer.login] | sort) == ["fredoliveira", "goncalossilva"]
+          ' "$environment_policy" >/dev/null
+          jq -e '
+            any(.[];
+              (.state | ascii_downcase) == "approved" and
+              (.user.login == "fredoliveira" or .user.login == "goncalossilva") and
+              any(.environments[]?; .name == "release-publication")
+            )
+          ' "$run_approvals" >/dev/null
+          test "$(policy_api "repos/$GITHUB_REPOSITORY/branches/main" --jq .protected)" = true
+          test "$(policy_api "repos/$GITHUB_REPOSITORY/branches/main/protection" --jq '.enforce_admins.enabled and .required_linear_history.enabled and (.allow_force_pushes.enabled | not) and (.allow_deletions.enabled | not)')" = true
+          test "$(policy_api "repos/$GITHUB_REPOSITORY/immutable-releases" --jq .enabled)" = true
+          for state in in_progress queued waiting pending requested; do
+            policy_api "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$GITHUB_SHA&status=$state&per_page=100" \
+              | jq -e --argjson current "$GITHUB_RUN_ID" 'all(.workflow_runs[]?; .id == $current or ((.path | endswith("/qualify-candidate.yml") or endswith("/release.yml")) | not))' >/dev/null
+          done
+
+          artifacts="$RUNNER_TEMP/artifacts.json"
+          gh api --header "X-GitHub-Api-Version: 2022-11-28" "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" > "$artifacts"
+          read -r artifact_id artifact_digest < <(jq -er '
+            [.artifacts[] | select(.name == "validated-release-publication")] as $selected |
+            if .total_count == 1 and (.artifacts | length) == 1 and ($selected | length) == 1 and ($selected[0].expired | not) and ($selected[0].digest | test("^sha256:[0-9a-f]{64}$"))
+            then "\($selected[0].id) \($selected[0].digest[7:])" else error("invalid publication artifact ledger") end
+          ' "$artifacts")
+          zip="$RUNNER_TEMP/validated-release-publication.zip"
+          curl --fail --location --silent --show-error \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --output "$zip" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id/zip"
+          test "$(wc -c < "$zip" | tr -d '[:space:]')" -le 1073741824
+          test "$(sha256sum "$zip" | awk '{print $1}')" = "$artifact_digest"
+          publication="$RUNNER_TEMP/publication"
+          mkdir -m 0700 "$publication"
+          version="${GITHUB_REF_NAME#v}"
+          python3 - "$zip" "$publication" "$version" <<'PY'
+          import os, pathlib, stat, sys, zipfile
+          archive, destination, version = sys.argv[1:]
+          archives = {f"s46_{version}_{platform}.tar.gz" for platform in ("darwin_amd64", "darwin_arm64", "linux_amd64", "linux_arm64")}
+          bundle = archives | {"checksums.txt", "release-build.json", "release-build.json.sig"}
+          bundle |= {name + ".qualification.json" for name in archives}
+          bundle |= {name + ".qualification.json.sig" for name in archives}
+          expected = {"candidate-ledger.json", "publication.json", "s46.rb"} | {"qualified-release/" + name for name in bundle}
+          total = 0
+          with zipfile.ZipFile(archive) as source:
+              files = [member for member in source.infolist() if not member.is_dir()]
+              if {member.filename for member in files} != expected:
+                  raise SystemExit("publication artifact does not contain the exact expected cohort")
+              for member in files:
+                  mode = member.external_attr >> 16
+                  if stat.S_ISLNK(mode) or member.file_size <= 0 or member.file_size > 268435456 or member.flag_bits & 1:
+                      raise SystemExit("publication artifact has unsafe member metadata")
+                  total += member.file_size
+                  if total > 1073741824:
+                      raise SystemExit("publication artifact exceeds aggregate extraction limit")
+                  content = source.read(member)
+                  if len(content) != member.file_size:
+                      raise SystemExit("publication artifact member is truncated")
+                  target = pathlib.Path(destination) / member.filename
+                  target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                  descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                  with os.fdopen(descriptor, "wb") as output:
+                      output.write(content)
+          PY
+          bundle="$publication/qualified-release"
+          metadata="$publication/publication.json"
+          candidate_ledger="$publication/candidate-ledger.json"
+          candidate_tag="candidate-$GITHUB_REF_NAME-$GITHUB_SHA"
+          test "$(jq -r .schema "$metadata")" = s46.validated-release-publication.v1
+          test "$(jq -r .tag "$metadata")" = "$GITHUB_REF_NAME"
+          test "$(jq -r .commit "$metadata")" = "$GITHUB_SHA"
+          test "$(jq -r .candidateTag "$metadata")" = "$candidate_tag"
+          expected_tag_object="$(jq -r .tagObject "$metadata")"
+          [[ "$expected_tag_object" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$GITHUB_SHA"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$GITHUB_REF_NAME" --jq .object.sha)" = "$expected_tag_object"
+          candidate_endpoint="repos/$GITHUB_REPOSITORY/releases/tags/$candidate_tag"
+          snapshot_candidate() {
+            gh api "$candidate_endpoint" | jq -S '{id, tag_name, target_commitish, draft, updated_at, assets: [.assets[] | {id, name, size, digest, updated_at}] | sort_by(.name)}'
+          }
+          snapshot_candidate > "$RUNNER_TEMP/candidate-ledger-current.json"
+          cmp --silent "$candidate_ledger" "$RUNNER_TEMP/candidate-ledger-current.json"
+          test "$(jq -r .draft "$candidate_ledger")" = true
+          test "$(jq -r .target_commitish "$candidate_ledger")" = "$GITHUB_SHA"
+          remote_candidate="$RUNNER_TEMP/remote-candidate"
+          mkdir -m 0700 "$remote_candidate"
+          gh release download "$candidate_tag" --dir "$remote_candidate"
+          test "$(find "$remote_candidate" -maxdepth 1 -type f | wc -l | tr -d '[:space:]')" = "$(find "$bundle" -maxdepth 1 -type f | wc -l | tr -d '[:space:]')"
+          for source in "$bundle"/*; do
+            cmp --silent "$source" "$remote_candidate/$(basename "$source")"
+          done
+
+          release_endpoint="repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME"
+          release_url="https://api.github.com/$release_endpoint"
           published="$RUNNER_TEMP/published-release"
-          expected_tag_object="$(cat "$RUNNER_TEMP/qualified-tag-object")"
-          verify_tag_ref() {
-            test "$(git ls-remote origin "refs/tags/$GITHUB_REF_NAME" | awk '{print $1}')" = "$expected_tag_object"
+          verify_refs() {
+            test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$GITHUB_SHA"
+            test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$GITHUB_REF_NAME" --jq .object.sha)" = "$expected_tag_object"
           }
-          verify_release_refs() {
-            verify_tag_ref
-            test "$(git ls-remote origin refs/heads/main | awk '{print $1}')" = "$GITHUB_SHA"
-          }
-          verify_release_refs
           verify_assets() {
             rm -rf "$published"
-            mkdir -p "$published"
+            mkdir -m 0700 "$published"
             gh release download "$GITHUB_REF_NAME" --dir "$published"
+            test "$(find "$published" -maxdepth 1 -type f | wc -l | tr -d '[:space:]')" = "$(find "$bundle" -maxdepth 1 -type f | wc -l | tr -d '[:space:]')"
             for source in "$bundle"/*; do
-              asset="$published/$(basename "$source")"
-              test -f "$asset"
-              cmp --silent "$source" "$asset"
+              cmp --silent "$source" "$published/$(basename "$source")"
             done
-            test "$(find "$published" -maxdepth 1 -type f | wc -l | tr -d '[:space:]')" = \
-              "$(find "$bundle" -maxdepth 1 -type f | wc -l | tr -d '[:space:]')"
           }
-          if draft_state="$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2>/dev/null)"; then
-            verify_assets
+          api_version=2022-11-28
+          reserved_prefix=s46-release-cas-probe-
+          cas_work="$RUNNER_TEMP/final-cas"
+          mkdir -m 0700 "$cas_work"
+          fetch_final_release() {
+            local stem="$1"
+            curl --fail --silent --show-error \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header "X-GitHub-Api-Version: $api_version" \
+              --dump-header "$cas_work/$stem.headers" \
+              --output "$cas_work/$stem.json" \
+              "$release_url"
+            tr -d '\r' < "$cas_work/$stem.headers" | awk 'tolower($1) == "etag:" { print $2; exit }'
+          }
+          validate_final_assets() {
+            local release_json="$1"
+            local probes_tsv="$2"
+            python3 - "$release_json" "$probes_tsv" "$bundle" "$reserved_prefix" <<'PY'
+          import json, pathlib, re, sys
+          source, destination, bundle, prefix = sys.argv[1:]
+          with open(source, encoding="utf-8") as handle:
+              release = json.load(handle)
+          expected = {path.name for path in pathlib.Path(bundle).iterdir() if path.is_file() and not path.is_symlink()}
+          assets = release.get("assets", [])
+          ordinary_assets = [asset for asset in assets if not str(asset.get("name", "")).startswith(prefix)]
+          ordinary = {asset.get("name") for asset in ordinary_assets}
+          if ordinary != expected or len(ordinary_assets) != len(expected):
+              raise SystemExit("final release authority asset cohort is not exact")
+          probes = [asset for asset in assets if str(asset.get("name", "")).startswith(prefix)]
+          if len(probes) > 8:
+              raise SystemExit("too many interrupted final CAS probe assets")
+          pattern = re.compile(re.escape(prefix) + r"[0-9a-f]{24}\.txt")
+          with open(destination, "w", encoding="utf-8") as output:
+              for asset in probes:
+                  name, identifier, size = asset.get("name"), asset.get("id"), asset.get("size")
+                  if not isinstance(name, str) or not pattern.fullmatch(name) or not isinstance(identifier, int) or size != 65:
+                      raise SystemExit("interrupted final CAS probe metadata is not canonical")
+                  output.write(f"{identifier}\t{name}\n")
+          PY
+          }
+          recover_reserved_probes() {
+            local before_etag after_etag interrupted interrupted_id interrupted_name
+            before_etag="$(fetch_final_release recovery-before)"
+            test -n "$before_etag"
+            validate_final_assets "$cas_work/recovery-before.json" "$cas_work/recovery-probes.tsv"
+            if [ ! -s "$cas_work/recovery-probes.tsv" ]; then
+              return
+            fi
+            while IFS=$'\t' read -r interrupted_id interrupted_name; do
+              interrupted="$cas_work/$interrupted_name"
+              curl --fail --location --silent --show-error \
+                --header "Accept: application/octet-stream" \
+                --header "Authorization: Bearer $GH_TOKEN" \
+                --header "X-GitHub-Api-Version: $api_version" \
+                --output "$interrupted" \
+                "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/assets/$interrupted_id"
+              python3 - "$interrupted" "$interrupted_name" "$reserved_prefix" <<'PY'
+          import pathlib, re, sys
+          path, name, prefix = sys.argv[1:]
+          content = pathlib.Path(path).read_bytes()
+          if not re.fullmatch(b"[0-9a-f]{64}\\n", content):
+              raise SystemExit("interrupted final CAS probe content is not a canonical nonce")
+          if name != prefix + content[:24].decode("ascii") + ".txt":
+              raise SystemExit("interrupted final CAS probe name does not bind its nonce")
+          PY
+              gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$interrupted_id" >/dev/null
+            done < "$cas_work/recovery-probes.tsv"
+            after_etag="$(fetch_final_release recovery-after)"
+            test "$after_etag" != "$before_etag"
+            validate_final_assets "$cas_work/recovery-after.json" "$cas_work/recovery-final-probes.tsv"
+            test ! -s "$cas_work/recovery-final-probes.tsv"
+          }
+          published_already=false
+          if release_state="$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2>/dev/null)"; then
+            test "$(gh api "$release_endpoint" --jq .tag_name)" = "$GITHUB_REF_NAME"
+            test "$(gh api "$release_endpoint" --jq .target_commitish)" = "$GITHUB_SHA"
+            if [ "$release_state" = false ]; then
+              test "$(gh api "$release_endpoint" --jq .immutable)" = true
+              published_already=true
+            else
+              test "$release_state" = true
+            fi
           else
-            gh release create "$GITHUB_REF_NAME" \
-              --draft \
-              --verify-tag \
-              --title "$GITHUB_REF_NAME" \
-              --generate-notes \
-              "$bundle"/*
-            draft_state=true
+            verify_refs
+            gh release create "$GITHUB_REF_NAME" --draft --verify-tag --target "$GITHUB_SHA" --title "$GITHUB_REF_NAME" --generate-notes "$bundle"/*
+          fi
+          if [ "$published_already" = false ]; then
+            recover_reserved_probes
+          fi
+          verify_assets
+          if [ "$published_already" = false ]; then
+            # Repeat the harmless asset-sensitive ETag capability probe on the
+            # final draft. This inline publisher logic is workflow-controlled;
+            # no repository/build script executes with the write token.
+            probe_asset_id=""
+            probe_name=""
+            cleanup_probe() {
+              local cleanup_id="$probe_asset_id"
+              if [ -z "$cleanup_id" ] && [ -n "$probe_name" ]; then
+                cleanup_id="$(gh api "$release_endpoint" --jq ".assets[] | select(.name == \"$probe_name\") | .id" 2>/dev/null || true)"
+              fi
+              if [[ "$cleanup_id" =~ ^[0-9]+$ ]]; then
+                gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$cleanup_id" >/dev/null 2>&1 || true
+              fi
+            }
+            trap cleanup_probe EXIT
+            before_etag="$(fetch_final_release before)"
+            test -n "$before_etag"
+            test "$(jq -r .draft "$cas_work/before.json")" = true
+            nonce="$(printf '%s' "$GITHUB_REPOSITORY:$GITHUB_REF_NAME:$GITHUB_RUN_ID:$GITHUB_RUN_ATTEMPT" | sha256sum | awk '{print $1}')"
+            probe_name="$reserved_prefix${nonce:0:24}.txt"
+            probe="$cas_work/$probe_name"
+            printf '%s\n' "$nonce" > "$probe"
+            test "$(wc -c < "$probe" | tr -d '[:space:]')" = 65
+            gh release upload "$GITHUB_REF_NAME" "$probe"
+            probe_asset_id="$(gh api "$release_endpoint" --jq ".assets[] | select(.name == \"$probe_name\") | .id")"
+            [[ "$probe_asset_id" =~ ^[0-9]+$ ]]
+            upload_etag="$(fetch_final_release upload)"
+            test "$upload_etag" != "$before_etag"
+            gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$probe_asset_id" >/dev/null
+            probe_asset_id=""
+            delete_etag="$(fetch_final_release delete)"
+            test "$delete_etag" != "$upload_etag"
+            validate_final_assets "$cas_work/delete.json" "$cas_work/final-probes.tsv"
+            test ! -s "$cas_work/final-probes.tsv"
+            stale_status="$(curl --silent --show-error --request PATCH \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header "X-GitHub-Api-Version: $api_version" \
+              --header "If-Match: $upload_etag" \
+              --header "Content-Type: application/json" \
+              --data '{"draft":true}' \
+              --output "$cas_work/stale.json" \
+              --write-out '%{http_code}' \
+              "$release_url")"
+            test "$stale_status" = 412
+            test "$(gh api "$release_endpoint" --jq .draft)" = true
             verify_assets
+            snapshot_candidate > "$RUNNER_TEMP/candidate-ledger-current.json"
+            cmp --silent "$candidate_ledger" "$RUNNER_TEMP/candidate-ledger-current.json"
+            verify_refs
+            curl --fail --silent --show-error \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header "X-GitHub-Api-Version: $api_version" \
+              --dump-header "$cas_work/final.headers" \
+              --output "$cas_work/final.json" \
+              "$release_url"
+            final_etag="$(tr -d '\r' < "$cas_work/final.headers" | awk 'tolower($1) == "etag:" { print $2; exit }')"
+            test -n "$final_etag"
+            test "$(jq -r .draft "$cas_work/final.json")" = true
+            publish_status="$(curl --silent --show-error --request PATCH \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header "X-GitHub-Api-Version: $api_version" \
+              --header "If-Match: $final_etag" \
+              --header "Content-Type: application/json" \
+              --data '{"draft":false}' \
+              --output "$cas_work/published.json" \
+              --write-out '%{http_code}' \
+              "$release_url")"
+            test "$publish_status" = 200
+            trap - EXIT
           fi
-          go run ./scripts check-tag "$GITHUB_REF_NAME" "$GITHUB_SHA" "$published"
-          verify_release_refs
-          if [ "$draft_state" = true ]; then
-            gh release edit "$GITHUB_REF_NAME" --draft=false
-          elif [ "$draft_state" != false ]; then
-            echo "unexpected release draft state: $draft_state" >&2
-            exit 1
-          fi
-          verify_tag_ref
-      - name: Publish the exact qualified checksums to Homebrew
+          test "$(gh api "$release_endpoint" --jq .draft)" = false
+          test "$(gh api "$release_endpoint" --jq .immutable)" = true
+          verify_refs
+          verify_assets
+
+      - name: Update Homebrew formula monotonically with bounded CAS
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.GORELEASER_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_POLICY_TOKEN: ${{ secrets.GORELEASER_TOKEN }}
         run: |
           set -euo pipefail
-          test -n "${GH_TOKEN:-}"
-          bundle="$RUNNER_TEMP/homebrew-final-release"
-          expected_tag_object="$(cat "$RUNNER_TEMP/qualified-tag-object")"
-          test "$(git ls-remote origin "refs/tags/$GITHUB_REF_NAME" | awk '{print $1}')" = "$expected_tag_object"
-          rm -rf "$bundle"
-          mkdir -p "$bundle"
-          gh release download "$GITHUB_REF_NAME" --dir "$bundle"
-          go run ./scripts check-tag "$GITHUB_REF_NAME" "$GITHUB_SHA" "$bundle"
-          formula="$RUNNER_TEMP/s46.rb"
-          existing="$RUNNER_TEMP/existing-s46.rb"
-          go run ./scripts homebrew-formula "$GITHUB_REF_NAME" "$bundle" > "$formula"
-          endpoint="repos/sovereign46/tap/contents/Formula/s46.rb"
-          current_sha="$(gh api "$endpoint?ref=main" --jq .sha)"
-          gh api "$endpoint?ref=main" --jq .content | tr -d '\n' | base64 --decode > "$existing"
-          test "$(grep -Ec '^  version "(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"$' "$existing")" = 1
-          existing_version="$(sed -En 's/^  version "((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))"$/\1/p' "$existing")"
-          target_version="${GITHUB_REF_NAME#v}"
-          if [ "$existing_version" != "$target_version" ]; then
-            test "$(printf '%s\n%s\n' "$existing_version" "$target_version" | sort -V | tail -n 1)" = "$target_version"
-          fi
-          if ! cmp --silent "$formula" "$existing"; then
-            encoded="$(base64 -w 0 "$formula")"
-            gh api --method PUT "$endpoint" \
-              --raw-field message="Brew formula update for s46 version $GITHUB_REF_NAME" \
-              --raw-field content="$encoded" \
-              --raw-field sha="$current_sha" \
-              --raw-field branch=main >/dev/null
-          fi
-          gh api "$endpoint?ref=main" --jq .content | tr -d '\n' | base64 --decode > "$existing"
-          cmp --silent "$formula" "$existing"
-          test "$(git ls-remote origin "refs/tags/$GITHUB_REF_NAME" | awk '{print $1}')" = "$expected_tag_object"
+          test -n "${RELEASE_POLICY_TOKEN:-}"
+          tap_endpoint="repos/sovereign46/homebrew-tap/contents/Formula/s46.rb"
+          formula="$RUNNER_TEMP/publication/s46.rb"
+          test -f "$formula" && test ! -L "$formula"
+          incoming_version="${GITHUB_REF_NAME#v}"
+          [[ "$incoming_version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          tap_work="$RUNNER_TEMP/homebrew-cas"
+          mkdir -m 0700 "$tap_work"
+          evaluate_tap() {
+            local response="$1" decoded="$2" result="$3"
+            python3 - "$response" "$formula" "$decoded" "$result" "$incoming_version" <<'PY'
+          import base64, binascii, json, pathlib, re, sys
+
+          response_path, wanted_path, decoded_path, result_path, incoming_raw = sys.argv[1:]
+          semver = re.compile(
+              r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+              r"(?:-((?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*))?"
+              r"(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$"
+          )
+
+          def parse(value):
+              match = semver.fullmatch(value)
+              if not match:
+                  raise SystemExit(f"Homebrew formula has invalid semantic version {value!r}")
+              core = tuple(int(part) for part in match.group(1, 2, 3))
+              prerelease = None if match.group(4) is None else match.group(4).split(".")
+              return core, prerelease
+
+          def compare(left, right):
+              left_core, left_pre = parse(left)
+              right_core, right_pre = parse(right)
+              if left_core != right_core:
+                  return -1 if left_core < right_core else 1
+              if left_pre is None or right_pre is None:
+                  if left_pre is right_pre:
+                      return 0
+                  return 1 if left_pre is None else -1
+              for left_part, right_part in zip(left_pre, right_pre):
+                  if left_part == right_part:
+                      continue
+                  left_numeric, right_numeric = left_part.isdigit(), right_part.isdigit()
+                  if left_numeric and right_numeric:
+                      return -1 if int(left_part) < int(right_part) else 1
+                  if left_numeric != right_numeric:
+                      return -1 if left_numeric else 1
+                  return -1 if left_part < right_part else 1
+              return (len(left_pre) > len(right_pre)) - (len(left_pre) < len(right_pre))
+
+          with open(response_path, encoding="utf-8") as source:
+              response = json.load(source)
+          if not isinstance(response, dict) or response.get("type") != "file" or response.get("encoding") != "base64":
+              raise SystemExit("Homebrew contents response is not one base64 file")
+          sha = response.get("sha")
+          encoded = response.get("content")
+          if not isinstance(sha, str) or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", sha) or not isinstance(encoded, str):
+              raise SystemExit("Homebrew contents response has invalid content identity")
+          compact = "".join(encoded.splitlines())
+          try:
+              current = base64.b64decode(compact, validate=True)
+          except (ValueError, binascii.Error) as error:
+              raise SystemExit(f"Homebrew formula content is not canonical base64: {error}")
+          if base64.b64encode(current).decode("ascii") != compact:
+              raise SystemExit("Homebrew formula content is not canonical base64")
+          wanted = pathlib.Path(wanted_path).read_bytes()
+          versions = re.findall(rb'^  version "([^"\r\n]+)"$', current, re.MULTILINE)
+          if len(versions) != 1:
+              raise SystemExit("Homebrew formula must contain exactly one canonical version declaration")
+          try:
+              current_version = versions[0].decode("ascii")
+          except UnicodeDecodeError as error:
+              raise SystemExit(f"Homebrew formula version is not ASCII: {error}")
+          ordering = compare(current_version, incoming_raw)
+          if ordering == 0 and current != wanted:
+              raise SystemExit("equal Homebrew version does not match the exact qualified formula bytes")
+          decision = "newer" if ordering > 0 else "exact" if ordering == 0 else "older"
+          pathlib.Path(decoded_path).write_bytes(current)
+          pathlib.Path(result_path).write_text(
+              json.dumps({"decision": decision, "sha": sha, "version": current_version}, separators=(",", ":")) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          }
+          verified=false
+          newer_observed=false
+          # At most three writes are attempted. Every decision, retry, and
+          # verification is based on one fresh contents response carrying both
+          # the bytes and the blob SHA used for CAS.
+          for attempt in 1 2 3 4; do
+            response="$tap_work/response-$attempt.json"
+            current="$tap_work/formula-$attempt.rb"
+            result="$tap_work/result-$attempt.json"
+            GH_TOKEN="$RELEASE_POLICY_TOKEN" gh api --method GET "$tap_endpoint?ref=main" > "$response"
+            evaluate_tap "$response" "$current" "$result"
+            read -r decision current_sha current_version < <(jq -er '[.decision,.sha,.version] | @tsv' "$result")
+            case "$decision" in
+              exact)
+                cmp --silent "$formula" "$current"
+                verified=true
+                break
+                ;;
+              newer)
+                if [ "$newer_observed" = true ]; then
+                  echo "Preserving verified newer Homebrew formula version $current_version."
+                  verified=true
+                  break
+                fi
+                newer_observed=true
+                ;;
+              older)
+                newer_observed=false
+                if [ "$attempt" -eq 4 ]; then
+                  break
+                fi
+                encoded="$(base64 < "$formula" | tr -d '\n')"
+                if ! GH_TOKEN="$RELEASE_POLICY_TOKEN" gh api --method PUT "$tap_endpoint" \
+                  --raw-field message="Brew formula update for s46 version $GITHUB_REF_NAME" \
+                  --raw-field content="$encoded" \
+                  --raw-field sha="$current_sha" \
+                  --raw-field branch=main >/dev/null; then
+                  echo "Homebrew formula CAS conflicted; refetching before retry." >&2
+                fi
+                ;;
+              *)
+                echo "invalid Homebrew CAS decision: $decision" >&2
+                exit 1
+                ;;
+            esac
+          done
+          test "$verified" = true

@@ -23,7 +23,9 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -36,12 +38,18 @@ const (
 	contextCommand                = "changelog-context"
 	prepareCommand                = "prepare"
 	buildCandidateCommand         = "build-candidate"
+	stageCandidateCommand         = "stage-candidate"
+	checkCandidateCommand         = "check-candidate"
+	checkQualificationCommand     = "check-qualification"
+	checkBundleCommand            = "check-bundle"
 	publishCommand                = "publish"
 	checkTagCommand               = "check-tag"
 	homebrewFormulaCommand        = "homebrew-formula"
+	signEvidenceCommand           = "sign-evidence"
 	qualificationSchema           = "s46.release-qualification.v1"
 	qualificationBundleSchema     = "s46.release-qualification-bundle.v1"
 	releaseTagSchema              = "s46.qualified-release-tag.v1"
+	candidateReleaseTagSchema     = "s46.release-candidate-tag.v1"
 	qualificationSuffix           = ".qualification.json"
 	releaseChecksumsFile          = "checksums.txt"
 	maxQualificationFileSize      = 1024 * 1024
@@ -63,6 +71,7 @@ var (
 	versionValueRegexp             = regexp.MustCompile(`Version\s*=\s*"([^"]+)"`)
 	sha256Regexp                   = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	qualificationRunnerID          = regexp.MustCompile(`^[0-9]+-[0-9a-f]{32}$`)
+	githubLoginRegexp              = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$`)
 	activationPolicyPassLineRegexp = regexp.MustCompile(`^--- PASS: TestReleaseCandidateActivationPolicy \([0-9]+(?:\.[0-9]+)?s\)$`)
 )
 
@@ -95,6 +104,18 @@ func release(ctx context.Context, args []string) error {
 	if len(args) == 4 && args[0] == buildCandidateCommand {
 		return buildReleaseCandidate(ctx, args[1], args[2], args[3])
 	}
+	if len(args) == 4 && args[0] == stageCandidateCommand {
+		return stageCandidateBuild(ctx, args[1], args[2], args[3])
+	}
+	if len(args) == 4 && args[0] == checkCandidateCommand {
+		return checkCandidateBuild(ctx, args[1], args[2], args[3])
+	}
+	if len(args) == 5 && args[0] == checkQualificationCommand {
+		return checkNativeQualification(ctx, args[1], args[2], args[3], args[4])
+	}
+	if len(args) == 4 && args[0] == checkBundleCommand {
+		return checkQualificationBundle(ctx, args[1], args[2], args[3])
+	}
 	if len(args) == 5 && args[0] == publishCommand && args[4] == "--confirm-publish" {
 		return publishRelease(ctx, args[1], args[2], args[3])
 	}
@@ -103,6 +124,9 @@ func release(ctx context.Context, args []string) error {
 	}
 	if len(args) == 3 && args[0] == homebrewFormulaCommand {
 		return writeHomebrewFormula(args[1], args[2], os.Stdout)
+	}
+	if len(args) > 1 && args[0] == signEvidenceCommand {
+		return signReleaseEvidence(args[1:])
 	}
 	return errors.New(usage())
 }
@@ -144,6 +168,115 @@ func prepareRelease(ctx context.Context, target string) error {
 	return nil
 }
 
+func stageCandidateBuild(ctx context.Context, tag, preparedCommit, bundleDirectory string) error {
+	if err := refreshRemoteMain(ctx); err != nil {
+		return err
+	}
+	version, err := validatePublishState(ctx, tag, preparedCommit)
+	if err != nil {
+		return err
+	}
+	sourceTree, err := resolveTree(ctx, preparedCommit)
+	if err != nil {
+		return err
+	}
+	paths, err := validateCandidateBuildBundle(bundleDirectory, version, preparedCommit, sourceTree)
+	if err != nil {
+		return err
+	}
+	if err := requireMainBranchProtection(ctx, "sovereign46/cli"); err != nil {
+		return err
+	}
+	if err := requireImmutableReleasesEnabled(ctx, "sovereign46/cli"); err != nil {
+		return err
+	}
+	candidateTag := candidateReleaseTag(tag, preparedCommit)
+	if _, err := ensureRemoteCandidateReleaseTag(ctx, candidateTag, preparedCommit); err != nil {
+		return err
+	}
+	if state, viewErr := loadCandidateRelease(ctx, candidateTag); viewErr == nil {
+		if err := verifyCandidateBuildRelease(ctx, candidateTag, preparedCommit, bundleDirectory, version, sourceTree, paths); err != nil {
+			return fmt.Errorf("existing candidate release %s is not the exact create-only build: %w", candidateTag, err)
+		}
+		fmt.Printf("Verified existing create-only candidate %s with draft=%t.\n", candidateTag, state.IsDraft)
+		return nil
+	}
+	args := []string{"release", "create", candidateTag, "--draft", "--verify-tag", "--target", preparedCommit, "--title", "Candidate " + tag, "--notes", "Create-only exact build candidate for native qualification. Assets must never be replaced."}
+	args = append(args, paths...)
+	if err := run(ctx, "gh", args...); err != nil {
+		return fmt.Errorf("create exact build candidate: %w", err)
+	}
+	if err := verifyCandidateBuildRelease(ctx, candidateTag, preparedCommit, bundleDirectory, version, sourceTree, paths); err != nil {
+		return err
+	}
+	fmt.Printf("Staged create-only candidate %s for native qualification.\n", candidateTag)
+	return nil
+}
+
+func checkCandidateBuild(ctx context.Context, tag, preparedCommit, bundleDirectory string) error {
+	version, err := validatePreparedRelease(ctx, tag, preparedCommit)
+	if err != nil {
+		return err
+	}
+	sourceTree, err := resolveTree(ctx, preparedCommit)
+	if err != nil {
+		return err
+	}
+	paths, err := validateCandidateBuildBundle(bundleDirectory, version, preparedCommit, sourceTree)
+	if err != nil {
+		return err
+	}
+	return verifyCandidateBuildRelease(ctx, candidateReleaseTag(tag, preparedCommit), preparedCommit, bundleDirectory, version, sourceTree, paths)
+}
+
+func checkNativeQualification(ctx context.Context, tag, preparedCommit, archivePath, evidencePath string) error {
+	version, err := validatePreparedRelease(ctx, tag, preparedCommit)
+	if err != nil {
+		return err
+	}
+	if !filepath.IsAbs(archivePath) || !filepath.IsAbs(evidencePath) {
+		return errors.New("qualification archive and evidence paths must be absolute")
+	}
+	archive := filepath.Base(archivePath)
+	knownArchive := false
+	for _, expected := range expectedReleaseArchives(version) {
+		if archive == expected {
+			knownArchive = true
+			break
+		}
+	}
+	if !knownArchive || filepath.Base(evidencePath) != archive+qualificationSuffix {
+		return errors.New("qualification evidence name does not match a configured release archive")
+	}
+	digest, size, err := hashRegularFile(archivePath, 256*1024*1024)
+	if err != nil {
+		return err
+	}
+	if size == 0 {
+		return errors.New("qualification archive is empty")
+	}
+	if err := validateQualificationRecord(evidencePath, archive, digest, size, version, preparedCommit); err != nil {
+		return err
+	}
+	return validateQualificationRunnerForCurrentSource([]string{evidencePath}, 1)
+}
+
+func checkQualificationBundle(ctx context.Context, tag, preparedCommit, bundleDirectory string) error {
+	version, err := validatePreparedRelease(ctx, tag, preparedCommit)
+	if err != nil {
+		return err
+	}
+	sourceTree, err := resolveTree(ctx, preparedCommit)
+	if err != nil {
+		return err
+	}
+	paths, err := validateQualificationBundle(bundleDirectory, version, preparedCommit, sourceTree)
+	if err != nil {
+		return err
+	}
+	return validateQualificationRunnerForCurrentSource(paths, 4)
+}
+
 func publishRelease(ctx context.Context, tag string, preparedCommit string, bundleDirectory string) error {
 	fmt.Print("\n=== Publish Qualified Release ===\n\n")
 	if err := refreshRemoteMain(ctx); err != nil {
@@ -161,7 +294,7 @@ func publishRelease(ctx context.Context, tag string, preparedCommit string, bund
 	if err != nil {
 		return err
 	}
-	if err := validateQualificationRunnerForCurrentSource(paths); err != nil {
+	if err := validateQualificationRunnerForCurrentSource(paths, 4); err != nil {
 		return err
 	}
 	bundleDigest, err := qualificationBundleDigest(paths)
@@ -179,7 +312,7 @@ func publishRelease(ctx context.Context, tag string, preparedCommit string, bund
 	if err != nil {
 		return fmt.Errorf("qualified release bundle changed while testing: %w", err)
 	}
-	if err := validateQualificationRunnerForCurrentSource(paths); err != nil {
+	if err := validateQualificationRunnerForCurrentSource(paths, 4); err != nil {
 		return fmt.Errorf("qualification runner identity changed while testing: %w", err)
 	}
 	checkedDigest, err := qualificationBundleDigest(paths)
@@ -188,6 +321,12 @@ func publishRelease(ctx context.Context, tag string, preparedCommit string, bund
 	}
 	if checkedDigest != bundleDigest {
 		return fmt.Errorf("qualified release bundle changed while testing")
+	}
+	if err := requireMainBranchProtection(ctx, "sovereign46/cli"); err != nil {
+		return err
+	}
+	if err := requireImmutableReleasesEnabled(ctx, "sovereign46/cli"); err != nil {
+		return err
 	}
 	if err := stageQualificationBundle(ctx, tag, preparedCommit, sourceTree, bundleDirectory, version, bundleDigest); err != nil {
 		return err
@@ -225,7 +364,7 @@ func checkTagRelease(ctx context.Context, tag string, preparedCommit string, bun
 	if err != nil {
 		return err
 	}
-	if err := validateQualificationRunnerForCurrentSource(paths); err != nil {
+	if err := validateQualificationRunnerForCurrentSource(paths, 4); err != nil {
 		return err
 	}
 	bundleDigest, err := qualificationBundleDigest(paths)
@@ -245,7 +384,7 @@ func checkTagRelease(ctx context.Context, tag string, preparedCommit string, bun
 	if err != nil {
 		return fmt.Errorf("qualified release bundle changed while testing: %w", err)
 	}
-	if err := validateQualificationRunnerForCurrentSource(paths); err != nil {
+	if err := validateQualificationRunnerForCurrentSource(paths, 4); err != nil {
 		return fmt.Errorf("qualification runner identity changed while testing: %w", err)
 	}
 	checkedDigest, err := qualificationBundleDigest(paths)
@@ -267,6 +406,9 @@ func runReleaseChecks(ctx context.Context, preparedCommit string) error {
 	if err := runInDirectory(ctx, checkout, "env", "GOWORK=off", "go", "test", "./..."); err != nil {
 		return err
 	}
+	if err := runInDirectory(ctx, checkout, "env", "GOWORK=off", "go", "test", "-tags=release", "./..."); err != nil {
+		return fmt.Errorf("release-tagged test suite failed: %w", err)
+	}
 	if err := runInDirectory(ctx, checkout, "env", "GOWORK=off", "go", "mod", "verify"); err != nil {
 		return err
 	}
@@ -280,7 +422,23 @@ func runReleaseChecks(ctx context.Context, preparedCommit string) error {
 	if err != nil {
 		return err
 	}
-	return validateActivationPolicyTestOutput(output)
+	if err := validateActivationPolicyTestOutput(output); err != nil {
+		return err
+	}
+	output, err = combinedOutputInDirectory(ctx, checkout, "env", "GOWORK=off", "go", "test", "-v", "-tags=release releasecandidate", "./internal/airplane", "-run", "^TestReleaseCandidateAirplaneClosure$", "-count=1")
+	if output != "" {
+		fmt.Print(output)
+		if !strings.HasSuffix(output, "\n") {
+			fmt.Println()
+		}
+	}
+	if err != nil {
+		return err
+	}
+	if strings.Contains(output, "[no tests to run]") || !strings.Contains(output, "--- PASS: TestReleaseCandidateAirplaneClosure") {
+		return errors.New("release airplane-closure gate did not run and pass TestReleaseCandidateAirplaneClosure")
+	}
+	return nil
 }
 
 func validateActivationPolicyTestOutput(output string) error {
@@ -566,13 +724,15 @@ type qualifiedBuild struct {
 }
 
 type qualificationDetail struct {
-	ExpectedVersion     string               `json:"expectedVersion"`
-	ExpectedCommit      string               `json:"expectedCommit"`
-	NetworkIsolation    string               `json:"networkIsolation"`
-	FilesystemIsolation string               `json:"filesystemIsolation"`
-	AirplaneHarnesses   []string             `json:"airplaneHarnesses"`
-	Runtime             qualificationRuntime `json:"runtime"`
-	Runner              qualificationRunner  `json:"runner"`
+	ExpectedVersion     string                 `json:"expectedVersion"`
+	ExpectedCommit      string                 `json:"expectedCommit"`
+	NetworkIsolation    string                 `json:"networkIsolation"`
+	FilesystemIsolation string                 `json:"filesystemIsolation"`
+	Capabilities        []string               `json:"capabilities"`
+	AirplaneHarnesses   []string               `json:"airplaneHarnesses"`
+	Runtime             *qualificationRuntime  `json:"runtime,omitempty"`
+	Runner              qualificationRunner    `json:"runner"`
+	Execution           qualificationExecution `json:"execution"`
 }
 
 type qualifiedInput struct {
@@ -582,9 +742,40 @@ type qualifiedInput struct {
 }
 
 type qualificationRuntime struct {
-	Model       qualifiedInput `json:"model"`
-	LlamaServer qualifiedInput `json:"llamaServer"`
-	Gateway     qualifiedInput `json:"gateway"`
+	Model                 qualifiedInput            `json:"model"`
+	LlamaServer           qualifiedInput            `json:"llamaServer"`
+	LlamaRuntimeInventory qualifiedRuntimeInventory `json:"llamaRuntimeInventory"`
+	Gateway               qualifiedInput            `json:"gateway"`
+}
+
+type qualifiedRuntimeInventory struct {
+	Schema  string `json:"schema"`
+	SHA256  string `json:"sha256"`
+	Entries int    `json:"entries"`
+}
+
+type qualificationExecution struct {
+	RunnerOS                         string   `json:"runnerOs"`
+	RunnerArch                       string   `json:"runnerArch"`
+	OSVersion                        string   `json:"osVersion"`
+	RunnerEnvironment                string   `json:"runnerEnvironment"`
+	RunnerName                       string   `json:"runnerName"`
+	WorkflowRef                      string   `json:"workflowRef"`
+	WorkflowSHA                      string   `json:"workflowSha"`
+	RunID                            string   `json:"runId"`
+	RunAttempt                       string   `json:"runAttempt"`
+	Environment                      string   `json:"environment"`
+	EnvironmentApprover              string   `json:"environmentApprover"`
+	EnvironmentReviewers             []string `json:"environmentReviewers"`
+	EnvironmentPreventSelfReview     bool     `json:"environmentPreventSelfReview"`
+	EnvironmentAdminsBypass          bool     `json:"environmentAdminsBypass"`
+	ReleaseAPIVersion                string   `json:"releaseApiVersion"`
+	CandidateReleaseID               string   `json:"candidateReleaseId"`
+	CandidateDraftAssetETagCAS       bool     `json:"candidateDraftAssetEtagCas"`
+	CandidateDraftStaleIfMatchStatus int      `json:"candidateDraftStaleIfMatchStatus"`
+	EnvironmentApprovalSHA256        string   `json:"environmentApprovalSha256"`
+	RunnerIdentitySHA256             string   `json:"runnerIdentitySha256"`
+	IsolationProfileSHA256           string   `json:"isolationProfileSha256"`
 }
 
 type qualificationRunner struct {
@@ -603,6 +794,12 @@ type qualifiedReleaseTag struct {
 	Tag          string `json:"tag"`
 	Commit       string `json:"commit"`
 	BundleSHA256 string `json:"bundleSha256"`
+}
+
+type candidateReleaseTagRecord struct {
+	Schema string `json:"schema"`
+	Tag    string `json:"tag"`
+	Commit string `json:"commit"`
 }
 
 func createQualifiedReleaseTag(ctx context.Context, tag, commit, bundleDigest string) error {
@@ -687,6 +884,94 @@ func validateQualifiedReleaseTagObject(ctx context.Context, tagObject, tag, comm
 	return nil
 }
 
+func validateCandidateBuildBundle(directory, version, preparedCommit, sourceTree string) ([]string, error) {
+	trust, err := loadReleaseEvidenceTrust()
+	if err != nil {
+		return nil, err
+	}
+	return validateCandidateBuildBundleWithTrust(directory, version, preparedCommit, sourceTree, trust)
+}
+
+func validateCandidateBuildBundleWithTrust(directory, version, preparedCommit, sourceTree string, trust validatedReleaseEvidenceTrust) ([]string, error) {
+	expected := map[string]bool{
+		releaseChecksumsFile: true,
+		releaseBuildFile:     true,
+		releaseBuildFile + releaseEvidenceSignatureSuffix: true,
+	}
+	archives := expectedReleaseArchives(version)
+	for _, archive := range archives {
+		expected[archive] = true
+	}
+	paths, err := validateExactBundleEntries(directory, "candidate build bundle", expected)
+	if err != nil {
+		return nil, err
+	}
+	checksums, err := readReleaseChecksums(filepath.Join(directory, releaseChecksumsFile))
+	if err != nil {
+		return nil, err
+	}
+	if len(checksums) != len(archives) {
+		return nil, fmt.Errorf("%s must contain exactly %d archive digests", releaseChecksumsFile, len(archives))
+	}
+	for _, archive := range archives {
+		digest, size, err := hashRegularFile(filepath.Join(directory, archive), 256*1024*1024)
+		if err != nil {
+			return nil, err
+		}
+		if size == 0 || checksums[archive] != digest {
+			return nil, fmt.Errorf("candidate archive %q does not match %s", archive, releaseChecksumsFile)
+		}
+	}
+	buildReceiptPath := filepath.Join(directory, releaseBuildFile)
+	if err := validateReleaseBuildReceipt(buildReceiptPath, "v"+version, version, preparedCommit, sourceTree, directory); err != nil {
+		return nil, err
+	}
+	if err := verifyReleaseEvidenceSignature(buildReceiptPath, trust.BuildKey, releaseEvidenceBuildRole); err != nil {
+		return nil, err
+	}
+	sort.Strings(paths)
+	return paths, nil
+}
+
+func validateExactBundleEntries(directory, label string, expected map[string]bool) ([]string, error) {
+	if !filepath.IsAbs(directory) {
+		return nil, fmt.Errorf("%s path must be absolute", label)
+	}
+	info, err := os.Lstat(directory)
+	if err != nil {
+		return nil, fmt.Errorf("inspect %s: %w", label, err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%s must be a real directory, not a link", label)
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", label, err)
+	}
+	if len(entries) != len(expected) {
+		return nil, fmt.Errorf("%s must contain exactly %d expected files, got %d", label, len(expected), len(entries))
+	}
+	paths := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !expected[entry.Name()] {
+			return nil, fmt.Errorf("%s contains unexpected entry %q", label, entry.Name())
+		}
+		path := filepath.Join(directory, entry.Name())
+		entryInfo, err := os.Lstat(path)
+		if err != nil {
+			return nil, fmt.Errorf("inspect %s entry %q: %w", label, entry.Name(), err)
+		}
+		if !entryInfo.Mode().IsRegular() {
+			return nil, fmt.Errorf("%s entry %q must be a regular file", label, entry.Name())
+		}
+		if entryInfo.Mode().Perm()&0o022 != 0 || entryInfo.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
+			return nil, fmt.Errorf("%s entry %q has unsafe mode %s", label, entry.Name(), entryInfo.Mode())
+		}
+		paths = append(paths, path)
+	}
+	return paths, nil
+}
+
 func validateQualificationBundle(directory string, version string, preparedCommit string, sourceTree string) ([]string, error) {
 	trust, err := loadReleaseEvidenceTrust()
 	if err != nil {
@@ -751,6 +1036,7 @@ func validateQualificationBundleWithTrust(directory string, version string, prep
 	if len(checksums) != len(archives) {
 		return nil, fmt.Errorf("%s must contain exactly %d archive digests", releaseChecksumsFile, len(archives))
 	}
+	candidateReleaseID := ""
 	for _, archive := range archives {
 		archivePath := filepath.Join(directory, archive)
 		digest, size, err := hashRegularFile(archivePath, 256*1024*1024)
@@ -767,7 +1053,20 @@ func validateQualificationBundleWithTrust(directory string, version string, prep
 		if err := validateQualificationRecord(evidencePath, archive, digest, size, version, preparedCommit); err != nil {
 			return nil, err
 		}
-		if err := verifyReleaseEvidenceSignature(evidencePath, trust.QualificationKey); err != nil {
+		raw, err := readSmallRegularFile(evidencePath, maxQualificationFileSize)
+		if err != nil {
+			return nil, err
+		}
+		var evidence qualificationRecord
+		if err := json.Unmarshal(raw, &evidence); err != nil {
+			return nil, err
+		}
+		if candidateReleaseID == "" {
+			candidateReleaseID = evidence.Qualification.Execution.CandidateReleaseID
+		} else if evidence.Qualification.Execution.CandidateReleaseID != candidateReleaseID {
+			return nil, errors.New("qualification records do not bind one candidate release ledger")
+		}
+		if err := verifyReleaseEvidenceSignature(evidencePath, trust.QualificationKey, releaseEvidenceQualificationRole); err != nil {
 			return nil, err
 		}
 	}
@@ -775,7 +1074,7 @@ func validateQualificationBundleWithTrust(directory string, version string, prep
 	if err := validateReleaseBuildReceipt(buildReceiptPath, "v"+version, version, preparedCommit, sourceTree, directory); err != nil {
 		return nil, err
 	}
-	if err := verifyReleaseEvidenceSignature(buildReceiptPath, trust.BuildKey); err != nil {
+	if err := verifyReleaseEvidenceSignature(buildReceiptPath, trust.BuildKey, releaseEvidenceBuildRole); err != nil {
 		return nil, err
 	}
 	sort.Strings(paths)
@@ -982,22 +1281,108 @@ func validateQualificationRecord(path string, archive string, digest string, siz
 	if detail.ExpectedVersion != version || detail.ExpectedCommit != preparedCommit || detail.NetworkIsolation != "external" || detail.FilesystemIsolation != "external" {
 		return fmt.Errorf("qualification evidence for %q does not contain the required expected release identity and external network/filesystem isolation", archive)
 	}
-	wantHarnesses := []string{"pi", "claude-code", "codex"}
-	if len(detail.AirplaneHarnesses) != len(wantHarnesses) {
-		return fmt.Errorf("qualification evidence for %q does not cover every airplane harness", archive)
+	requiresAirplane := archiveRequiresAirplaneCapability(archive)
+	wantCapabilities := []string{"cloud-client"}
+	if requiresAirplane {
+		wantCapabilities = append(wantCapabilities, "airplane")
 	}
-	for index := range wantHarnesses {
-		if detail.AirplaneHarnesses[index] != wantHarnesses[index] {
-			return fmt.Errorf("qualification evidence for %q does not cover every airplane harness", archive)
+	if !slices.Equal(detail.Capabilities, wantCapabilities) {
+		return fmt.Errorf("qualification evidence for %q has capabilities %v, want %v", archive, detail.Capabilities, wantCapabilities)
+	}
+	wantHarnesses := []string{}
+	if requiresAirplane {
+		wantHarnesses = []string{"pi", "claude-code", "codex"}
+	}
+	if !slices.Equal(detail.AirplaneHarnesses, wantHarnesses) {
+		return fmt.Errorf("qualification evidence for %q has invalid airplane harness coverage", archive)
+	}
+	if requiresAirplane {
+		if detail.Runtime == nil {
+			return fmt.Errorf("qualification evidence for %q is missing its airplane runtime closure", archive)
 		}
+		if err := validateQualificationRuntime(*detail.Runtime); err != nil {
+			return fmt.Errorf("qualification evidence for %q: %w", archive, err)
+		}
+	} else if detail.Runtime != nil {
+		return fmt.Errorf("qualification evidence for unsupported platform %q advertises an airplane runtime", archive)
 	}
-	if err := validateQualificationRuntime(detail, qualifiedAt); err != nil {
+	if err := validateQualificationRunner(detail.Runner, qualifiedAt, requiresAirplane); err != nil {
+		return fmt.Errorf("qualification evidence for %q: %w", archive, err)
+	}
+	if err := validateQualificationExecution(detail.Execution, archive, preparedCommit, requiresAirplane); err != nil {
 		return fmt.Errorf("qualification evidence for %q: %w", archive, err)
 	}
 	return nil
 }
 
-func validateQualificationRunnerForCurrentSource(paths []string) error {
+func validateQualificationExecution(execution qualificationExecution, archive, preparedCommit string, requiresAirplane bool) error {
+	platforms := map[string][2]string{
+		"_darwin_amd64.tar.gz": {"macOS", "X64"},
+		"_darwin_arm64.tar.gz": {"macOS", "ARM64"},
+		"_linux_amd64.tar.gz":  {"Linux", "X64"},
+		"_linux_arm64.tar.gz":  {"Linux", "ARM64"},
+	}
+	var expected [2]string
+	for suffix, platform := range platforms {
+		if strings.HasSuffix(archive, suffix) {
+			expected = platform
+			break
+		}
+	}
+	if expected == [2]string{} || execution.RunnerOS != expected[0] || execution.RunnerArch != expected[1] {
+		return errors.New("qualification execution does not match the archive platform")
+	}
+	if execution.WorkflowSHA != preparedCommit || execution.WorkflowRef != "sovereign46/cli/.github/workflows/qualify-candidate.yml@refs/heads/main" {
+		return errors.New("qualification execution is not bound to the exact protected workflow and prepared commit")
+	}
+	if strings.TrimSpace(execution.RunnerName) == "" || len(execution.RunnerName) > 256 || strings.TrimSpace(execution.OSVersion) == "" || len(execution.OSVersion) > 256 {
+		return errors.New("qualification execution has incomplete runner identity")
+	}
+	if _, err := strconv.ParseUint(execution.RunID, 10, 64); err != nil {
+		return errors.New("qualification execution has invalid workflow run id")
+	}
+	if attempt, err := strconv.ParseUint(execution.RunAttempt, 10, 32); err != nil || attempt == 0 {
+		return errors.New("qualification execution has invalid workflow run attempt")
+	}
+	if !sha256Regexp.MatchString(execution.EnvironmentApprovalSHA256) || !sha256Regexp.MatchString(execution.RunnerIdentitySHA256) || !sha256Regexp.MatchString(execution.IsolationProfileSHA256) {
+		return errors.New("qualification execution has invalid environment approval or isolation profile identity")
+	}
+	wantEnvironment, wantRunnerEnvironment := "cloud-qualification", "github-hosted"
+	if requiresAirplane {
+		wantEnvironment, wantRunnerEnvironment = "airplane-qualification", "self-hosted"
+	}
+	if execution.Environment != wantEnvironment || execution.RunnerEnvironment != wantRunnerEnvironment {
+		return errors.New("qualification execution used an unapproved environment or runner class")
+	}
+	if execution.EnvironmentApprover != "goncalossilva" || !githubLoginRegexp.MatchString(execution.EnvironmentApprover) {
+		return errors.New("qualification execution has no valid protected-environment approver identity")
+	}
+	if !slices.Equal(execution.EnvironmentReviewers, []string{"goncalossilva"}) || !execution.EnvironmentPreventSelfReview || execution.EnvironmentAdminsBypass {
+		return errors.New("qualification execution is not bound to the exact protected-environment policy")
+	}
+	if _, err := strconv.ParseUint(execution.CandidateReleaseID, 10, 64); err != nil {
+		return errors.New("qualification execution has an invalid candidate release id")
+	}
+	if execution.ReleaseAPIVersion != "2022-11-28" || !execution.CandidateDraftAssetETagCAS || execution.CandidateDraftStaleIfMatchStatus != 412 {
+		return errors.New("qualification execution lacks the required candidate draft asset-sensitive ETag CAS proof")
+	}
+	if execution.RunnerOS == "macOS" {
+		major := strings.SplitN(execution.OSVersion, ".", 2)[0]
+		if execution.RunnerArch == "X64" && major != "15" {
+			return fmt.Errorf("Intel macOS qualification requires macOS 15, got %s", execution.OSVersion)
+		}
+		if execution.RunnerArch == "ARM64" && major != "26" {
+			return fmt.Errorf("ARM airplane qualification requires macOS 26, got %s", execution.OSVersion)
+		}
+	}
+	return nil
+}
+
+func archiveRequiresAirplaneCapability(archive string) bool {
+	return strings.HasSuffix(archive, "_darwin_arm64.tar.gz")
+}
+
+func validateQualificationRunnerForCurrentSource(paths []string, expectedRecords int) error {
 	info, err := os.Lstat(qualificationRunnerSource)
 	if err != nil {
 		return fmt.Errorf("inspect qualification runner source: %w", err)
@@ -1032,26 +1417,33 @@ func validateQualificationRunnerForCurrentSource(paths []string) error {
 		}
 		matched++
 	}
-	if matched != 4 {
-		return fmt.Errorf("qualification runner identity covers %d records, want 4", matched)
+	if matched != expectedRecords {
+		return fmt.Errorf("qualification runner identity covers %d records, want %d", matched, expectedRecords)
 	}
 	return nil
 }
 
-func validateQualificationRuntime(qualification qualificationDetail, qualifiedAt time.Time) error {
-	if err := validateQualifiedInput(qualification.Runtime.Model, qualifiedDevstralGGUFName, qualifiedDevstralGGUFSize); err != nil {
+func validateQualificationRuntime(runtime qualificationRuntime) error {
+	if err := validateQualifiedInput(runtime.Model, qualifiedDevstralGGUFName, qualifiedDevstralGGUFSize); err != nil {
 		return fmt.Errorf("invalid model identity: %w", err)
 	}
-	if qualification.Runtime.Model.SHA256 != qualifiedDevstralGGUFSHA256 || qualification.Runtime.Model.Size != qualifiedDevstralGGUFSize {
+	if runtime.Model.SHA256 != qualifiedDevstralGGUFSHA256 || runtime.Model.Size != qualifiedDevstralGGUFSize {
 		return errors.New("model identity is not the exact historical Devstral GGUF")
 	}
-	if err := validateQualifiedInput(qualification.Runtime.LlamaServer, "llama-server", qualifiedRuntimeBinaryMaxSize); err != nil {
+	if err := validateQualifiedInput(runtime.LlamaServer, "llama-server", qualifiedRuntimeBinaryMaxSize); err != nil {
 		return fmt.Errorf("invalid llama-server identity: %w", err)
 	}
-	if err := validateQualifiedInput(qualification.Runtime.Gateway, "s46-gateway", qualifiedRuntimeBinaryMaxSize); err != nil {
+	inventory := runtime.LlamaRuntimeInventory
+	if inventory.Schema != "s46.llamacpp-runtime-inventory.v1" || !sha256Regexp.MatchString(inventory.SHA256) || inventory.Entries <= 0 || inventory.Entries > 10_000 {
+		return errors.New("qualification llama.cpp runtime inventory is invalid")
+	}
+	if err := validateQualifiedInput(runtime.Gateway, "s46-gateway", qualifiedRuntimeBinaryMaxSize); err != nil {
 		return fmt.Errorf("invalid gateway identity: %w", err)
 	}
-	runner := qualification.Runner
+	return nil
+}
+
+func validateQualificationRunner(runner qualificationRunner, qualifiedAt time.Time, airplane bool) error {
 	if err := validateQualifiedInput(runner.Script, "e2e-airplane-harnesses", qualificationRunnerMaxSize); err != nil {
 		return fmt.Errorf("invalid runner script identity: %w", err)
 	}
@@ -1061,8 +1453,12 @@ func validateQualificationRuntime(qualification qualificationDetail, qualifiedAt
 	if !sha256Regexp.MatchString(runner.ProcessCohortSHA256) {
 		return errors.New("tracked process cohort digest is invalid")
 	}
-	if runner.HarnessProcessCount != 3 || runner.ServiceProcessCount < 2 || runner.ProcessCount != 1+runner.HarnessProcessCount+runner.ServiceProcessCount {
-		return errors.New("tracked process cohort counts are incomplete or inconsistent")
+	if airplane {
+		if runner.HarnessProcessCount != 3 || runner.ServiceProcessCount < 2 || runner.ProcessCount != 1+runner.HarnessProcessCount+runner.ServiceProcessCount {
+			return errors.New("tracked airplane process cohort counts are incomplete or inconsistent")
+		}
+	} else if runner.HarnessProcessCount != 0 || runner.ServiceProcessCount != 0 || runner.ProcessCount != 1 {
+		return errors.New("tracked cloud-client process cohort counts are incomplete or inconsistent")
 	}
 	if !runner.VerifiedNoSurvivors {
 		return errors.New("runner did not verify no-survivor cleanup")
@@ -1167,6 +1563,57 @@ func hashRegularFile(path string, maximum int64) (string, int64, error) {
 	return hex.EncodeToString(hasher.Sum(nil)), written, nil
 }
 
+func requireMainBranchProtection(ctx context.Context, repository string) error {
+	if strings.TrimSpace(repository) == "" {
+		return errors.New("repository is required for branch-protection preflight")
+	}
+	raw, err := captureOutput(ctx, "gh", "api", "repos/"+repository+"/branches/main/protection")
+	if err != nil {
+		return fmt.Errorf("verify main branch protection for %s: %w", repository, err)
+	}
+	var protection struct {
+		EnforceAdmins struct {
+			Enabled bool `json:"enabled"`
+		} `json:"enforce_admins"`
+		RequiredLinearHistory struct {
+			Enabled bool `json:"enabled"`
+		} `json:"required_linear_history"`
+		AllowForcePushes struct {
+			Enabled bool `json:"enabled"`
+		} `json:"allow_force_pushes"`
+		AllowDeletions struct {
+			Enabled bool `json:"enabled"`
+		} `json:"allow_deletions"`
+	}
+	if err := json.Unmarshal([]byte(raw), &protection); err != nil {
+		return fmt.Errorf("decode main branch protection for %s: %w", repository, err)
+	}
+	if !protection.EnforceAdmins.Enabled || !protection.RequiredLinearHistory.Enabled || protection.AllowForcePushes.Enabled || protection.AllowDeletions.Enabled {
+		return fmt.Errorf("main branch protection for %s must enforce administrators and linear history and prohibit force pushes and deletion", repository)
+	}
+	return nil
+}
+
+func requireImmutableReleasesEnabled(ctx context.Context, repository string) error {
+	if strings.TrimSpace(repository) == "" {
+		return errors.New("repository is required for immutable-release preflight")
+	}
+	raw, err := captureOutput(ctx, "gh", "api", "repos/"+repository+"/immutable-releases")
+	if err != nil {
+		return fmt.Errorf("verify immutable releases for %s: %w", repository, err)
+	}
+	var policy struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.Unmarshal([]byte(raw), &policy); err != nil {
+		return fmt.Errorf("decode immutable-release policy for %s: %w", repository, err)
+	}
+	if !policy.Enabled {
+		return fmt.Errorf("immutable releases are not enabled for %s", repository)
+	}
+	return nil
+}
+
 type candidateRelease struct {
 	IsDraft         bool   `json:"isDraft"`
 	TagName         string `json:"tagName"`
@@ -1181,21 +1628,12 @@ func stageQualificationBundle(ctx context.Context, tag string, preparedCommit st
 	candidateTag := candidateReleaseTag(tag, preparedCommit)
 	state, viewErr := loadCandidateRelease(ctx, candidateTag)
 	if viewErr != nil {
-		args := []string{"release", "create", candidateTag, "--draft", "--target", preparedCommit, "--title", "Qualified candidate " + tag, "--notes", "Staged exact-byte qualification bundle for " + tag + "."}
-		args = append(args, paths...)
-		if createErr := run(ctx, "gh", args...); createErr != nil {
-			state, err = loadCandidateRelease(ctx, candidateTag)
-			if err != nil {
-				return fmt.Errorf("stage qualified release bundle: %w", createErr)
-			}
-		} else {
-			state, err = loadCandidateRelease(ctx, candidateTag)
-			if err != nil {
-				return fmt.Errorf("reload staged qualification bundle: %w", err)
-			}
-		}
+		return fmt.Errorf("qualified candidate release %s must already contain create-only native qualification evidence and independent signatures: %w", candidateTag, viewErr)
 	}
 	if err := validateCandidateRelease(state, candidateTag, preparedCommit); err != nil {
+		return err
+	}
+	if _, err := requireRemoteCandidateReleaseTag(ctx, candidateTag, preparedCommit); err != nil {
 		return err
 	}
 	downloaded, err := os.MkdirTemp("", "s46-staged-release-*")
@@ -1224,7 +1662,200 @@ func stageQualificationBundle(ctx context.Context, tag string, preparedCommit st
 	if err != nil {
 		return fmt.Errorf("recheck staged qualification bundle: %w", err)
 	}
-	return validateCandidateRelease(state, candidateTag, preparedCommit)
+	if err := validateCandidateRelease(state, candidateTag, preparedCommit); err != nil {
+		return err
+	}
+	if _, err := requireRemoteCandidateReleaseTag(ctx, candidateTag, preparedCommit); err != nil {
+		return fmt.Errorf("candidate tag changed during qualification verification: %w", err)
+	}
+	return nil
+}
+
+func verifyCandidateBuildRelease(ctx context.Context, candidateTag, preparedCommit, sourceDirectory, version, sourceTree string, sourcePaths []string) error {
+	state, err := loadCandidateRelease(ctx, candidateTag)
+	if err != nil {
+		return fmt.Errorf("load candidate release %s: %w", candidateTag, err)
+	}
+	if err := validateCandidateRelease(state, candidateTag, preparedCommit); err != nil {
+		return err
+	}
+	if _, err := requireRemoteCandidateReleaseTag(ctx, candidateTag, preparedCommit); err != nil {
+		return err
+	}
+	downloaded, err := os.MkdirTemp("", "s46-candidate-build-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(downloaded)
+	args := []string{"release", "download", candidateTag, "--dir", downloaded}
+	for _, path := range sourcePaths {
+		args = append(args, "--pattern", filepath.Base(path))
+	}
+	if err := run(ctx, "gh", args...); err != nil {
+		return fmt.Errorf("download exact candidate build assets: %w", err)
+	}
+	downloadedPaths, err := validateCandidateBuildBundle(downloaded, version, preparedCommit, sourceTree)
+	if err != nil {
+		return fmt.Errorf("validate downloaded candidate build: %w", err)
+	}
+	if len(downloadedPaths) != len(sourcePaths) {
+		return errors.New("downloaded candidate build has an unexpected file count")
+	}
+	if err := compareBundleBytes(sourceDirectory, downloaded, sourcePaths); err != nil {
+		return err
+	}
+	state, err = loadCandidateRelease(ctx, candidateTag)
+	if err != nil {
+		return fmt.Errorf("recheck candidate release %s: %w", candidateTag, err)
+	}
+	if err := validateCandidateRelease(state, candidateTag, preparedCommit); err != nil {
+		return err
+	}
+	if _, err := requireRemoteCandidateReleaseTag(ctx, candidateTag, preparedCommit); err != nil {
+		return fmt.Errorf("candidate tag changed during verification: %w", err)
+	}
+	return nil
+}
+
+func requireRemoteCandidateReleaseTag(ctx context.Context, tag, commit string) (string, error) {
+	tagObject, err := loadRemoteCandidateReleaseTag(ctx, tag, commit)
+	if err != nil {
+		return "", err
+	}
+	if tagObject == "" {
+		return "", fmt.Errorf("annotated candidate tag %s is unavailable", tag)
+	}
+	return tagObject, nil
+}
+
+func ensureRemoteCandidateReleaseTag(ctx context.Context, tag, commit string) (string, error) {
+	remoteObject, err := loadRemoteCandidateReleaseTag(ctx, tag, commit)
+	if err != nil {
+		return "", err
+	}
+	if remoteObject != "" {
+		return remoteObject, nil
+	}
+	localObject, err := ensureCandidateReleaseTag(ctx, tag, commit)
+	if err != nil {
+		return "", err
+	}
+	if err := run(ctx, "git", "push", "origin", localObject+":refs/tags/"+tag); err != nil {
+		remoteObject, verifyErr := loadRemoteCandidateReleaseTag(ctx, tag, commit)
+		if verifyErr == nil && remoteObject != "" {
+			return remoteObject, nil
+		}
+		return "", errors.Join(fmt.Errorf("create candidate tag %s: %w", tag, err), verifyErr)
+	}
+	remoteObject, err = loadRemoteCandidateReleaseTag(ctx, tag, commit)
+	if err != nil {
+		return "", err
+	}
+	if remoteObject != localObject {
+		return "", fmt.Errorf("remote candidate tag %s resolved to %q, want newly created object %s", tag, remoteObject, localObject)
+	}
+	return remoteObject, nil
+}
+
+func ensureCandidateReleaseTag(ctx context.Context, tag, commit string) (string, error) {
+	ref := "refs/tags/" + tag
+	if !gitRefExists(ctx, ref) {
+		record := candidateReleaseTagRecord{Schema: candidateReleaseTagSchema, Tag: tag, Commit: commit}
+		body, err := json.Marshal(record)
+		if err != nil {
+			return "", err
+		}
+		if err := run(ctx, "git", "tag", "--annotate", "--message", string(body), tag, commit); err != nil {
+			return "", err
+		}
+	}
+	tagObject, err := captureOutput(ctx, "git", "rev-parse", "--verify", ref)
+	if err != nil {
+		return "", err
+	}
+	tagObject = strings.TrimSpace(tagObject)
+	if err := validateCandidateReleaseTagObject(ctx, tagObject, tag, commit); err != nil {
+		return "", err
+	}
+	return tagObject, nil
+}
+
+func loadRemoteCandidateReleaseTag(ctx context.Context, tag, commit string) (string, error) {
+	ref := "refs/tags/" + tag
+	peeledRef := ref + "^{}"
+	output, err := captureOutput(ctx, "git", "ls-remote", "origin", ref, peeledRef)
+	if err != nil {
+		return "", fmt.Errorf("inspect remote candidate tag %s: %w", tag, err)
+	}
+	fields := strings.Fields(strings.TrimSpace(output))
+	if len(fields) == 0 {
+		return "", nil
+	}
+	if len(fields) != 4 {
+		return "", fmt.Errorf("remote candidate tag %s is not one annotated tag", tag)
+	}
+	objects := make(map[string]string, 2)
+	for index := 0; index < len(fields); index += 2 {
+		object, remoteRef := fields[index], fields[index+1]
+		if !preparedCommitRegexp.MatchString(object) || (remoteRef != ref && remoteRef != peeledRef) || objects[remoteRef] != "" {
+			return "", fmt.Errorf("remote candidate tag %s returned malformed identity", tag)
+		}
+		objects[remoteRef] = object
+	}
+	if objects[ref] == "" || objects[peeledRef] != commit {
+		return "", fmt.Errorf("remote candidate tag %s does not directly resolve to prepared commit %s", tag, commit)
+	}
+	if err := run(ctx, "git", "fetch", "--quiet", "--no-tags", "origin", ref); err != nil {
+		return "", fmt.Errorf("fetch remote candidate tag %s for validation: %w", tag, err)
+	}
+	if err := validateCandidateReleaseTagObject(ctx, objects[ref], tag, commit); err != nil {
+		return "", err
+	}
+	return objects[ref], nil
+}
+
+func validateCandidateReleaseTagObject(ctx context.Context, tagObject, tag, commit string) error {
+	objectType, err := captureOutput(ctx, "git", "cat-file", "-t", tagObject)
+	if err != nil || strings.TrimSpace(objectType) != "tag" {
+		return fmt.Errorf("candidate tag %s must be annotated", tag)
+	}
+	tagCommit, err := resolveCommit(ctx, tagObject)
+	if err != nil || tagCommit != commit {
+		return fmt.Errorf("candidate tag %s does not resolve to prepared commit %s", tag, commit)
+	}
+	object, err := captureOutput(ctx, "git", "cat-file", "-p", tagObject)
+	if err != nil {
+		return err
+	}
+	header, contents, found := strings.Cut(object, "\n\n")
+	if !found {
+		return fmt.Errorf("candidate tag object for %s has invalid headers", tag)
+	}
+	headers := map[string]string{}
+	for _, line := range strings.Split(header, "\n") {
+		name, value, ok := strings.Cut(line, " ")
+		if !ok || headers[name] != "" {
+			return fmt.Errorf("candidate tag object for %s has invalid headers", tag)
+		}
+		headers[name] = value
+	}
+	if headers["object"] != commit || headers["type"] != "commit" || headers["tag"] != tag {
+		return fmt.Errorf("candidate tag object for %s must target prepared commit %s directly", tag, commit)
+	}
+	var record candidateReleaseTagRecord
+	decoder := json.NewDecoder(strings.NewReader(contents))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&record); err != nil {
+		return fmt.Errorf("decode candidate tag %s: %w", tag, err)
+	}
+	if err := ensureJSONEOF(decoder); err != nil {
+		return fmt.Errorf("decode candidate tag %s: %w", tag, err)
+	}
+	want := candidateReleaseTagRecord{Schema: candidateReleaseTagSchema, Tag: tag, Commit: commit}
+	if record != want {
+		return fmt.Errorf("candidate tag %s does not bind the exact prepared commit", tag)
+	}
+	return nil
 }
 
 func validateCandidateRelease(state candidateRelease, candidateTag, preparedCommit string) error {
@@ -1279,9 +1910,14 @@ func usage() string {
 		"  go run ./scripts changelog-context",
 		"  go run ./scripts prepare <major|minor|patch|x.y.z>",
 		"  go run ./scripts build-candidate vX.Y.Z <full-prepared-commit> <new-absolute-bundle>",
+		"  go run ./scripts stage-candidate vX.Y.Z <full-prepared-commit> <absolute-build-bundle>",
+		"  go run ./scripts check-candidate vX.Y.Z <full-prepared-commit> <absolute-build-bundle>",
+		"  go run ./scripts check-qualification vX.Y.Z <full-prepared-commit> <absolute-archive> <absolute-evidence>",
+		"  go run ./scripts check-bundle vX.Y.Z <full-prepared-commit> <absolute-qualified-bundle>",
 		"  go run ./scripts publish vX.Y.Z <full-prepared-commit> <absolute-qualified-bundle> --confirm-publish",
 		"  go run ./scripts check-tag vX.Y.Z <full-tag-commit> <absolute-qualified-bundle>",
 		"  go run ./scripts homebrew-formula vX.Y.Z <absolute-qualified-bundle>",
+		"  go run ./scripts sign-evidence --role build|qualification --private-key-file <path> --input <path> --output <path>",
 	}, "\n")
 }
 

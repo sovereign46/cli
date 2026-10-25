@@ -41,6 +41,7 @@ checksum:
 # replace its bytes.
 release:
   disable: true
+  replace_existing_artifacts: false
 
 changelog:
   sort: asc
