@@ -18,7 +18,7 @@ import (
 const (
 	piDirName             = ".pi"
 	piAgentDir            = "agent"
-	deepSeekModelID       = "s46/deepseek-v4-flash-0731"
+	deepSeekModelID       = api.DeepSeekModelID
 	maxRuntimeClosureSize = 64 << 20
 )
 

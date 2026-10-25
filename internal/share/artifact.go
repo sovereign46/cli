@@ -129,7 +129,7 @@ func BuildArtifact(session api.Session, opts BuildOptions) Artifact {
 			SharedAt:        now.Format(time.RFC3339),
 			SharedBy:        sharedBy(opts.User),
 			Harness:         HarnessInfo{Name: valueOr(session.Harness, "s46")},
-			Model:           ModelInfo{Name: valueOr(session.Model, api.DefaultModel)},
+			Model:           ModelInfo{Name: valueOr(session.Model, "unknown")},
 			Region:          RegionInfo{ID: valueOr(session.Region, "s46")},
 			DurationSeconds: 0,
 			Usage:           Usage{},

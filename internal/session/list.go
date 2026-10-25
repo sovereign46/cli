@@ -197,7 +197,7 @@ func (s Service) localSessionEntries(ctx context.Context, ctxState workspaceCont
 				Harness:  strs.FirstNonEmpty(local.Harness, ctxState.TeamConfig.DefaultHarness, harness.DefaultName),
 				Location: strs.FirstNonEmpty(local.CWD, "local"),
 				Region:   strs.FirstNonEmpty(ctxState.Team.Region, "local"),
-				Model:    strs.FirstNonEmpty(local.Model, ctxState.Team.DefaultModel, ctxState.TeamConfig.DefaultModel, api.DefaultModel),
+				Model:    strs.FirstNonEmpty(local.Model, ctxState.Team.DefaultModel, ctxState.TeamConfig.DefaultModel),
 				Age:      ageSince(updatedAt, now),
 				Spent:    formatCostUSD(local.CostUSD),
 				Task:     local.Task,

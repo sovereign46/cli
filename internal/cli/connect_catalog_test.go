@@ -59,6 +59,36 @@ func TestCloudConnectRefusesUnavailableModelWithoutMutation(t *testing.T) {
 	}
 }
 
+func TestCloudConnectRefusesAbsentTeamDefaultWithoutMutation(t *testing.T) {
+	env := testEnv(t)
+	requireOK(t, run(t, env, "login", "--email", "dscape@s46.dev"))
+	requireOK(t, run(t, env, "connect", api.DefaultTeam, "--harness=standard"))
+	before := connectHomeFiles(t, env)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(api.Team{
+			Name:   api.DefaultTeam,
+			Models: []string{api.DeepSeekModelID},
+			ModelMetadata: map[string]api.ModelRuntime{
+				api.DeepSeekModelID: {ContextWindow: 262144, MaxTokens: 32768},
+			},
+		})
+	}))
+	defer server.Close()
+	env["S46_API_BASE_URL"] = server.URL
+
+	result := run(t, env, "connect", api.DefaultTeam, "--harness=standard")
+	if result.err == nil || !strings.Contains(result.err.Error(), "team returned no default model") {
+		t.Fatalf("expected absent-default refusal, got err=%v stdout=%q", result.err, result.stdout)
+	}
+	if strings.Contains(result.stdout, api.DeepSeekModelID) || strings.Contains(result.stderr, api.DeepSeekModelID) {
+		t.Fatalf("absent default advertised DeepSeek: stdout=%q stderr=%q", result.stdout, result.stderr)
+	}
+	if after := connectHomeFiles(t, env); !reflect.DeepEqual(before, after) {
+		t.Fatalf("refused connect changed config/state/harness files or backups\nbefore: %#v\nafter: %#v", before, after)
+	}
+}
+
 func TestCloudConnectRefusesMalformedDeepSeekClosureWithoutMutation(t *testing.T) {
 	env := testEnv(t)
 	requireOK(t, run(t, env, "login", "--email", "dscape@s46.dev"))
@@ -74,9 +104,9 @@ func TestCloudConnectRefusesMalformedDeepSeekClosureWithoutMutation(t *testing.T
 		_ = json.NewEncoder(w).Encode(api.Team{
 			Name:         api.DefaultTeam,
 			Endpoint:     api.DefaultGatewayURL,
-			DefaultModel: api.DefaultModel,
-			Models:       api.DefaultModelList(),
-			ModelMetadata: map[string]api.ModelRuntime{api.DefaultModel: {
+			DefaultModel: api.DeepSeekModelID,
+			Models:       []string{api.DeepSeekModelID},
+			ModelMetadata: map[string]api.ModelRuntime{api.DeepSeekModelID: {
 				ClosureSHA256:    "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
 				ClosureSizeBytes: 4096,
 				ContextWindow:    262144,
@@ -101,7 +131,7 @@ func TestCloudConnectAcceptsAuthorizedDefaultAndOverride(t *testing.T) {
 		t.Run(harness, func(t *testing.T) {
 			env := testEnv(t)
 			requireOK(t, run(t, env, "login", "--email", "dscape@s46.dev"))
-			models := []string{api.DefaultModel, "s46/devstral-small-2-24b"}
+			models := []string{api.DefaultModel, "s46/qwen3-coder"}
 			serveConnectCatalog(t, env, models)
 			for _, selected := range models {
 				args := []string{"connect", api.DefaultTeam, "--harness=" + harness}
@@ -147,7 +177,7 @@ func testModelMetadata(models []string) map[string]api.ModelRuntime {
 	metadata := make(map[string]api.ModelRuntime, len(models))
 	for _, id := range models {
 		runtime := api.ModelRuntime{ContextWindow: 8192, MaxTokens: 1024}
-		if id == api.DefaultModel {
+		if id == api.DeepSeekModelID {
 			runtime.ClosureSHA256 = testRuntimeClosureSHA256
 			runtime.ClosureSizeBytes = 4096
 		}

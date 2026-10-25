@@ -211,6 +211,9 @@ func TestListReturnsLocalSessionsWithoutActiveTeam(t *testing.T) {
 	if listed[0].Spent != "" {
 		t.Fatalf("local session without harness cost should not report fake spend: %#v", listed[0])
 	}
+	if listed[0].Model != "" {
+		t.Fatalf("local session without model metadata should not report a compiled cloud default: %#v", listed[0])
+	}
 }
 
 func TestLocalSessionBelongsToContextFiltersCurrentAccount(t *testing.T) {

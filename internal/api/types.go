@@ -6,7 +6,9 @@ import (
 )
 
 const (
-	DefaultModel        = "s46/deepseek-v4-flash-0731"
+	DevstralModelID     = "s46/devstral-small-2-24b"
+	DeepSeekModelID     = "s46/deepseek-v4-flash-0731"
+	DefaultModel        = DevstralModelID
 	DefaultTeam         = "@s46/engineering"
 	DefaultAccount      = "dscape@s46.dev"
 	DefaultGatewayURL   = "https://gateway.s46.dev"

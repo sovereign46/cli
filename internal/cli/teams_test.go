@@ -11,16 +11,16 @@ import (
 func TestTeamsListShowsConnectedTeamsAndActiveTeam(t *testing.T) {
 	env := testEnv(t)
 	requireOK(t, run(t, env, "login", "--email", "dscape@s46.dev"))
-	serveConnectCatalog(t, env, []string{api.DefaultModel, "s46/devstral-small-2-24b"})
+	serveConnectCatalog(t, env, []string{api.DefaultModel, "s46/qwen3-coder"})
 	requireOK(t, run(t, env, "connect", "@s46/engineering", "--harness=standard"))
-	requireOK(t, run(t, env, "connect", "@s46/research", "--harness=standard", "--model=s46/devstral-small-2-24b"))
+	requireOK(t, run(t, env, "connect", "@s46/research", "--harness=standard", "--model=s46/qwen3-coder"))
 
 	out := requireOK(t, run(t, env, "teams", "list"))
 	for _, want := range []string{
 		"[s46] connected teams:",
-		"ACTIVE  TEAM              REGION  HARNESS   MODEL                       ENDPOINT",
-		"        @s46/engineering  EU-OPO  standard  s46/deepseek-v4-flash-0731  " + env["S46_API_BASE_URL"],
-		"*       @s46/research     EU-OPO  standard  s46/devstral-small-2-24b    " + env["S46_API_BASE_URL"],
+		"ACTIVE  TEAM              REGION  HARNESS   MODEL                     ENDPOINT",
+		"        @s46/engineering  EU-OPO  standard  s46/devstral-small-2-24b  " + env["S46_API_BASE_URL"],
+		"*       @s46/research     EU-OPO  standard  s46/qwen3-coder           " + env["S46_API_BASE_URL"],
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("teams list missing %q:\n%s", want, out)
@@ -39,7 +39,7 @@ func TestTeamsListShowsConnectedTeamsAndActiveTeam(t *testing.T) {
 	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload.ActiveTeam != "@s46/research" || len(payload.Teams) != 2 || !payload.Teams[1].Active || payload.Teams[1].Model != "s46/devstral-small-2-24b" {
+	if payload.ActiveTeam != "@s46/research" || len(payload.Teams) != 2 || !payload.Teams[1].Active || payload.Teams[1].Model != "s46/qwen3-coder" {
 		t.Fatalf("unexpected teams json: %s", raw)
 	}
 }

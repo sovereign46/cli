@@ -100,10 +100,7 @@ func TestAirplaneModeOffRefusesStalePiSnapshotAtomically(t *testing.T) {
 		t.Fatal(err)
 	}
 	team := cfg.Teams[api.DefaultTeam]
-	runtime := team.APISnapshot.ModelMetadata[api.DefaultModel]
-	runtime.ClosureSHA256 = ""
-	runtime.ClosureSizeBytes = 0
-	team.APISnapshot.ModelMetadata[api.DefaultModel] = runtime
+	setMalformedDeepSeekSnapshot(&team)
 	cfg.Teams[api.DefaultTeam] = team
 	if err := store.SaveConfig(cfg); err != nil {
 		t.Fatal(err)
@@ -138,10 +135,7 @@ func TestAirplaneModeOffValidatesSavedDeepSeekForNonPiSnapshotAtomically(t *test
 		t.Fatal(err)
 	}
 	team := cfg.Teams[api.DefaultTeam]
-	runtime := team.APISnapshot.ModelMetadata[api.DefaultModel]
-	runtime.ClosureSHA256 = ""
-	runtime.ClosureSizeBytes = 0
-	team.APISnapshot.ModelMetadata[api.DefaultModel] = runtime
+	setMalformedDeepSeekSnapshot(&team)
 	cfg.Teams[api.DefaultTeam] = team
 	if err := store.SaveConfig(cfg); err != nil {
 		t.Fatal(err)
@@ -149,7 +143,7 @@ func TestAirplaneModeOffValidatesSavedDeepSeekForNonPiSnapshotAtomically(t *test
 	before := connectHomeFiles(t, env)
 
 	result := run(t, env, "airplane", "mode", "off")
-	if result.err == nil || !strings.Contains(result.err.Error(), "saved team contains "+api.DefaultModel) || !strings.Contains(result.err.Error(), "no syntactically usable closure binding metadata derived from the team API") {
+	if result.err == nil || !strings.Contains(result.err.Error(), "saved team contains "+api.DeepSeekModelID) || !strings.Contains(result.err.Error(), "no syntactically usable closure binding metadata derived from the team API") {
 		t.Fatalf("expected stale saved team refusal for non-Pi snapshot, got err=%v stdout=%q", result.err, result.stdout)
 	}
 	if after := connectHomeFiles(t, env); !reflect.DeepEqual(before, after) {
@@ -172,10 +166,7 @@ func TestAirplaneModeOffValidatesSavedDeepSeekWithoutHarnessSnapshotAtomically(t
 	if team.HarnessSnapshot != nil {
 		t.Fatalf("standard harness unexpectedly created a snapshot: %#v", team.HarnessSnapshot)
 	}
-	runtime := team.APISnapshot.ModelMetadata[api.DefaultModel]
-	runtime.ClosureSHA256 = ""
-	runtime.ClosureSizeBytes = 0
-	team.APISnapshot.ModelMetadata[api.DefaultModel] = runtime
+	setMalformedDeepSeekSnapshot(&team)
 	cfg.Teams[api.DefaultTeam] = team
 	if err := store.SaveConfig(cfg); err != nil {
 		t.Fatal(err)
@@ -183,7 +174,7 @@ func TestAirplaneModeOffValidatesSavedDeepSeekWithoutHarnessSnapshotAtomically(t
 	before := connectHomeFiles(t, env)
 
 	result := run(t, env, "airplane", "mode", "off")
-	if result.err == nil || !strings.Contains(result.err.Error(), "saved team contains "+api.DefaultModel) {
+	if result.err == nil || !strings.Contains(result.err.Error(), "saved team contains "+api.DeepSeekModelID) {
 		t.Fatalf("expected stale saved team refusal without a harness snapshot, got err=%v stdout=%q", result.err, result.stdout)
 	}
 	if after := connectHomeFiles(t, env); !reflect.DeepEqual(before, after) {
@@ -205,10 +196,10 @@ func TestAirplaneModeOffValidatesAllPiSnapshotSelectionsAtomically(t *testing.T)
 					Name:         api.DefaultTeam,
 					Endpoint:     api.DefaultGatewayURL,
 					DefaultModel: airplane.LocalModelID,
-					Models:       []string{airplane.LocalModelID, api.DefaultModel},
+					Models:       []string{airplane.LocalModelID, api.DeepSeekModelID},
 					ModelMetadata: map[string]api.ModelRuntime{
 						airplane.LocalModelID: {ContextWindow: 65536, MaxTokens: 4096},
-						api.DefaultModel:      {ContextWindow: 262144, MaxTokens: 32768},
+						api.DeepSeekModelID:   {ContextWindow: 262144, MaxTokens: 32768},
 					},
 				}
 			},
@@ -401,6 +392,16 @@ func unrelatedCloudSnapshot(model string) api.Team {
 	}
 }
 
+func setMalformedDeepSeekSnapshot(team *config.TeamConfig) {
+	snapshot := team.APISnapshot
+	snapshot.DefaultModel = api.DeepSeekModelID
+	snapshot.Models = []string{api.DeepSeekModelID}
+	snapshot.ModelMetadata = map[string]api.ModelRuntime{
+		api.DeepSeekModelID: {ContextWindow: 262144, MaxTokens: 32768},
+	}
+	team.APISnapshot = snapshot
+}
+
 func setPiHarnessSnapshotContent(t *testing.T, snapshot *config.HarnessSnapshot, name, content string) {
 	t.Helper()
 	if snapshot == nil {
@@ -547,7 +548,7 @@ func TestAirplaneModeOffRestoresManagedHarnessesExactly(t *testing.T) {
 			name:     "pi",
 			harness:  "pi",
 			path:     func(env map[string]string) string { return filepath.Join(env["HOME"], ".pi", "agent", "models.json") },
-			content:  "{\n  \"providers\": {\n    \"custom\": {\n      \"baseUrl\": \"http://localhost:11434/v1\"\n    },\n    \"s46\": {\n      \"baseUrl\": \"https://custom.example/v1\",\n      \"api\": \"custom\",\n      \"models\": [{\"id\": \"s46/deepseek-v4-flash-0731\"}]\n    }\n  },\n  \"unrelated\": true\n}\n",
+			content:  "{\n  \"providers\": {\n    \"custom\": {\n      \"baseUrl\": \"http://localhost:11434/v1\"\n    },\n    \"s46\": {\n      \"baseUrl\": \"https://custom.example/v1\",\n      \"api\": \"custom\",\n      \"models\": [{\"id\": \"s46/devstral-small-2-24b\"}]\n    }\n  },\n  \"unrelated\": true\n}\n",
 			contains: airplane.LocalGatewayURL + "/v1",
 		},
 	}

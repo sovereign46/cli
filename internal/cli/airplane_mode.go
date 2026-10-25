@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"time"
 
@@ -82,6 +83,9 @@ func airplaneModeOnWithOptions(ctx context.Context, app *app, options airplaneMo
 		}
 		teamConfig.DefaultHarness = options.Harness
 	}
+	if err := validateSavedCloudTeam(teamName, teamConfig, "enabling airplane mode"); err != nil {
+		return err
+	}
 	service := airplane.Service{Env: app.runtime.Env, Stdin: app.runtime.Stdin, Stdout: app.runtime.Stdout, Stderr: app.runtime.Stderr, LogPrefix: "[s46]"}
 	report, err := runAirplaneSetup(ctx, app, false)
 	if err != nil {
@@ -91,6 +95,9 @@ func airplaneModeOnWithOptions(ctx context.Context, app *app, options airplaneMo
 }
 
 func enableAirplaneMode(ctx context.Context, app *app, service airplane.Service, cfg config.Config, teamName string, teamConfig config.TeamConfig, report airplane.Report, options airplaneModeOptions, promptForHarness bool) error {
+	if err := validateSavedCloudTeam(teamName, teamConfig, "enabling airplane mode"); err != nil {
+		return err
+	}
 	if err := prepareAirplaneRuntime(ctx, app, service, report); err != nil {
 		return err
 	}
@@ -113,6 +120,8 @@ func enableAirplaneMode(ctx context.Context, app *app, service airplane.Service,
 	}
 	if snapshot, ok := cloudTeamSnapshot(teamName, teamConfig); ok {
 		teamConfig.APISnapshot = snapshot
+	} else if hasCloudEndpoint(teamConfig.Endpoint) || hasCloudEndpoint(teamConfig.APISnapshot.Endpoint) {
+		return fmt.Errorf("saved cloud team has no authorized default model and catalog; reconnect with `s46 connect %s` before enabling airplane mode", teamName)
 	} else {
 		teamConfig.APISnapshot = api.Team{}
 	}
@@ -319,6 +328,9 @@ func airplaneModeOff(ctx context.Context, app *app) error {
 		return err
 	}
 	snapshot := teamConfig.HarnessSnapshot
+	if err := validateSavedCloudTeam(teamName, teamConfig, "disabling airplane mode"); err != nil {
+		return err
+	}
 	restored, hasCloudConfig := restoreCloudTeamConfig(teamName, teamConfig)
 	cfgBefore := cfg.Clone()
 	cfgAfter := cfg.Clone()
@@ -461,11 +473,22 @@ func localAirplaneTeam(teamName string, existing config.TeamConfig, req connectR
 
 func cloudTeamSnapshot(teamName string, teamConfig config.TeamConfig) (api.Team, bool) {
 	snapshot := teamConfig.APISnapshot
+	topLevelCloud := teamConfig.Endpoint != "" && !isLocalEndpoint(teamConfig.Endpoint)
 	if snapshot.Endpoint == "" || isLocalEndpoint(snapshot.Endpoint) {
-		if teamConfig.Endpoint == "" || isLocalEndpoint(teamConfig.Endpoint) {
+		if !topLevelCloud {
 			return api.Team{}, false
 		}
 		snapshot = teamConfig.API(teamName)
+	} else if topLevelCloud {
+		if snapshot.DefaultModel == "" {
+			snapshot.DefaultModel = teamConfig.DefaultModel
+		}
+		if len(snapshot.Models) == 0 {
+			snapshot.Models = append([]string(nil), teamConfig.Models...)
+		}
+	}
+	if snapshot.DefaultModel == "" || len(snapshot.Models) == 0 || !slices.Contains(snapshot.Models, snapshot.DefaultModel) {
+		return api.Team{}, false
 	}
 	if snapshot.Name == "" {
 		snapshot.Name = teamName
@@ -473,13 +496,17 @@ func cloudTeamSnapshot(teamName string, teamConfig config.TeamConfig) (api.Team,
 	if snapshot.Region == "" {
 		snapshot.Region = teamConfig.Region
 	}
-	if snapshot.DefaultModel == "" {
-		snapshot.DefaultModel = api.DefaultModel
-	}
-	if len(snapshot.Models) == 0 {
-		snapshot.Models = api.DefaultModelList()
-	}
 	return snapshot, true
+}
+
+func validateSavedCloudTeam(teamName string, teamConfig config.TeamConfig, operation string) error {
+	if !hasCloudEndpoint(teamConfig.Endpoint) && !hasCloudEndpoint(teamConfig.APISnapshot.Endpoint) {
+		return nil
+	}
+	if _, ok := cloudTeamSnapshot(teamName, teamConfig); !ok {
+		return fmt.Errorf("saved cloud team has no authorized default model and catalog; reconnect with `s46 connect %s` before %s", teamName, operation)
+	}
+	return nil
 }
 
 func restoreCloudTeamConfig(teamName string, teamConfig config.TeamConfig) (config.TeamConfig, bool) {
@@ -489,7 +516,7 @@ func restoreCloudTeamConfig(teamName string, teamConfig config.TeamConfig) (conf
 	}
 	teamConfig.Endpoint = snapshot.Endpoint
 	teamConfig.Region = strs.FirstNonEmpty(snapshot.Region, teamConfig.Region)
-	teamConfig.DefaultModel = strs.FirstNonEmpty(snapshot.DefaultModel, api.DefaultModel)
+	teamConfig.DefaultModel = snapshot.DefaultModel
 	teamConfig.WorkerHosts = snapshot.WorkerHosts
 	teamConfig.Models = snapshot.Models
 	teamConfig.APISnapshot = snapshot
@@ -507,6 +534,10 @@ func planHarnessConfig(ctx context.Context, app *app, teamName string, teamConfi
 		return nil, harness.Plan{}, err
 	}
 	return adapter, plan, nil
+}
+
+func hasCloudEndpoint(endpoint string) bool {
+	return endpoint != "" && !isLocalEndpoint(endpoint)
 }
 
 func isLocalEndpoint(endpoint string) bool {

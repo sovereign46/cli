@@ -20,7 +20,7 @@ func TestStoreLoadSaveConfigAndState(t *testing.T) {
 
 	cfg := DefaultConfig()
 	cfg.ActiveTeam = "@s46/engineering"
-	cfg.Teams["@s46/engineering"] = TeamConfig{Endpoint: "https://gateway.s46.dev", Region: "EU-OPO", DefaultHarness: "claude-code", DefaultModel: api.DefaultModel, APISnapshot: api.Team{ModelMetadata: map[string]api.ModelRuntime{api.DefaultModel: {ClosureSHA256: testRuntimeClosureSHA256, ClosureSizeBytes: 4096}}}}
+	cfg.Teams["@s46/engineering"] = TeamConfig{Endpoint: "https://gateway.s46.dev", Region: "EU-OPO", DefaultHarness: "claude-code", DefaultModel: api.DeepSeekModelID, APISnapshot: api.Team{ModelMetadata: map[string]api.ModelRuntime{api.DeepSeekModelID: {ClosureSHA256: testRuntimeClosureSHA256, ClosureSizeBytes: 4096}}}}
 	if err := store.SaveConfig(cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -29,7 +29,7 @@ func TestStoreLoadSaveConfigAndState(t *testing.T) {
 		t.Fatal(err)
 	}
 	loadedTeam := loadedCfg.Teams["@s46/engineering"]
-	loadedRuntime := loadedTeam.APISnapshot.ModelMetadata[api.DefaultModel]
+	loadedRuntime := loadedTeam.APISnapshot.ModelMetadata[api.DeepSeekModelID]
 	if loadedCfg.ActiveTeam != "@s46/engineering" || loadedTeam.Endpoint != "https://gateway.s46.dev" || loadedRuntime.ClosureSHA256 != testRuntimeClosureSHA256 || loadedRuntime.ClosureSizeBytes != 4096 {
 		t.Fatalf("unexpected config: %#v", loadedCfg)
 	}

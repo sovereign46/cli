@@ -251,8 +251,8 @@ func TestTeamConfigRoundTripWithAPI(t *testing.T) {
 		MinMemoryBytes:         1024,
 		RecommendedMemoryBytes: 2048,
 	}
-	team := api.Team{Name: "@s46/engineering", Endpoint: "https://gateway.s46.dev", Region: "EU-OPO", WorkerHosts: []string{"worker-01"}, DefaultModel: api.DefaultModel, Models: api.DefaultModelList(), ModelMetadata: map[string]api.ModelRuntime{api.DefaultModel: runtime}}
-	tc := TeamConfigFromAPI(team, "claude-code", api.DefaultModel, ModeCloud)
+	team := api.Team{Name: "@s46/engineering", Endpoint: "https://gateway.s46.dev", Region: "EU-OPO", WorkerHosts: []string{"worker-01"}, DefaultModel: api.DeepSeekModelID, Models: []string{api.DeepSeekModelID}, ModelMetadata: map[string]api.ModelRuntime{api.DeepSeekModelID: runtime}}
+	tc := TeamConfigFromAPI(team, "claude-code", api.DeepSeekModelID, ModeCloud)
 	if tc.DefaultHarness != "claude-code" || tc.Endpoint != team.Endpoint {
 		t.Fatalf("TeamConfigFromAPI = %#v", tc)
 	}
@@ -260,7 +260,7 @@ func TestTeamConfigRoundTripWithAPI(t *testing.T) {
 	if round.Endpoint != team.Endpoint || round.Region != team.Region || round.DefaultModel != team.DefaultModel {
 		t.Fatalf("API round-trip drift: %#v", round)
 	}
-	if got := round.ModelMetadata[api.DefaultModel]; got != runtime {
+	if got := round.ModelMetadata[api.DeepSeekModelID]; got != runtime {
 		t.Fatalf("runtime metadata round-trip drift:\n got: %#v\nwant: %#v", got, runtime)
 	}
 }

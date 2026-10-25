@@ -1,6 +1,32 @@
 package api
 
-import "testing"
+import (
+	"os"
+	"strings"
+	"testing"
+)
+
+func TestDefaultModelIsPublishedDevstral(t *testing.T) {
+	if DefaultModel != DevstralModelID {
+		t.Fatalf("DefaultModel = %q, want %q", DefaultModel, DevstralModelID)
+	}
+	if DefaultModel == DeepSeekModelID {
+		t.Fatalf("unpublished DeepSeek must not be the generic default: %q", DefaultModel)
+	}
+}
+
+func TestPublicCandidateCommandsDoNotAdvertiseDeepSeek(t *testing.T) {
+	raw, err := os.ReadFile("../../docs/testing-candidate.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	for _, command := range []string{"--model=" + DeepSeekModelID, "--model " + DeepSeekModelID} {
+		if strings.Contains(text, command) {
+			t.Fatalf("public candidate guide advertises unpublished DeepSeek in an actionable command: %q", command)
+		}
+	}
+}
 
 func TestDefaultSessionUsesTeamFields(t *testing.T) {
 	t.Parallel()

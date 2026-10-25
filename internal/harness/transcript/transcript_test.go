@@ -157,6 +157,13 @@ func TestBuildArtifactAppliesFallbacksCountsToolsAndRedactsHome(t *testing.T) {
 	}
 }
 
+func TestBuildArtifactDoesNotInventCloudModel(t *testing.T) {
+	artifact := BuildArtifact(Source{}, api.Session{}, share.BuildOptions{})
+	if artifact.Session.Model.Name != "unknown" {
+		t.Fatalf("missing transcript model became %q", artifact.Session.Model.Name)
+	}
+}
+
 func TestTranscriptUtilityHelpers(t *testing.T) {
 	if !SessionIDMatches("abcdef123456", "abcdef12") || SessionIDMatches("abcdef", "abc") {
 		t.Fatalf("unexpected session id matching")
