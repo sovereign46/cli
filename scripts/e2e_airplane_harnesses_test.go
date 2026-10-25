@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -122,6 +123,161 @@ func TestAirplaneHarnessPoisonsProxyBeforeCandidateExecution(t *testing.T) {
 	}
 }
 
+func TestAirplaneHarnessBoundsCandidateVersionOutput(t *testing.T) {
+	candidate := writeCandidate(t, "#!/bin/sh\npython3 - <<'PY'\nprint('x' * 70000)\nPY\n", 0o755)
+	output, err := runCandidateVerification(t, candidate, fileSHA256(t, candidate))
+	if err == nil || !strings.Contains(output, "candidate stdout exceeded 65536 bytes") || !strings.Contains(output, "runtime and output bounds") {
+		t.Fatalf("excessive candidate version output should fail within its bound: err=%v\n%s", err, output)
+	}
+}
+
+func TestAirplaneHarnessBoundsCandidateVersionRuntime(t *testing.T) {
+	candidate := writeCandidate(t, "#!/bin/sh\nsleep 30\n", 0o755)
+	started := time.Now()
+	output, err := runCandidateVerification(t, candidate, fileSHA256(t, candidate))
+	if err == nil || !strings.Contains(output, "candidate command timed out after 10s") || !strings.Contains(output, "runtime and output bounds") {
+		t.Fatalf("hung candidate version command should fail at its deadline: err=%v\n%s", err, output)
+	}
+	if elapsed := time.Since(started); elapsed > 20*time.Second {
+		t.Fatalf("candidate version runtime bound took %s", elapsed)
+	}
+}
+
+func TestAirplaneHarnessTerminatesDetachedCandidateServices(t *testing.T) {
+	directory := t.TempDir()
+	services := []string{filepath.Join(directory, "llama-server"), filepath.Join(directory, "s46-gateway")}
+	source := filepath.Join(directory, "service.go")
+	if err := os.WriteFile(source, []byte("package main\nimport \"time\"\nfunc main() { time.Sleep(30 * time.Second) }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	build := exec.Command("go", "build", "-o", services[0], source)
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build fake detached service: %v\n%s", err, output)
+	}
+	binary, err := os.ReadFile(services[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(services[1], binary, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pidFile := filepath.Join(directory, "service-pids")
+	checks := fmt.Sprintf(`python3 - %q %q %q <<'PY'
+import subprocess
+import sys
+pid_file, llama, gateway = sys.argv[1:]
+processes = [
+    subprocess.Popen([llama], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True),
+    subprocess.Popen([gateway], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True),
+]
+with open(pid_file, "w", encoding="utf-8") as output:
+    for process in processes:
+        print(process.pid, file=output)
+PY`, pidFile, services[0], services[1])
+	candidate := writeCandidate(t, releaseCandidateScript(checks), 0o755)
+	output, err := runCandidateVerification(t, candidate, fileSHA256(t, candidate))
+	if err != nil {
+		t.Fatalf("verification should clean its detached services: %v\n%s", err, output)
+	}
+	for _, name := range []string{"llama-server", "s46-gateway"} {
+		if !strings.Contains(output, "detached "+name+" service") {
+			t.Fatalf("runner did not bind and track %s:\n%s", name, output)
+		}
+	}
+	raw, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range strings.Fields(string(raw)) {
+		pid, err := strconv.Atoi(field)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if processExists(pid) {
+			t.Fatalf("detached candidate service %d survived successful verification", pid)
+		}
+	}
+}
+
+func TestAirplaneHarnessTerminatesArbitraryDetachedCandidateDescendants(t *testing.T) {
+	directory := t.TempDir()
+	helper := filepath.Join(directory, "detached-helper")
+	source := filepath.Join(directory, "helper.go")
+	if err := os.WriteFile(source, []byte("package main\nimport \"time\"\nfunc main() { time.Sleep(30 * time.Second) }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	build := exec.Command("go", "build", "-o", helper, source)
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build detached helper: %v\n%s", err, output)
+	}
+	pidFile := filepath.Join(directory, "helper-pid")
+	checks := fmt.Sprintf(`python3 - %q %q <<'PY'
+import subprocess
+import sys
+helper, pid_file = sys.argv[1:]
+process = subprocess.Popen([helper], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+with open(pid_file, "w", encoding="utf-8") as output:
+    print(process.pid, file=output)
+PY`, helper, pidFile)
+	candidate := writeCandidate(t, releaseCandidateScript(checks), 0o755)
+	output, err := runCandidateVerification(t, candidate, fileSHA256(t, candidate))
+	if err != nil {
+		t.Fatalf("verification should clean arbitrary marker-bearing descendants: %v\n%s", err, output)
+	}
+	raw, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if processExists(pid) {
+		t.Fatalf("arbitrary detached candidate descendant %d survived verification", pid)
+	}
+}
+
+func TestAirplaneHarnessProcessCleanupIgnoresCandidatePATHPs(t *testing.T) {
+	directory := t.TempDir()
+	helper := filepath.Join(directory, "detached-helper")
+	source := filepath.Join(directory, "helper.go")
+	if err := os.WriteFile(source, []byte("package main\nimport \"time\"\nfunc main() { time.Sleep(30 * time.Second) }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	build := exec.Command("go", "build", "-o", helper, source)
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build detached helper: %v\n%s", err, output)
+	}
+	pidFile := filepath.Join(directory, "helper-pid")
+	checks := fmt.Sprintf(`python3 - %q %q <<'PY'
+import subprocess
+import sys
+helper, pid_file = sys.argv[1:]
+process = subprocess.Popen([helper], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+with open(pid_file, "w", encoding="utf-8") as output:
+    print(process.pid, file=output)
+PY
+bin_dir=${PATH%%%%:*}
+printf '#!/bin/sh\nexit 1\n' > "$bin_dir/ps"
+chmod 0700 "$bin_dir/ps"`, helper, pidFile)
+	candidate := writeCandidate(t, releaseCandidateScript(checks), 0o755)
+	output, err := runCandidateVerification(t, candidate, fileSHA256(t, candidate))
+	if err != nil {
+		t.Fatalf("verification should use trusted process enumeration: %v\n%s", err, output)
+	}
+	raw, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if processExists(pid) {
+		t.Fatalf("candidate PATH ps shadow hid surviving process %d", pid)
+	}
+}
+
 func TestAirplaneHarnessQualificationRequiresExternalNetworkBlock(t *testing.T) {
 	candidate := writeReleaseCandidateArchive(t, releaseCandidateScript(""))
 	hash := fileSHA256(t, candidate)
@@ -129,39 +285,49 @@ func TestAirplaneHarnessQualificationRequiresExternalNetworkBlock(t *testing.T) 
 	if err == nil || !strings.Contains(output, "requires a pre-established external OS-level egress block") {
 		t.Fatalf("qualification without external block assertion should fail: err=%v\n%s", err, output)
 	}
-	output, err = runCandidateVerificationWithEnv(t, candidate, hash,
+}
+
+func TestAirplaneHarnessRejectsQualificationVerificationOnlyBeforeCandidateExecution(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "candidate-executed")
+	candidate := writeReleaseCandidateArchive(t, releaseCandidateScript(fmt.Sprintf("touch %q", marker)))
+	output, err := runCandidateVerificationWithEnv(t, candidate, fileSHA256(t, candidate),
 		"S46_E2E_QUALIFICATION=1",
 		"S46_E2E_NETWORK_ISOLATION=external",
 		"S46_E2E_EXPECTED_VERSION=1.2.3",
 		"S46_E2E_EXPECTED_COMMIT=0123456789abcdef0123456789abcdef01234567",
 	)
-	if err == nil || !strings.Contains(output, "qualification evidence requires the complete airplane harness run") || !strings.Contains(output, "operator-confirmed pre-established external OS-level egress denial") {
-		t.Fatalf("qualification must reach candidate verification but refuse verification-only evidence: err=%v\n%s", err, output)
+	if err == nil || !strings.Contains(output, "cannot be combined with S46_E2E_VERIFY_CANDIDATE_ONLY=1") {
+		t.Fatalf("qualification verification-only mode should fail immediately: err=%v\n%s", err, output)
+	}
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("candidate executed before incompatible qualification mode was rejected: %v", statErr)
 	}
 }
 
-func TestAirplaneHarnessQualificationBindsExpectedBuildIdentity(t *testing.T) {
-	candidate := writeReleaseCandidateArchive(t, releaseCandidateScript(""))
-	hash := fileSHA256(t, candidate)
-	base := []string{
+func TestAirplaneHarnessQualificationRequiresRuntimeIdentitiesBeforeCandidateExecution(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "candidate-executed")
+	candidate := writeReleaseCandidateArchive(t, releaseCandidateScript(fmt.Sprintf("touch %q", marker)))
+	output, err := runCandidateVerificationWithEnv(t, candidate, fileSHA256(t, candidate),
+		"S46_E2E_VERIFY_CANDIDATE_ONLY=0",
 		"S46_E2E_QUALIFICATION=1",
 		"S46_E2E_NETWORK_ISOLATION=external",
 		"S46_E2E_EXPECTED_VERSION=1.2.3",
 		"S46_E2E_EXPECTED_COMMIT=0123456789abcdef0123456789abcdef01234567",
+	)
+	if err == nil || !strings.Contains(output, "requires S46_E2E_MODEL_GGUF") {
+		t.Fatalf("qualification without runtime identities should fail immediately: err=%v\n%s", err, output)
 	}
-
-	wrongVersion := append([]string{}, base...)
-	wrongVersion[2] = "S46_E2E_EXPECTED_VERSION=1.2.4"
-	output, err := runCandidateVerificationWithEnv(t, candidate, hash, wrongVersion...)
-	if err == nil || !strings.Contains(output, "does not match expected") {
-		t.Fatalf("unexpected version should fail: err=%v\n%s", err, output)
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("candidate executed before runtime identity requirements were checked: %v", statErr)
 	}
+}
 
-	wrongCommit := append([]string{}, base...)
-	wrongCommit[3] = "S46_E2E_EXPECTED_COMMIT=1123456789abcdef0123456789abcdef01234567"
-	output, err = runCandidateVerificationWithEnv(t, candidate, hash, wrongCommit...)
-	if err == nil || !strings.Contains(output, "does not match expected") {
-		t.Fatalf("unexpected commit should fail: err=%v\n%s", err, output)
+func TestAirplaneHarnessRejectsNonCanonicalCandidateVersion(t *testing.T) {
+	candidateJSON := strings.Replace(releaseCandidateJSON, `"version":"1.2.3"`, `"version":"01.2.3"`, 1)
+	candidate := writeCandidate(t, "#!/bin/sh\nprintf '%s\\n' '"+candidateJSON+"'\n", 0o755)
+	output, err := runCandidateVerification(t, candidate, fileSHA256(t, candidate))
+	if err == nil || !strings.Contains(output, "non-release version") {
+		t.Fatalf("candidate version with a leading zero should fail: err=%v\n%s", err, output)
 	}
 }
 
@@ -179,11 +345,142 @@ func TestAirplaneHarnessStagesCandidateBeforeSourceMutation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(executed) == source || !strings.HasSuffix(string(executed), "/bin/s46") {
-		t.Fatalf("candidate was not executed from the verified staged copy: %q", executed)
+	if string(executed) == source || !strings.Contains(string(executed), "/invocations/candidate.") || !strings.HasSuffix(string(executed), "/s46") {
+		t.Fatalf("candidate was not executed from a fresh verified invocation copy: %q", executed)
 	}
 	if strings.Contains(output, fileSHA256(t, source)) || !strings.Contains(output, expected) {
 		t.Fatalf("source mutation changed the recorded candidate identity:\n%s", output)
+	}
+}
+
+func TestAirplaneHarnessPathInvocationsUseFreshVerifiedCopies(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "invocation-paths")
+	script := fmt.Sprintf(`#!/bin/sh
+set -eu
+case "${1:-}" in
+  probe)
+    printf '%%s\n' "$0" >> %q
+    exit 0
+    ;;
+  version)
+    printf '%%s\n' "$0" >> %q
+    s46 probe
+    printf '%%s\n' '%s'
+    ;;
+esac
+`, marker, marker, releaseCandidateJSON)
+	candidate := writeCandidate(t, script, 0o755)
+	output, err := runCandidateVerificationWithEnv(t, candidate, fileSHA256(t, candidate), "S46_E2E_KEEP_SANDBOX=1")
+	if err != nil {
+		t.Fatalf("candidate PATH invocation failed: %v\n%s", err, output)
+	}
+	raw, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := strings.Fields(string(raw))
+	if len(paths) != 2 || paths[0] == paths[1] {
+		t.Fatalf("candidate invocations did not use distinct copies: %q", raw)
+	}
+	for _, path := range paths {
+		if !strings.Contains(path, "/invocations/") || !strings.HasSuffix(path, "/s46") {
+			t.Fatalf("candidate invocation bypassed the fresh-copy runner: %q", path)
+		}
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("candidate PATH invocation copy was not removed: %q err=%v", path, err)
+		}
+	}
+	if root, _, ok := strings.Cut(paths[0], "/invocations/"); ok {
+		t.Cleanup(func() { _ = os.RemoveAll(root) })
+	}
+}
+
+func TestAirplaneHarnessRejectsReplacedPathRunner(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "replacement-ran")
+	script := fmt.Sprintf(`#!/bin/sh
+set -eu
+case "${1:-}" in
+  version)
+    bin_dir=${PATH%%%%:*}
+    rm -f "$bin_dir/s46"
+    printf '#!/bin/sh\ntouch %s\n' %q > "$bin_dir/s46"
+    chmod 0500 "$bin_dir/s46"
+    s46 probe
+    printf '%%s\n' '%s'
+    ;;
+esac
+`, marker, marker, releaseCandidateJSON)
+	candidate := writeCandidate(t, script, 0o755)
+	output, err := runCandidateVerification(t, candidate, fileSHA256(t, candidate))
+	if err == nil || !strings.Contains(output, "candidate PATH runner changed") {
+		t.Fatalf("replaced PATH runner should invalidate verification: err=%v\n%s", err, output)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("replacement reproduction did not execute: %v", err)
+	}
+}
+
+func TestAirplaneHarnessPathRunnerCleansFailedStaging(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "leaked-path-invocations")
+	script := fmt.Sprintf(`#!/bin/sh
+set -eu
+case "${1:-}" in
+  version)
+    bin_dir=${PATH%%%%:*}
+    seed=$(grep '^source = ' "$bin_dir/s46" | cut -d"'" -f2)
+    chmod 0600 "$seed"
+    printf 'changed' > "$seed"
+    s46 probe >/dev/null 2>&1 || true
+    find "$bin_dir/../invocations" -mindepth 1 -maxdepth 1 -type d -name 'path-candidate.*' -print > %q
+    printf '%%s\n' '%s'
+    ;;
+esac
+`, marker, releaseCandidateJSON)
+	candidate := writeCandidate(t, script, 0o755)
+	output, err := runCandidateVerification(t, candidate, fileSHA256(t, candidate))
+	if err != nil {
+		t.Fatalf("failed nested staging should remain fail-closed and clean: %v\n%s", err, output)
+	}
+	leaked, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(leaked)) != "" {
+		t.Fatalf("failed PATH staging leaked invocation directories: %s", leaked)
+	}
+}
+
+func TestAirplaneHarnessFailureTeardownPurgesKilledPathRunnerCopy(t *testing.T) {
+	script := `#!/bin/sh
+set -eu
+case "${1:-}" in
+  probe)
+    kill -KILL "$PPID"
+    ;;
+  version)
+    s46 probe >/dev/null 2>&1 || true
+    exit 1
+    ;;
+esac
+`
+	candidate := writeCandidate(t, script, 0o755)
+	output, err := runCandidateVerificationWithEnv(t, candidate, fileSHA256(t, candidate), "S46_E2E_KEEP_SANDBOX=1")
+	if err == nil {
+		t.Fatalf("killed PATH runner should fail verification:\n%s", output)
+	}
+	const marker = "[s46-e2e] sandbox preserved: "
+	index := strings.LastIndex(output, marker)
+	if index < 0 {
+		t.Fatalf("failed verification did not preserve its sandbox:\n%s", output)
+	}
+	sandbox := strings.TrimSpace(strings.SplitN(output[index+len(marker):], "\n", 2)[0])
+	t.Cleanup(func() { _ = os.RemoveAll(sandbox) })
+	entries, err := os.ReadDir(filepath.Join(sandbox, "invocations"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("failure teardown left candidate invocation copies: %#v", entries)
 	}
 }
 
@@ -459,6 +756,21 @@ func writeTruncatedCandidateArchive(t *testing.T, path string, header tar.Header
 	if err := file.Close(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func processExists(pid int) bool {
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	for attempt := 0; attempt < 20; attempt++ {
+		err = process.Signal(syscall.Signal(0))
+		if err != nil {
+			return false
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return true
 }
 
 type zeroReader struct{}

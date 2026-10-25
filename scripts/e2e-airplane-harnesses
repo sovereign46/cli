@@ -6,35 +6,48 @@ host_home="${HOME:-}"
 sandbox="$(mktemp -d "${TMPDIR:-/tmp}/s46-e2e-airplane.XXXXXX")"
 sandbox="$(cd "$sandbox" && pwd -P)"
 keep_sandbox="${S46_E2E_KEEP_SANDBOX:-0}"
-candidate_binary=""
+candidate_seed=""
+candidate_metadata=""
+candidate_binary_sha256=""
+candidate_binary_size=""
 airplane_mode_enabled=0
+runner_identity=""
+qualification_runtime_identity=""
+qualification_cleanup_identity=""
+qualified_llama_server=""
+qualified_gateway_binary=""
+trusted_python=""
+trusted_ps=""
+candidate_path_runner_identity=""
+candidate_path_runner_sha256=""
+declare -a tracked_process_groups=()
+declare -a tracked_service_pids=()
+declare -a tracked_service_groups=()
+declare -a tracked_service_kinds=()
 
 best_effort_disable_airplane() {
-  if [ "$airplane_mode_enabled" != "1" ] || [ ! -x "$candidate_binary" ]; then
+  if [ "$airplane_mode_enabled" != "1" ] || [ ! -f "$candidate_seed" ]; then
     return 0
   fi
-  "$candidate_binary" airplane mode off >"$sandbox/cleanup-mode-off.out" 2>"$sandbox/cleanup-mode-off.err" &
-  local pid=$! iteration
-  for ((iteration = 0; iteration < 30; iteration++)); do
-    if ! kill -0 "$pid" 2>/dev/null; then
-      if wait "$pid"; then
-        airplane_mode_enabled=0
-      fi
-      return 0
-    fi
-    sleep 1
-  done
-  kill "$pid" 2>/dev/null || true
-  sleep 1
-  kill -9 "$pid" 2>/dev/null || true
-  wait "$pid" 2>/dev/null || true
-  printf '[s46-e2e] warning: timed out while disabling airplane mode during cleanup\n' >&2
+  if run_candidate_bounded 30 65536 "$sandbox/cleanup-mode-off.out" "$sandbox/cleanup-mode-off.err" airplane mode off; then
+    airplane_mode_enabled=0
+  else
+    printf '[s46-e2e] warning: timed out or failed while disabling airplane mode during cleanup\n' >&2
+  fi
 }
 
 cleanup() {
   local status=$?
   trap - EXIT
-  best_effort_disable_airplane
+  best_effort_disable_airplane || true
+  if [ -f "$sandbox/baseline-services.tsv" ]; then
+    record_new_airplane_services || printf '[s46-e2e] warning: found an untrackable detached airplane service\n' >&2
+  fi
+  terminate_tracked_processes || printf '[s46-e2e] warning: could not terminate every tracked process\n' >&2
+  terminate_runner_owned_processes || printf '[s46-e2e] warning: could not terminate every runner-owned process\n' >&2
+  if [ -n "$trusted_python" ] && [ -d "$sandbox/invocations" ]; then
+    cleanup_candidate_invocations || printf '[s46-e2e] warning: could not remove every candidate invocation copy\n' >&2
+  fi
   if [ "$keep_sandbox" = "1" ]; then
     echo "[s46-e2e] sandbox preserved: $sandbox"
   elif [ -d "$sandbox" ]; then
@@ -59,12 +72,42 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || fail "$1 is required on PATH"
 }
 
+resolve_trusted_support_tools() {
+  trusted_python=""
+  for path in /usr/bin/python3 /usr/local/bin/python3; do
+    if [ -f "$path" ] && [ -x "$path" ]; then
+      trusted_python="$path"
+      break
+    fi
+  done
+  if [ -z "$trusted_python" ]; then
+    trusted_python="$(command -v python3 2>/dev/null || true)"
+  fi
+  case "$trusted_python" in
+    /*) ;;
+    *) fail "python3 must resolve to an absolute executable path" ;;
+  esac
+  [ -f "$trusted_python" ] && [ -x "$trusted_python" ] || fail "python3 must resolve to a regular executable"
+  case "$trusted_python" in
+    *[[:space:]]*) fail "python3 executable path must not contain whitespace" ;;
+  esac
+
+  trusted_ps=""
+  for path in /bin/ps /usr/bin/ps; do
+    if [ -f "$path" ] && [ -x "$path" ]; then
+      trusted_ps="$path"
+      break
+    fi
+  done
+  [ -n "$trusted_ps" ] || fail "a trusted absolute ps executable is required"
+}
+
 stage_candidate() {
   local source="$1"
   local expected_sha256="$2"
   local binary="$3"
   local metadata="$4"
-  python3 - "$source" "$expected_sha256" "$binary" "$metadata" <<'PY'
+  "$trusted_python" - "$source" "$expected_sha256" "$binary" "$metadata" <<'PY'
 import hashlib
 import json
 import os
@@ -346,7 +389,7 @@ else:
     finally:
         archive.close()
 
-os.chmod(binary, 0o500)
+os.chmod(binary, 0o400)
 if kind == "binary":
     binary_size = package_size
     binary_hash = hashlib.sha256()
@@ -363,21 +406,459 @@ with open(metadata, "x", encoding="utf-8") as output:
         "binarySha256": binary_hash.hexdigest(),
         "binarySize": binary_size,
         "binarySourceMode": f"{binary_mode:04o}",
-        "stagedMode": "0500",
+        "stagedMode": "0400",
+        "invocationMode": "0500",
     }, output, sort_keys=True)
     output.write("\n")
 PY
 }
 
+fresh_candidate_copy() {
+  local directory destination
+  directory="$(mktemp -d "$sandbox/invocations/candidate.XXXXXX")" || return 1
+  destination="$directory/s46"
+  if ! "$trusted_python" - "$candidate_seed" "$candidate_binary_sha256" "$candidate_binary_size" "$destination" <<'PY'
+import hashlib
+import os
+import re
+import stat
+import sys
+
+source, expected_hash, expected_size_raw, destination = sys.argv[1:]
+if not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
+    raise SystemExit("invalid staged candidate binary hash")
+try:
+    expected_size = int(expected_size_raw)
+except ValueError:
+    raise SystemExit("invalid staged candidate binary size")
+if expected_size <= 0 or expected_size > 64 * 1024 * 1024:
+    raise SystemExit("invalid staged candidate binary size")
+
+before = os.lstat(source)
+if not stat.S_ISREG(before.st_mode) or before.st_size != expected_size:
+    raise SystemExit("staged candidate binary identity changed")
+flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+source_fd = os.open(source, flags)
+try:
+    opened = os.fstat(source_fd)
+    if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+        raise SystemExit("staged candidate binary changed while opening")
+    output_fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0), 0o500)
+    hasher = hashlib.sha256()
+    copied = 0
+    try:
+        while True:
+            chunk = os.read(source_fd, 1024 * 1024)
+            if not chunk:
+                break
+            copied += len(chunk)
+            if copied > expected_size:
+                raise SystemExit("staged candidate binary grew while copying")
+            hasher.update(chunk)
+            view = memoryview(chunk)
+            while view:
+                written = os.write(output_fd, view)
+                if written <= 0:
+                    raise SystemExit("could not write fresh candidate invocation copy")
+                view = view[written:]
+        os.fchmod(output_fd, 0o500)
+        os.fsync(output_fd)
+    finally:
+        os.close(output_fd)
+    after = os.fstat(source_fd)
+finally:
+    os.close(source_fd)
+current = os.lstat(source)
+stable = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+if any(getattr(before, field) != getattr(after, field) for field in stable) or any(getattr(after, field) != getattr(current, field) for field in stable):
+    raise SystemExit("staged candidate binary changed while copying")
+if copied != expected_size or hasher.hexdigest() != expected_hash:
+    raise SystemExit("staged candidate binary hash changed")
+copy_info = os.lstat(destination)
+if not stat.S_ISREG(copy_info.st_mode) or copy_info.st_size != expected_size or stat.S_IMODE(copy_info.st_mode) != 0o500:
+    raise SystemExit("fresh candidate invocation copy has invalid identity")
+PY
+  then
+    "$trusted_python" - "$directory" <<'PY'
+import shutil
+import sys
+shutil.rmtree(sys.argv[1])
+PY
+    return 1
+  fi
+  printf '%s\n' "$destination"
+}
+
+terminate_process_group() {
+  local pgid="$1"
+  "$trusted_python" - "$pgid" <<'PY'
+import os
+import signal
+import sys
+import time
+
+pgid = int(sys.argv[1])
+if pgid <= 1 or pgid == os.getpgrp():
+    raise SystemExit(f"refusing unsafe process group {pgid}")
+
+def exists():
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        raise SystemExit(f"cannot inspect process group {pgid}")
+
+if not exists():
+    raise SystemExit(0)
+try:
+    os.killpg(pgid, signal.SIGTERM)
+except ProcessLookupError:
+    raise SystemExit(0)
+deadline = time.monotonic() + 5
+while time.monotonic() < deadline:
+    if not exists():
+        raise SystemExit(0)
+    time.sleep(0.1)
+try:
+    os.killpg(pgid, signal.SIGKILL)
+except ProcessLookupError:
+    raise SystemExit(0)
+deadline = time.monotonic() + 2
+while time.monotonic() < deadline:
+    if not exists():
+        raise SystemExit(0)
+    time.sleep(0.1)
+raise SystemExit(f"process group {pgid} survived termination")
+PY
+}
+
+untrack_process_group() {
+  local wanted="$1" group
+  local -a remaining=()
+  for group in "${tracked_process_groups[@]+"${tracked_process_groups[@]}"}"; do
+    [ "$group" = "$wanted" ] || remaining+=("$group")
+  done
+  tracked_process_groups=("${remaining[@]+"${remaining[@]}"}")
+}
+
+run_candidate() {
+  local output_dir stdout stderr status
+  output_dir="$(mktemp -d "$sandbox/candidate-command.XXXXXX")"
+  stdout="$output_dir/stdout"
+  stderr="$output_dir/stderr"
+  if run_candidate_bounded "$candidate_command_timeout" "$candidate_command_output_limit" "$stdout" "$stderr" "$@"; then
+    status=0
+  else
+    status=$?
+  fi
+  cat "$stdout" 2>/dev/null || true
+  cat "$stderr" >&2 2>/dev/null || true
+  rm -rf "$output_dir"
+  return "$status"
+}
+
+s46() {
+  run_candidate "$@"
+}
+
+run_candidate_bounded() {
+  local seconds="$1" maximum="$2" stdout="$3" stderr="$4" executable status
+  shift 4
+  if ! verify_candidate_path_runner; then
+    printf '[s46-e2e] error: candidate PATH runner changed before candidate execution\n' >&2
+    return 1
+  fi
+  executable="$(fresh_candidate_copy)" || return 1
+  if "$trusted_python" - "$seconds" "$maximum" "$stdout" "$stderr" "$executable" "$@" <<'PY'
+import os
+import selectors
+import signal
+import subprocess
+import sys
+import time
+
+seconds, maximum, stdout_path, stderr_path, executable, *arguments = sys.argv[1:]
+seconds = int(seconds)
+maximum = int(maximum)
+outputs = {}
+process = None
+
+def stop():
+    if process is None:
+        return
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    if process.poll() is None:
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    if process.poll() is None:
+        try:
+            process.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"candidate process group {process.pid} survived termination")
+
+try:
+    with open(stdout_path, "xb") as stdout, open(stderr_path, "xb") as stderr:
+        outputs = {"stdout": [stdout, 0], "stderr": [stderr, 0]}
+        process = subprocess.Popen(
+            [executable, *arguments],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        selector = selectors.DefaultSelector()
+        selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+        selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+        deadline = time.monotonic() + seconds
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError(f"candidate command timed out after {seconds}s")
+            events = selector.select(min(remaining, 0.25))
+            for key, _ in events:
+                chunk = os.read(key.fileobj.fileno(), 65536)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    key.fileobj.close()
+                    continue
+                output, count = outputs[key.data]
+                if count + len(chunk) > maximum:
+                    allowed = max(0, maximum - count)
+                    if allowed:
+                        output.write(chunk[:allowed])
+                    raise RuntimeError(f"candidate {key.data} exceeded {maximum} bytes")
+                output.write(chunk)
+                outputs[key.data][1] += len(chunk)
+        status = process.wait(timeout=max(0.1, deadline - time.monotonic()))
+        for output, _ in outputs.values():
+            output.flush()
+            os.fsync(output.fileno())
+        if status != 0:
+            raise RuntimeError(f"candidate command exited {status}")
+        stop()
+except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+    stop()
+    print(error, file=sys.stderr)
+    raise SystemExit(1)
+PY
+  then
+    status=0
+  else
+    status=$?
+  fi
+  "$trusted_python" - "$executable" <<'PY'
+import os
+import shutil
+import sys
+shutil.rmtree(os.path.dirname(sys.argv[1]))
+PY
+  if ! verify_candidate_path_runner; then
+    printf '[s46-e2e] error: candidate PATH runner changed during candidate execution\n' >&2
+    status=1
+  fi
+  return "$status"
+}
+
+install_candidate_path_runner() {
+  cat >"$sandbox/bin/s46" <<'PY'
+#!/usr/bin/env python3
+import hashlib
+import os
+import re
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+
+source = os.environ["S46_E2E_CANDIDATE_SEED"]
+expected_hash = os.environ["S46_E2E_CANDIDATE_BINARY_SHA256"]
+expected_size = int(os.environ["S46_E2E_CANDIDATE_BINARY_SIZE"])
+invocations = os.environ["S46_E2E_CANDIDATE_INVOCATIONS"]
+if not re.fullmatch(r"[0-9a-f]{64}", expected_hash) or expected_size <= 0 or expected_size > 64 * 1024 * 1024:
+    raise SystemExit("invalid staged candidate identity")
+
+
+def interrupted(signum, _frame):
+    raise SystemExit(128 + signum)
+
+
+for handled_signal in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+    signal.signal(handled_signal, interrupted)
+
+directory = tempfile.mkdtemp(prefix="path-candidate.", dir=invocations)
+try:
+    destination = os.path.join(directory, "s46")
+    before = os.lstat(source)
+    if not stat.S_ISREG(before.st_mode) or before.st_size != expected_size:
+        raise SystemExit("staged candidate binary identity changed")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    source_fd = os.open(source, flags)
+    try:
+        opened = os.fstat(source_fd)
+        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+            raise SystemExit("staged candidate binary changed while opening")
+        output_fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0), 0o500)
+        hasher = hashlib.sha256()
+        copied = 0
+        try:
+            while True:
+                chunk = os.read(source_fd, 1024 * 1024)
+                if not chunk:
+                    break
+                copied += len(chunk)
+                if copied > expected_size:
+                    raise SystemExit("staged candidate binary grew while copying")
+                hasher.update(chunk)
+                view = memoryview(chunk)
+                while view:
+                    written = os.write(output_fd, view)
+                    if written <= 0:
+                        raise SystemExit("could not write fresh candidate invocation copy")
+                    view = view[written:]
+            os.fchmod(output_fd, 0o500)
+            os.fsync(output_fd)
+        finally:
+            os.close(output_fd)
+        after = os.fstat(source_fd)
+    finally:
+        os.close(source_fd)
+    current = os.lstat(source)
+    stable = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+    if any(getattr(before, field) != getattr(after, field) for field in stable) or any(getattr(after, field) != getattr(current, field) for field in stable):
+        raise SystemExit("staged candidate binary changed while copying")
+    if copied != expected_size or hasher.hexdigest() != expected_hash:
+        raise SystemExit("staged candidate binary hash changed")
+    copy_info = os.lstat(destination)
+    if not stat.S_ISREG(copy_info.st_mode) or copy_info.st_size != expected_size or stat.S_IMODE(copy_info.st_mode) != 0o500:
+        raise SystemExit("fresh candidate invocation copy has invalid identity")
+    completed = subprocess.run([destination, *sys.argv[1:]], check=False)
+    status = 128 - completed.returncode if completed.returncode < 0 else completed.returncode
+finally:
+    shutil.rmtree(directory)
+raise SystemExit(status)
+PY
+  "$trusted_python" - "$sandbox/bin/s46" "$candidate_seed" "$candidate_binary_sha256" "$candidate_binary_size" "$sandbox/invocations" "$trusted_python" <<'PY'
+import sys
+
+path, source, expected_hash, expected_size, invocations, trusted_python = sys.argv[1:]
+with open(path, encoding="utf-8") as runner:
+    content = runner.read()
+replacements = {
+    "#!/usr/bin/env python3": f"#!{trusted_python}",
+    'source = os.environ["S46_E2E_CANDIDATE_SEED"]': f"source = {source!r}",
+    'expected_hash = os.environ["S46_E2E_CANDIDATE_BINARY_SHA256"]': f"expected_hash = {expected_hash!r}",
+    'expected_size = int(os.environ["S46_E2E_CANDIDATE_BINARY_SIZE"])': f"expected_size = {int(expected_size)!r}",
+    'invocations = os.environ["S46_E2E_CANDIDATE_INVOCATIONS"]': f"invocations = {invocations!r}",
+}
+for old, new in replacements.items():
+    if content.count(old) != 1:
+        raise SystemExit(f"candidate PATH runner template is missing {old!r}")
+    content = content.replace(old, new)
+with open(path, "w", encoding="utf-8") as runner:
+    runner.write(content)
+    runner.flush()
+    __import__("os").fsync(runner.fileno())
+PY
+  chmod 0500 "$sandbox/bin/s46"
+  capture_candidate_path_runner_identity
+}
+
+capture_candidate_path_runner_identity() {
+  local captured
+  if ! captured="$("$trusted_python" - "$sandbox/bin/s46" <<'PY'
+import hashlib
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+before = os.lstat(path)
+if not stat.S_ISREG(before.st_mode) or stat.S_IMODE(before.st_mode) != 0o500 or before.st_nlink != 1:
+    raise SystemExit("candidate PATH runner has invalid initial identity")
+fd = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
+try:
+    opened = os.fstat(fd)
+    body = bytearray()
+    while chunk := os.read(fd, 65536):
+        body.extend(chunk)
+        if len(body) > 1024 * 1024:
+            raise SystemExit("candidate PATH runner exceeds size limit")
+    after = os.fstat(fd)
+finally:
+    os.close(fd)
+named = os.lstat(path)
+fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_uid", "st_gid", "st_size", "st_mtime_ns", "st_ctime_ns")
+if any(getattr(before, field) != getattr(opened, field) for field in fields) or any(getattr(opened, field) != getattr(after, field) for field in fields) or any(getattr(after, field) != getattr(named, field) for field in fields):
+    raise SystemExit("candidate PATH runner changed while recording its identity")
+print(hashlib.sha256(body).hexdigest(), ":".join(str(getattr(after, field)) for field in fields))
+PY
+  )"; then
+    fail "could not record candidate PATH runner identity"
+  fi
+  read -r candidate_path_runner_sha256 candidate_path_runner_identity <<<"$captured"
+  [ -n "$candidate_path_runner_sha256" ] && [ -n "$candidate_path_runner_identity" ] || fail "could not record candidate PATH runner identity"
+}
+
+verify_candidate_path_runner() {
+  [ -n "$candidate_path_runner_sha256" ] && [ -n "$candidate_path_runner_identity" ] || return 1
+  "$trusted_python" - "$sandbox/bin/s46" "$candidate_path_runner_sha256" "$candidate_path_runner_identity" <<'PY'
+import hashlib
+import os
+import stat
+import sys
+
+path, expected_hash, expected_identity = sys.argv[1:]
+before = os.lstat(path)
+if not stat.S_ISREG(before.st_mode) or stat.S_IMODE(before.st_mode) != 0o500 or before.st_nlink != 1:
+    raise SystemExit("candidate PATH runner identity changed")
+fd = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
+try:
+    opened = os.fstat(fd)
+    hasher = hashlib.sha256()
+    size = 0
+    while chunk := os.read(fd, 65536):
+        size += len(chunk)
+        if size > 1024 * 1024:
+            raise SystemExit("candidate PATH runner exceeds size limit")
+        hasher.update(chunk)
+    after = os.fstat(fd)
+finally:
+    os.close(fd)
+named = os.lstat(path)
+fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_uid", "st_gid", "st_size", "st_mtime_ns", "st_ctime_ns")
+actual_identity = ":".join(str(getattr(after, field)) for field in fields)
+if any(getattr(before, field) != getattr(opened, field) for field in fields) or any(getattr(opened, field) != getattr(after, field) for field in fields) or any(getattr(after, field) != getattr(named, field) for field in fields):
+    raise SystemExit("candidate PATH runner changed during verification")
+if actual_identity != expected_identity or hasher.hexdigest() != expected_hash:
+    raise SystemExit("candidate PATH runner identity changed")
+PY
+}
+
 verify_candidate_identity() {
-  local binary="$1"
-  local metadata="$2"
-  local expected_version="$3"
-  local expected_commit="$4"
-  local qualification="$5"
+  local metadata="$1"
+  local expected_version="$2"
+  local expected_commit="$3"
+  local qualification="$4"
   local version_json="$sandbox/candidate-version.json"
-  "$binary" version --json >"$version_json"
-  python3 - "$metadata" "$version_json" "$sandbox/candidate-identity.json" "$expected_version" "$expected_commit" "$qualification" <<'PY'
+  local version_stderr="$sandbox/candidate-version.err"
+  if ! run_candidate_bounded 10 65536 "$version_json" "$version_stderr" version --json; then
+    tail -80 "$version_stderr" 2>/dev/null || true
+    fail "candidate version --json did not complete within its runtime and output bounds"
+  fi
+  "$trusted_python" - "$metadata" "$version_json" "$sandbox/candidate-identity.json" "$expected_version" "$expected_commit" "$qualification" <<'PY'
 import datetime
 import json
 import re
@@ -388,7 +869,7 @@ with open(metadata_path, encoding="utf-8") as source:
     identity = json.load(source)
 with open(version_path, encoding="utf-8") as source:
     version = json.load(source)
-if not re.fullmatch(r"\d+\.\d+\.\d+", str(version.get("version", ""))):
+if not re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", str(version.get("version", ""))):
     raise SystemExit(f"candidate reports a non-release version: {version.get('version')!r}")
 if version.get("release") is not True:
     raise SystemExit("candidate is not compiled with the release build tag")
@@ -398,7 +879,7 @@ if not re.fullmatch(r"[0-9a-f]{40,64}", commit):
 if qualification == "1":
     if identity.get("kind") != "archive":
         raise SystemExit("release qualification requires a validated release archive")
-    if not re.fullmatch(r"\d+\.\d+\.\d+", expected_version):
+    if not re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", expected_version):
         raise SystemExit("qualification requires S46_E2E_EXPECTED_VERSION=x.y.z")
     if not re.fullmatch(r"[0-9a-f]{40,64}", expected_commit):
         raise SystemExit("qualification requires a full lowercase S46_E2E_EXPECTED_COMMIT")
@@ -423,23 +904,227 @@ with open(identity_path, "x", encoding="utf-8") as output:
     json.dump(identity, output, indent=2, sort_keys=True)
     output.write("\n")
 print(f"candidate package: {identity['packageSha256']} ({identity['packageSize']} bytes, mode {identity['packageMode']}, {identity['kind']})")
-print(f"candidate binary:  {identity['binarySha256']} ({identity['binarySize']} bytes, staged mode {identity['stagedMode']})")
+print(f"candidate binary:  {identity['binarySha256']} ({identity['binarySize']} bytes, invocation mode {identity['invocationMode']})")
 print(f"candidate build:   v{version['version']} commit {commit} date {date} {version['goVersion']}")
 print(f"candidate identity: {identity_path}")
 PY
 }
 
+capture_qualification_runtime_identities() {
+  local model_path="$1"
+  local model_sha256="$2"
+  local llama_path="$3"
+  local llama_sha256="$4"
+  local gateway_path="$5"
+  local gateway_sha256="$6"
+  local runner_path="$7"
+  local identity_path="$8"
+  local runtime_dir="$9"
+  "$trusted_python" - "$model_path" "$model_sha256" "$llama_path" "$llama_sha256" "$gateway_path" "$gateway_sha256" "$runner_path" "$identity_path" "$runtime_dir" <<'PY'
+import hashlib
+import json
+import os
+import re
+import stat
+import sys
+
+(model_path, model_sha256, llama_path, llama_sha256, gateway_path,
+ gateway_sha256, runner_path, identity_path, runtime_dir) = sys.argv[1:]
+expected_model_name = "Devstral-Small-2-24B-Instruct-2512-Q4_K_M.gguf"
+expected_model_sha256 = "d14ba9edee1bb4c4996a726deb81e49ae81800a3216f0774634238c380aee496"
+expected_model_size = 14334446752
+max_service_size = 256 * 1024 * 1024
+max_runner_size = 2 * 1024 * 1024
+stable_fields = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns")
+
+for label, path in {
+    "model GGUF": model_path,
+    "llama-server": llama_path,
+    "gateway": gateway_path,
+    "qualification runner": runner_path,
+}.items():
+    if not os.path.isabs(path):
+        raise SystemExit(f"{label} path must be absolute")
+    if any(character in path for character in "\r\n\t"):
+        raise SystemExit(f"{label} path contains control whitespace")
+for label, digest in {
+    "model GGUF": model_sha256,
+    "llama-server": llama_sha256,
+    "gateway": gateway_sha256,
+}.items():
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise SystemExit(f"{label} SHA-256 must be exactly 64 lowercase hexadecimal characters")
+if model_sha256 != expected_model_sha256:
+    raise SystemExit("model GGUF SHA-256 is not the qualified historical Devstral artifact")
+if os.path.basename(model_path) != expected_model_name:
+    raise SystemExit(f"model GGUF filename must be {expected_model_name}")
+if os.path.basename(runner_path) != "e2e-airplane-harnesses":
+    raise SystemExit("qualification runner filename must be e2e-airplane-harnesses")
+
+flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+
+def inspect_and_copy(label, path, expected, maximum, executable, destination=None, expected_size=None):
+    try:
+        before = os.lstat(path)
+    except OSError as error:
+        raise SystemExit(f"cannot inspect {label}: {error}")
+    if not stat.S_ISREG(before.st_mode):
+        raise SystemExit(f"{label} must be a regular file, not a symlink or special file")
+    mode = stat.S_IMODE(before.st_mode)
+    if mode & 0o7000:
+        raise SystemExit(f"{label} has privilege bits")
+    if mode & 0o022:
+        raise SystemExit(f"{label} is group/world writable")
+    if executable and not mode & 0o100:
+        raise SystemExit(f"{label} is not owner-executable")
+    if before.st_size <= 0 or before.st_size > maximum:
+        raise SystemExit(f"{label} size is outside the accepted bound")
+    if expected_size is not None and before.st_size != expected_size:
+        raise SystemExit(f"{label} size {before.st_size} does not match {expected_size}")
+    try:
+        source_fd = os.open(path, flags)
+    except OSError as error:
+        raise SystemExit(f"cannot open {label} without following links: {error}")
+    output_fd = None
+    hasher = hashlib.sha256()
+    total = 0
+    try:
+        opened = os.fstat(source_fd)
+        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+            raise SystemExit(f"{label} changed while opening")
+        if destination is not None:
+            output_fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0), 0o500)
+        while True:
+            chunk = os.read(source_fd, 1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > maximum:
+                raise SystemExit(f"{label} grew beyond its accepted bound")
+            hasher.update(chunk)
+            if output_fd is not None:
+                view = memoryview(chunk)
+                while view:
+                    written = os.write(output_fd, view)
+                    if written <= 0:
+                        raise SystemExit(f"could not stage {label}")
+                    view = view[written:]
+        after = os.fstat(source_fd)
+        if output_fd is not None:
+            os.fchmod(output_fd, 0o500)
+            os.fsync(output_fd)
+    finally:
+        if output_fd is not None:
+            os.close(output_fd)
+        os.close(source_fd)
+    current = os.lstat(path)
+    if any(getattr(before, field) != getattr(after, field) for field in stable_fields) or any(getattr(after, field) != getattr(current, field) for field in stable_fields):
+        raise SystemExit(f"{label} changed while hashing")
+    digest = hasher.hexdigest()
+    if total != before.st_size or (expected is not None and digest != expected):
+        raise SystemExit(f"{label} SHA-256 mismatch")
+    if destination is not None:
+        staged = os.lstat(destination)
+        if not stat.S_ISREG(staged.st_mode) or staged.st_size != total or stat.S_IMODE(staged.st_mode) != 0o500:
+            raise SystemExit(f"staged {label} has invalid identity")
+    return {"name": os.path.basename(path), "sha256": digest, "size": total}
+
+os.makedirs(runtime_dir, mode=0o700, exist_ok=False)
+llama_destination = os.path.join(runtime_dir, "llama-server")
+gateway_destination = os.path.join(runtime_dir, "s46-gateway")
+identity = {
+    "schema": "s46.qualification-runtime-inputs.v1",
+    "model": inspect_and_copy("model GGUF", model_path, model_sha256, expected_model_size, False, expected_size=expected_model_size),
+    "llamaServer": inspect_and_copy("llama-server", llama_path, llama_sha256, max_service_size, True, llama_destination),
+    "gateway": inspect_and_copy("gateway", gateway_path, gateway_sha256, max_service_size, True, gateway_destination),
+    "runner": inspect_and_copy("qualification runner", runner_path, None, max_runner_size, True),
+}
+identity["llamaServer"]["name"] = "llama-server"
+identity["gateway"]["name"] = "s46-gateway"
+identity["runner"]["name"] = "e2e-airplane-harnesses"
+raw = (json.dumps(identity, indent=2, sort_keys=True) + "\n").encode()
+identity_fd = os.open(identity_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0), 0o600)
+try:
+    os.write(identity_fd, raw)
+    os.fsync(identity_fd)
+finally:
+    os.close(identity_fd)
+directory_fd = os.open(os.path.dirname(identity_path), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+try:
+    os.fsync(directory_fd)
+finally:
+    os.close(directory_fd)
+print(f"{llama_destination}\t{gateway_destination}")
+PY
+}
+
+write_qualification_cleanup_identity() {
+  local tracked="$1"
+  local destination="$2"
+  "$trusted_python" - "$tracked" "$destination" "$runner_identity" <<'PY'
+import datetime
+import hashlib
+import json
+import os
+import re
+import sys
+
+tracked_path, destination, runner_id = sys.argv[1:]
+if not re.fullmatch(r"[0-9]+-[0-9a-f]{32}", runner_id):
+    raise SystemExit("invalid qualification runner identity")
+with open(tracked_path, "rb") as source:
+    raw = source.read()
+if not raw or len(raw) > 1024 * 1024:
+    raise SystemExit("tracked process cohort is empty or oversized")
+lines = raw.decode("utf-8").splitlines()
+counts = {"runner": 0, "harness": 0, "service": 0}
+services = set()
+for line in lines:
+    fields = line.split("\t")
+    if len(fields) < 2 or fields[0] != runner_id or fields[1] not in counts:
+        raise SystemExit("tracked process cohort contains an invalid or foreign entry")
+    counts[fields[1]] += 1
+    if fields[1] == "service":
+        if len(fields) != 5 or fields[4] not in {"llama-server", "s46-gateway"}:
+            raise SystemExit("tracked service entry is invalid")
+        services.add(fields[4])
+if counts["runner"] != 1 or counts["harness"] != 3 or counts["service"] < 2:
+    raise SystemExit(f"tracked process cohort is incomplete: {counts}")
+if services != {"llama-server", "s46-gateway"}:
+    raise SystemExit("tracked process cohort does not include both runtime services")
+identity = {
+    "schema": "s46.qualification-cleanup.v1",
+    "runnerId": runner_id,
+    "processCohortSha256": hashlib.sha256(raw).hexdigest(),
+    "processCount": len(lines),
+    "harnessProcessCount": counts["harness"],
+    "serviceProcessCount": counts["service"],
+    "verifiedNoSurvivors": True,
+    "verifiedAt": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+}
+raw_identity = (json.dumps(identity, indent=2, sort_keys=True) + "\n").encode()
+fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0), 0o600)
+try:
+    os.write(fd, raw_identity)
+    os.fsync(fd)
+finally:
+    os.close(fd)
+PY
+}
+
 write_qualification_evidence() {
   local identity="$1"
-  local destination="$2"
-  python3 - "$identity" "$destination" <<'PY'
+  local runtime_identity="$2"
+  local cleanup_identity="$3"
+  local destination="$4"
+  "$trusted_python" - "$identity" "$runtime_identity" "$cleanup_identity" "$destination" <<'PY'
 import datetime
 import json
 import os
 import stat
 import sys
 
-identity_path, destination = sys.argv[1:]
+identity_path, runtime_identity_path, cleanup_identity_path, destination = sys.argv[1:]
 if not os.path.isabs(destination):
     raise SystemExit("qualification evidence path must be absolute")
 parent = os.path.dirname(destination)
@@ -448,6 +1133,14 @@ if not stat.S_ISDIR(parent_info.st_mode):
     raise SystemExit("qualification evidence parent must be a directory")
 with open(identity_path, encoding="utf-8") as source:
     identity = json.load(source)
+with open(runtime_identity_path, encoding="utf-8") as source:
+    runtime_identity = json.load(source)
+with open(cleanup_identity_path, encoding="utf-8") as source:
+    cleanup_identity = json.load(source)
+if runtime_identity.get("schema") != "s46.qualification-runtime-inputs.v1":
+    raise SystemExit("qualification runtime identity has the wrong schema")
+if cleanup_identity.get("schema") != "s46.qualification-cleanup.v1" or cleanup_identity.get("verifiedNoSurvivors") is not True:
+    raise SystemExit("qualification cleanup identity is incomplete")
 expected_name = os.path.basename(identity["source"]) + ".qualification.json"
 if os.path.basename(destination) != expected_name:
     raise SystemExit(f"qualification evidence filename must be {expected_name}")
@@ -477,6 +1170,21 @@ evidence = {
         "expectedCommit": qualification["expectedCommit"],
         "networkIsolation": "external",
         "airplaneHarnesses": ["pi", "claude-code", "codex"],
+        "runtime": {
+            "model": runtime_identity["model"],
+            "llamaServer": runtime_identity["llamaServer"],
+            "gateway": runtime_identity["gateway"],
+        },
+        "runner": {
+            "script": runtime_identity["runner"],
+            "id": cleanup_identity["runnerId"],
+            "processCohortSha256": cleanup_identity["processCohortSha256"],
+            "processCount": cleanup_identity["processCount"],
+            "harnessProcessCount": cleanup_identity["harnessProcessCount"],
+            "serviceProcessCount": cleanup_identity["serviceProcessCount"],
+            "verifiedNoSurvivors": cleanup_identity["verifiedNoSurvivors"],
+            "cleanupVerifiedAt": cleanup_identity["verifiedAt"],
+        },
     },
 }
 flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -543,42 +1251,327 @@ assert_file_matches() {
   fi
 }
 
+scan_airplane_services() {
+  "$trusted_python" - "$trusted_ps" <<'PY'
+import os
+import re
+import subprocess
+import sys
+
+ps_path = sys.argv[1]
+try:
+    process = subprocess.run(
+        [ps_path, "eww", "-axo", "pid=,pgid=,comm=,args="],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+except (OSError, subprocess.TimeoutExpired) as error:
+    raise SystemExit(f"cannot enumerate airplane services: {error}")
+if process.returncode != 0:
+    raise SystemExit(f"cannot enumerate airplane services: ps exited {process.returncode}: {process.stderr[:512]}")
+for line in process.stdout.splitlines():
+    fields = line.strip().split(None, 3)
+    if len(fields) < 3:
+        continue
+    pid, pgid, command = fields[:3]
+    arguments = fields[3] if len(fields) == 4 else ""
+    names = {os.path.basename(command)}
+    if arguments:
+        for argument in arguments.split():
+            if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", argument):
+                break
+            names.add(os.path.basename(argument))
+    kind = next((name for name in ("llama-server", "s46-gateway") if name in names), "")
+    if kind:
+        identity = re.search(r"(?:^| )S46_E2E_RUNNER_ID=([^ ]+)", arguments)
+        print(pid, pgid, kind, identity.group(1) if identity else "-")
+PY
+}
+
+terminate_runner_owned_processes() {
+  [ -n "$runner_identity" ] || return 0
+  "$trusted_python" - "$runner_identity" "$$" "$trusted_ps" <<'PY'
+import os
+import re
+import signal
+import subprocess
+import sys
+import time
+
+runner_id, runner_pid_text, ps_path = sys.argv[1:]
+runner_pid = int(runner_pid_text)
+marker = re.compile(r"(?:^| )S46_E2E_RUNNER_ID=" + re.escape(runner_id) + r"(?: |$)")
+
+def snapshot():
+    try:
+        process = subprocess.Popen(
+            [ps_path, "eww", "-axo", "pid=,pgid=,args="],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            stdout, stderr = process.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate()
+            raise SystemExit("cannot enumerate runner-owned processes: ps timed out")
+    except OSError as error:
+        raise SystemExit(f"cannot enumerate runner-owned processes: {error}")
+    if process.returncode != 0:
+        raise SystemExit(f"cannot enumerate runner-owned processes: ps exited {process.returncode}: {stderr[:512]}")
+    ignored = {runner_pid, os.getpid(), os.getppid(), process.pid}
+    found = []
+    for line in stdout.splitlines():
+        fields = line.strip().split(None, 2)
+        if len(fields) != 3:
+            continue
+        try:
+            pid = int(fields[0])
+            pgid = int(fields[1])
+        except ValueError:
+            continue
+        if pid in ignored or not marker.search(fields[2]):
+            continue
+        found.append((pid, pgid, fields[2]))
+    return found
+
+def send(entries, sig):
+    groups = set()
+    for pid, pgid, _ in entries:
+        try:
+            if pgid == pid and pgid > 1:
+                if pgid not in groups:
+                    os.killpg(pgid, sig)
+                    groups.add(pgid)
+            else:
+                os.kill(pid, sig)
+        except ProcessLookupError:
+            pass
+        except PermissionError as error:
+            raise SystemExit(f"cannot terminate runner-owned process {pid}: {error}")
+
+entries = snapshot()
+if entries:
+    send(entries, signal.SIGTERM)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        entries = snapshot()
+        if not entries:
+            break
+        time.sleep(0.1)
+if entries:
+    send(entries, signal.SIGKILL)
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        entries = snapshot()
+        if not entries:
+            break
+        time.sleep(0.1)
+if entries:
+    for pid, pgid, arguments in entries:
+        print(f"runner-owned process survived: pid={pid} pgid={pgid} args={arguments[:512]}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
+is_baseline_service() {
+  local wanted="$1" pid _
+  while read -r pid _; do
+    [ "$pid" = "$wanted" ] && return 0
+  done <"$sandbox/baseline-services.tsv"
+  return 1
+}
+
+is_tracked_service() {
+  local wanted="$1" pid
+  for pid in "${tracked_service_pids[@]+"${tracked_service_pids[@]}"}"; do
+    [ "$pid" = "$wanted" ] && return 0
+  done
+  return 1
+}
+
+capture_initial_service_state() {
+  if ! scan_airplane_services >"$sandbox/baseline-services.tsv"; then
+    fail "could not enumerate baseline llama-server and s46-gateway services"
+  fi
+  if [ "$qualification" = "1" ] && [ -s "$sandbox/baseline-services.tsv" ]; then
+    fail "release qualification requires no pre-existing llama-server or s46-gateway services"
+  fi
+}
+
+record_new_airplane_services() {
+  local pid pgid kind owner result=0 snapshot
+  if ! snapshot="$(scan_airplane_services)"; then
+    printf '[s46-e2e] error: could not enumerate detached airplane services\n' >&2
+    return 1
+  fi
+  while read -r pid pgid kind owner; do
+    [ -n "$pid" ] || continue
+    if is_baseline_service "$pid" || is_tracked_service "$pid"; then
+      continue
+    fi
+    if [ "$owner" != "$runner_identity" ]; then
+      if [ "$qualification" = "1" ]; then
+        printf '[s46-e2e] error: new detached %s service pid %s is not bound to runner %s\n' "$kind" "$pid" "$runner_identity" >&2
+        result=1
+      fi
+      continue
+    fi
+    case "$pid:$pgid" in
+      *[!0-9:]*|*:|:*)
+        printf '[s46-e2e] error: invalid detached service process identity: %s %s %s\n' "$pid" "$pgid" "$kind" >&2
+        result=1
+        continue
+        ;;
+    esac
+    if [ "$pgid" -le 1 ] || [ "$pgid" != "$pid" ]; then
+      printf '[s46-e2e] error: detached %s service pid %s is not a safe process-group leader (group %s)\n' "$kind" "$pid" "$pgid" >&2
+      result=1
+      continue
+    fi
+    tracked_service_pids+=("$pid")
+    tracked_service_groups+=("$pgid")
+    tracked_service_kinds+=("$kind")
+    printf '%s\tservice\t%s\t%s\t%s\n' "$runner_identity" "$pid" "$pgid" "$kind" >>"$sandbox/tracked-processes.tsv"
+    log "tracking runner $runner_identity detached $kind service pid $pid process-group $pgid"
+  done <<<"$snapshot"
+  return "$result"
+}
+
+require_qualification_services() {
+  [ "$qualification" = "1" ] || return 0
+  local wanted kind found
+  for wanted in llama-server s46-gateway; do
+    found=0
+    for kind in "${tracked_service_kinds[@]+"${tracked_service_kinds[@]}"}"; do
+      [ "$kind" = "$wanted" ] && found=1
+    done
+    [ "$found" = "1" ] || fail "release qualification did not start and track a runner-owned $wanted service"
+  done
+}
+
+assert_no_new_airplane_services() {
+  local pid pgid kind owner result=0 snapshot
+  if ! snapshot="$(scan_airplane_services)"; then
+    fail "could not enumerate surviving airplane services"
+  fi
+  while read -r pid pgid kind owner; do
+    [ -n "$pid" ] || continue
+    if ! is_baseline_service "$pid" && { [ "$owner" = "$runner_identity" ] || [ "$qualification" = "1" ]; }; then
+      printf '[s46-e2e] error: runner %s left detached or unbound %s service pid %s process-group %s\n' "$runner_identity" "$kind" "$pid" "$pgid" >&2
+      result=1
+    fi
+  done <<<"$snapshot"
+  [ "$result" -eq 0 ] || fail "runner $runner_identity left detached or unbound airplane services"
+}
+
+terminate_tracked_processes() {
+  local result=0 group index
+  for group in "${tracked_process_groups[@]+"${tracked_process_groups[@]}"}"; do
+    terminate_process_group "$group" || result=1
+  done
+  if [ -n "${tracked_service_groups[*]-}" ]; then
+    for ((index = ${#tracked_service_groups[@]} - 1; index >= 0; index--)); do
+      group="${tracked_service_groups[$index]}"
+      terminate_process_group "$group" || result=1
+    done
+  fi
+  return "$result"
+}
+
+cleanup_candidate_invocations() {
+  "$trusted_python" - "$sandbox/invocations" <<'PY'
+import os
+import shutil
+import stat
+import sys
+
+root = sys.argv[1]
+info = os.lstat(root)
+if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+    raise SystemExit("candidate invocation root is not a real directory")
+for entry in os.scandir(root):
+    if entry.is_dir(follow_symlinks=False):
+        shutil.rmtree(entry.path)
+    else:
+        os.unlink(entry.path)
+with os.scandir(root) as entries:
+    if next(entries, None) is not None:
+        raise SystemExit("candidate invocation copies survived cleanup")
+PY
+}
+
+cleanup_and_verify_runner_processes() {
+  record_new_airplane_services
+  terminate_tracked_processes || fail "runner $runner_identity could not terminate every tracked process group"
+  terminate_runner_owned_processes || fail "runner $runner_identity could not terminate every runner-owned process"
+  verify_candidate_path_runner || fail "candidate PATH runner changed before cleanup evidence"
+  cleanup_candidate_invocations || fail "runner $runner_identity could not remove every candidate invocation copy"
+  tracked_process_groups=()
+  tracked_service_pids=()
+  tracked_service_groups=()
+  tracked_service_kinds=()
+  assert_no_new_airplane_services
+  if [ "$qualification" = "1" ]; then
+    [ -n "$qualification_cleanup_identity" ] || fail "qualification cleanup identity path is unavailable"
+    write_qualification_cleanup_identity "$sandbox/tracked-processes.tsv" "$qualification_cleanup_identity"
+  fi
+  log "runner $runner_identity has no surviving tracked process groups, marker-bearing descendants, or newly detached airplane services"
+}
+
 run_capture_timeout() {
   local seconds="$1"
   local stdout="$2"
   local stderr="$3"
   shift 3
-  "$@" >"$stdout" 2>"$stderr" &
+  verify_candidate_path_runner || fail "candidate PATH runner changed before harness execution"
+  "$trusted_python" -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' "$@" >"$stdout" 2>"$stderr" &
   local pid="$!"
-  local start
+  local start status
+  tracked_process_groups+=("$pid")
+  printf '%s\tharness\t%s\t%s\n' "$runner_identity" "$pid" "$*" >>"$sandbox/tracked-processes.tsv"
   start="$(date +%s)"
   while kill -0 "$pid" 2>/dev/null; do
     local now
     now="$(date +%s)"
     if [ $((now - start)) -ge "$seconds" ]; then
-      kill "$pid" 2>/dev/null || true
-      sleep 1
-      kill -9 "$pid" 2>/dev/null || true
+      if terminate_process_group "$pid"; then
+        untrack_process_group "$pid"
+      fi
       wait "$pid" 2>/dev/null || true
       fail "command timed out after ${seconds}s: $*"
     fi
     sleep 1
   done
   if wait "$pid"; then
-    return 0
+    status=0
   else
-    local status="$?"
-    log "command stdout tail:"
-    tail -80 "$stdout" 2>/dev/null || true
-    log "command stderr tail:"
-    tail -80 "$stderr" 2>/dev/null || true
-    fail "command exited $status: $*"
+    status=$?
   fi
+  if ! terminate_process_group "$pid"; then
+    fail "harness process group $pid survived command completion: $*"
+  fi
+  untrack_process_group "$pid"
+  verify_candidate_path_runner || fail "candidate PATH runner changed during harness execution"
+  if [ "$status" -eq 0 ]; then
+    return 0
+  fi
+  log "command stdout tail:"
+  tail -80 "$stdout" 2>/dev/null || true
+  log "command stderr tail:"
+  tail -80 "$stderr" 2>/dev/null || true
+  fail "command exited $status: $*"
 }
 
 local_model="s46/devstral-small-2-24b"
 backend_model="${S46_LOCAL_MODEL:-devstral-small-2:24b-instruct-2512-q4_K_M}"
 harness_timeout="${S46_E2E_HARNESS_TIMEOUT:-420}"
+candidate_command_timeout="${S46_E2E_CANDIDATE_COMMAND_TIMEOUT:-180}"
+candidate_command_output_limit="${S46_E2E_CANDIDATE_COMMAND_OUTPUT_LIMIT:-1048576}"
 candidate_source="${S46_E2E_CANDIDATE:-}"
 candidate_sha256="${S46_E2E_CANDIDATE_SHA256:-}"
 network_isolation="${S46_E2E_NETWORK_ISOLATION:-proxy}"
@@ -587,9 +1580,26 @@ expected_version="${S46_E2E_EXPECTED_VERSION:-}"
 expected_commit="${S46_E2E_EXPECTED_COMMIT:-}"
 qualification_evidence="${S46_E2E_QUALIFICATION_EVIDENCE:-}"
 verify_candidate_only="${S46_E2E_VERIFY_CANDIDATE_ONLY:-0}"
+qualification_model_path="${S46_E2E_MODEL_GGUF:-}"
+qualification_model_sha256="${S46_E2E_MODEL_SHA256:-}"
+qualification_llama_path="${S46_E2E_LLAMA_SERVER:-}"
+qualification_llama_sha256="${S46_E2E_LLAMA_SERVER_SHA256:-}"
+qualification_gateway_path="${S46_E2E_GATEWAY_BINARY:-}"
+qualification_gateway_sha256="${S46_E2E_GATEWAY_SHA256:-}"
+resolve_trusted_support_tools
+runner_script="$("$trusted_python" - "$0" <<'PY'
+import os, sys
+print(os.path.abspath(sys.argv[1]))
+PY
+)"
 
 [ -n "$candidate_source" ] || fail "S46_E2E_CANDIDATE must name an absolute release-candidate binary or archive"
 [ -n "$candidate_sha256" ] || fail "S46_E2E_CANDIDATE_SHA256 must be supplied independently"
+case "$candidate_command_timeout:$candidate_command_output_limit" in
+  *[!0-9:]*|*:|:*) fail "candidate command timeout and output limit must be positive integers" ;;
+esac
+[ "$candidate_command_timeout" -gt 0 ] && [ "$candidate_command_timeout" -le 900 ] || fail "candidate command timeout must be between 1 and 900 seconds"
+[ "$candidate_command_output_limit" -gt 0 ] && [ "$candidate_command_output_limit" -le 16777216 ] || fail "candidate command output limit must be between 1 and 16777216 bytes per stream"
 case "$network_isolation" in
   proxy|external) ;;
   *) fail "S46_E2E_NETWORK_ISOLATION must be proxy or external" ;;
@@ -609,12 +1619,51 @@ if [ "$qualification" = "1" ]; then
   [ -n "$expected_version" ] || fail "S46_E2E_QUALIFICATION=1 requires S46_E2E_EXPECTED_VERSION"
   [ -n "$expected_commit" ] || fail "S46_E2E_QUALIFICATION=1 requires S46_E2E_EXPECTED_COMMIT"
   [ -n "$qualification_evidence" ] || fail "S46_E2E_QUALIFICATION=1 requires S46_E2E_QUALIFICATION_EVIDENCE"
+  [ "$verify_candidate_only" = "0" ] || fail "S46_E2E_QUALIFICATION=1 cannot be combined with S46_E2E_VERIFY_CANDIDATE_ONLY=1"
+  [ -n "$qualification_model_path" ] || fail "S46_E2E_QUALIFICATION=1 requires S46_E2E_MODEL_GGUF"
+  [ -n "$qualification_model_sha256" ] || fail "S46_E2E_QUALIFICATION=1 requires S46_E2E_MODEL_SHA256"
+  [ -n "$qualification_llama_path" ] || fail "S46_E2E_QUALIFICATION=1 requires S46_E2E_LLAMA_SERVER"
+  [ -n "$qualification_llama_sha256" ] || fail "S46_E2E_QUALIFICATION=1 requires S46_E2E_LLAMA_SERVER_SHA256"
+  [ -n "$qualification_gateway_path" ] || fail "S46_E2E_QUALIFICATION=1 requires S46_E2E_GATEWAY_BINARY"
+  [ -n "$qualification_gateway_sha256" ] || fail "S46_E2E_QUALIFICATION=1 requires S46_E2E_GATEWAY_SHA256"
 fi
 
-require_command python3
-mkdir -p "$sandbox/home" "$sandbox/bin" "$sandbox/project"
-stage_candidate "$candidate_source" "$candidate_sha256" "$sandbox/bin/s46" "$sandbox/candidate-package.json"
-candidate_binary="$sandbox/bin/s46"
+mkdir -p "$sandbox/home" "$sandbox/bin" "$sandbox/project" "$sandbox/candidate" "$sandbox/invocations"
+candidate_seed="$sandbox/candidate/s46"
+candidate_metadata="$sandbox/candidate-package.json"
+stage_candidate "$candidate_source" "$candidate_sha256" "$candidate_seed" "$candidate_metadata"
+read -r candidate_binary_sha256 candidate_binary_size < <("$trusted_python" - "$candidate_metadata" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as source:
+    identity = json.load(source)
+print(identity["binarySha256"], identity["binarySize"])
+PY
+)
+runner_identity="$("$trusted_python" - <<'PY'
+import os
+import secrets
+print(f"{os.getppid()}-{secrets.token_hex(16)}")
+PY
+)"
+printf '%s\trunner\t%s\n' "$runner_identity" "$$" >"$sandbox/tracked-processes.tsv"
+if [ "$qualification" = "1" ]; then
+  qualification_runtime_identity="$sandbox/qualification-runtime-inputs.json"
+  qualification_cleanup_identity="$sandbox/qualification-cleanup.json"
+  IFS=$'\t' read -r qualified_llama_server qualified_gateway_binary < <(
+    capture_qualification_runtime_identities \
+      "$qualification_model_path" \
+      "$qualification_model_sha256" \
+      "$qualification_llama_path" \
+      "$qualification_llama_sha256" \
+      "$qualification_gateway_path" \
+      "$qualification_gateway_sha256" \
+      "$runner_script" \
+      "$qualification_runtime_identity" \
+      "$sandbox/qualified-runtime"
+  )
+  [ -n "$qualified_llama_server" ] && [ -n "$qualified_gateway_binary" ] || fail "could not stage qualification runtime inputs"
+fi
 
 export HOME="$sandbox/home"
 export XDG_CONFIG_HOME="$HOME/.config"
@@ -622,10 +1671,19 @@ export XDG_DATA_HOME="$HOME/.local/share"
 export XDG_CACHE_HOME="$HOME/.cache"
 export S46_KEYRING_BACKEND=file
 export S46_SKIP_STARTUP_UPDATE_CHECK=1
-export S46_AIRPLANE_MODEL_DIR="${S46_AIRPLANE_MODEL_DIR:-$host_home/.local/share/s46/models/devstral}"
+if [ "$qualification" = "1" ]; then
+  export S46_LOCAL_MODEL_PATH="$qualification_model_path"
+  export S46_AIRPLANE_MODEL_PATH="$qualification_model_path"
+  export S46_AIRPLANE_MODEL_DIR="$(dirname "$qualification_model_path")"
+  export S46_API_BINARY="$qualified_gateway_binary"
+  export PATH="$sandbox/bin:$(dirname "$qualified_llama_server"):$PATH"
+else
+  export S46_AIRPLANE_MODEL_DIR="${S46_AIRPLANE_MODEL_DIR:-$host_home/.local/share/s46/models/devstral}"
+  export PATH="$sandbox/bin:$PATH"
+fi
 export S46_LOG_DIR="${S46_LOG_DIR:-$host_home/.cache/s46}"
-export PATH="$sandbox/bin:$PATH"
 export PI_OFFLINE=1
+export S46_E2E_RUNNER_ID="$runner_identity"
 export S46_AIRPLANE_TOKEN="${S46_AIRPLANE_TOKEN:-local-airplane-e2e-token}"
 
 unset S46_API_MODE
@@ -638,16 +1696,19 @@ unset OPENAI_API_KEY AZURE_OPENAI_API_KEY DEEPSEEK_API_KEY GEMINI_API_KEY GROQ_A
 unset MISTRAL_API_KEY TOGETHER_API_KEY FIREWORKS_API_KEY OPENROUTER_API_KEY
 unset XAI_API_KEY CEREBRAS_API_KEY KIMI_API_KEY MINIMAX_API_KEY ZAI_API_KEY
 
+install_candidate_path_runner
 install_smoke_proxy_poisoning
 if [ "$network_isolation" = "external" ]; then
   log "network isolation: operator-confirmed pre-established external OS-level egress denial (proxy poisoning also installed as defense in depth)"
 else
   log "network isolation: proxy poisoning smoke check only; this is not OS-level egress isolation or release qualification"
 fi
-verify_candidate_identity "$candidate_binary" "$sandbox/candidate-package.json" "$expected_version" "$expected_commit" "$qualification"
+capture_initial_service_state
+verify_candidate_identity "$candidate_metadata" "$expected_version" "$expected_commit" "$qualification"
+record_new_airplane_services
 
 if [ "$verify_candidate_only" = "1" ]; then
-  [ "$qualification" = "0" ] || fail "qualification evidence requires the complete airplane harness run"
+  cleanup_and_verify_runner_processes
   log "candidate verification completed without starting the airplane runtime"
   exit 0
 fi
@@ -722,6 +1783,8 @@ enable_airplane_harness_configs() {
   log "configuring Claude Code and Codex for local team"
   s46 connect local --harness=claude-code
   s46 connect local --harness=codex
+  record_new_airplane_services
+  require_qualification_services
 }
 
 assert_airplane_harness_configs() {
@@ -746,7 +1809,7 @@ assert_airplane_mode_off_restores_configs() {
   assert_file_matches "$pi_settings" "$original_pi_settings"
   assert_file_matches "$claude_settings" "$original_claude_settings"
   assert_file_matches "$codex_config" "$original_codex_config"
-  python3 - "$XDG_CONFIG_HOME/s46/config.json" <<'PY'
+  "$trusted_python" - "$XDG_CONFIG_HOME/s46/config.json" <<'PY'
 import json, sys
 config = json.load(open(sys.argv[1]))
 if config.get("mode") not in ("", "cloud"):
@@ -829,7 +1892,7 @@ Do not modify any other file.'
 session_id_for_harness() {
   local harness="$1"
   s46 sessions --json >"$sandbox/sessions.json"
-  python3 - "$sandbox/sessions.json" "$harness" <<'PY'
+  "$trusted_python" - "$sandbox/sessions.json" "$harness" <<'PY'
 import json, sys
 path, harness = sys.argv[1], sys.argv[2]
 sessions = json.load(open(path))["sessions"]
@@ -848,7 +1911,7 @@ assert_local_share() {
   session_id="$(session_id_for_harness "$harness")"
   log "building local share artifact for $harness session $session_id"
   s46 share --local --json "$session_id" >"$sandbox/share-$harness.json"
-  python3 - "$sandbox/share-$harness.json" "$harness" "$local_model" "$backend_model" <<'PY'
+  "$trusted_python" - "$sandbox/share-$harness.json" "$harness" "$local_model" "$backend_model" <<'PY'
 import json, sys
 path, harness, local_model, backend_model = sys.argv[1:5]
 artifact = json.load(open(path))
@@ -872,8 +1935,13 @@ assert_local_share claude-code
 run_codex
 assert_local_share codex
 assert_airplane_mode_off_restores_configs
+cleanup_and_verify_runner_processes
 if [ "$qualification" = "1" ]; then
-  write_qualification_evidence "$sandbox/candidate-identity.json" "$qualification_evidence"
+  write_qualification_evidence \
+    "$sandbox/candidate-identity.json" \
+    "$qualification_runtime_identity" \
+    "$qualification_cleanup_identity" \
+    "$qualification_evidence"
 fi
 
 log "all harnesses wrote files, produced local sessions, built local share artifacts, and restored cloud mode and harness configuration"

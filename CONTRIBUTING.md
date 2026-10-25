@@ -60,11 +60,17 @@ S46_E2E_NETWORK_ISOLATION=external \
 S46_E2E_QUALIFICATION=1 \
 S46_E2E_EXPECTED_VERSION=0.3.0 \
 S46_E2E_EXPECTED_COMMIT=<full-prepared-commit> \
+S46_E2E_MODEL_GGUF=/absolute/path/to/Devstral-Small-2-24B-Instruct-2512-Q4_K_M.gguf \
+S46_E2E_MODEL_SHA256=d14ba9edee1bb4c4996a726deb81e49ae81800a3216f0774634238c380aee496 \
+S46_E2E_LLAMA_SERVER=/absolute/path/to/llama-server \
+S46_E2E_LLAMA_SERVER_SHA256=<independently-obtained-lowercase-sha256> \
+S46_E2E_GATEWAY_BINARY=/absolute/path/to/s46-gateway \
+S46_E2E_GATEWAY_SHA256=<independently-obtained-lowercase-sha256> \
 S46_E2E_QUALIFICATION_EVIDENCE=/absolute/bundle/s46_0.3.0_darwin_arm64.tar.gz.qualification.json \
 make e2e-airplane-harnesses
 ```
 
-`external` is an operator assertion, not an isolation mechanism; the harness does not execute an operator-provided setup command or claim to verify the block. It retains proxy poisoning as defense in depth. Qualification rejects a direct executable and verification-only runs. Only after all three real harness runs and final configuration restore does it create the named evidence file, with `O_EXCL`, containing the archive SHA-256/size and exact release build identity. Set `S46_E2E_KEEP_SANDBOX=1` to inspect failures. The external qualification environment remains responsible for destroying or stopping local service processes.
+`external` is an operator assertion, not an isolation mechanism; the harness does not execute an operator-provided setup command or claim to verify the block. It retains proxy poisoning as defense in depth. Qualification rejects a direct executable and verification-only runs. Every candidate command, including commands resolved by a child harness through `PATH`, executes a fresh copy checked against the staged binary digest. The model, llama-server, and gateway must be absolute regular-file paths with independently supplied digests; qualification accepts only the exact historical Devstral GGUF, copies the two executable inputs into the private sandbox, and forces the run to use those paths. Qualification requires no pre-existing llama-server or gateway, binds newly detached services and all three harness process groups to the digest-identified runner, terminates them, and verifies their absence before creating the named evidence file with `O_EXCL`. The evidence binds the archive/build, GGUF, llama-server, gateway, runner script, tracked process cohort, and no-survivor cleanup identities. Set `S46_E2E_KEEP_SANDBOX=1` to inspect failures; the external qualification environment should still destroy the isolated runner after completion.
 
 ## Run without installing
 
