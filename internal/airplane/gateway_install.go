@@ -538,6 +538,7 @@ func validateGatewayAuthorityResponse(response *http.Response, expectedURL strin
 	}
 	expected := map[string]string{
 		"Cache-Control":          "public, max-age=31536000, immutable, no-transform",
+		"Content-Disposition":    "attachment; filename=" + pin.ArchiveName,
 		"Content-Length":         fmt.Sprintf("%d", pin.ArchiveSize),
 		"Content-Type":           "application/gzip",
 		"ETag":                   `"sha256:` + pin.ArchiveSHA256 + `"`,

@@ -211,6 +211,7 @@ func TestLoadGatewayArchiveRequiresExactFinalAuthorityResponse(t *testing.T) {
 			Status:     "200 OK",
 			Header: http.Header{
 				"Cache-Control":          {"public, max-age=31536000, immutable, no-transform"},
+				"Content-Disposition":    {"attachment; filename=" + pin.ArchiveName},
 				"Content-Length":         {fmt.Sprintf("%d", length)},
 				"Content-Type":           {"application/gzip"},
 				"Etag":                   {`"sha256:` + pin.ArchiveSHA256 + `"`},
@@ -244,6 +245,7 @@ func TestLoadGatewayArchiveRequiresExactFinalAuthorityResponse(t *testing.T) {
 			response.StatusCode, response.Status = http.StatusPartialContent, "206 Partial Content"
 		},
 		"wrong cache policy": func(response *http.Response) { response.Header.Set("Cache-Control", "no-store") },
+		"wrong disposition":  func(response *http.Response) { response.Header.Set("Content-Disposition", "attachment") },
 		"duplicate etag": func(response *http.Response) {
 			response.Header["Etag"] = append(response.Header["Etag"], response.Header.Get("Etag"))
 		},
