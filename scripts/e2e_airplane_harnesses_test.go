@@ -380,8 +380,8 @@ esac
 	if execution.EnvironmentApprover != "goncalossilva" || !slices.Equal(execution.EnvironmentReviewers, []string{"goncalossilva"}) || !execution.EnvironmentPreventSelfReview || execution.EnvironmentAdminsBypass {
 		t.Fatalf("cloud evidence did not bind exact environment protection: %#v", execution)
 	}
-	if execution.ReleaseAPIVersion != "2022-11-28" || execution.CandidateReleaseID != "987654" || !execution.CandidateDraftAssetETagCAS || execution.CandidateDraftStaleIfMatchStatus != 412 {
-		t.Fatalf("cloud evidence did not bind candidate draft CAS proof: %#v", execution)
+	if execution.ReleaseAuthorityOrigin != releaseAuthorityOrigin || execution.ReleaseAuthorityID != "sha256-"+strings.Repeat("7", 64) || execution.CandidateSequence != 2 || execution.CandidateETag != `"sha256:`+strings.Repeat("8", 64)+`"` || execution.CandidateRecordSHA256 != strings.Repeat("9", 64) || execution.CandidateStaleIfMatchStatus != 412 {
+		t.Fatalf("cloud evidence did not bind the exact authority candidate: %#v", execution)
 	}
 	info, err := os.Stat(candidate)
 	if err != nil {
@@ -974,10 +974,15 @@ func runCandidateVerificationWithEnv(t *testing.T, candidate, hash string, extra
 		"S46_E2E_ENVIRONMENT_REVIEWERS=goncalossilva",
 		"S46_E2E_ENVIRONMENT_PREVENT_SELF_REVIEW=true",
 		"S46_E2E_ENVIRONMENT_ADMINS_BYPASS=false",
-		"S46_E2E_RELEASE_API_VERSION=2022-11-28",
-		"S46_E2E_CANDIDATE_RELEASE_ID=987654",
-		"S46_E2E_CANDIDATE_DRAFT_ASSET_ETAG_CAS=true",
-		"S46_E2E_CANDIDATE_DRAFT_STALE_IF_MATCH_STATUS=412",
+		"S46_E2E_SOURCE_TREE="+strings.Repeat("d", 40),
+		"S46_E2E_BUILD_RECEIPT_SHA256="+strings.Repeat("5", 64),
+		"S46_E2E_BUILD_SIGNATURE_SHA256="+strings.Repeat("6", 64),
+		"S46_E2E_RELEASE_AUTHORITY_ORIGIN=https://models.s46.dev/release-authority/v1",
+		"S46_E2E_RELEASE_AUTHORITY_ID=sha256-"+strings.Repeat("7", 64),
+		"S46_E2E_CANDIDATE_SEQUENCE=2",
+		"S46_E2E_CANDIDATE_ETAG=\"sha256:"+strings.Repeat("8", 64)+"\"",
+		"S46_E2E_CANDIDATE_RECORD_SHA256="+strings.Repeat("9", 64),
+		"S46_E2E_CANDIDATE_STALE_IF_MATCH_STATUS=412",
 		"S46_E2E_ENVIRONMENT_APPROVAL_SHA256="+strings.Repeat("2", 64),
 		"S46_E2E_RUNNER_IDENTITY_SHA256="+strings.Repeat("3", 64),
 		"S46_E2E_ISOLATION_PROFILE_SHA256="+strings.Repeat("4", 64),

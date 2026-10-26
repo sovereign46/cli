@@ -537,6 +537,41 @@ func TestValidateQualificationBundleBindsEveryPublishedArchive(t *testing.T) {
 	}
 }
 
+func TestReleaseAuthorityLifecycleHasExactDeterministicCohorts(t *testing.T) {
+	const expectedID = "sha256-7415133f54ffc6cb05815c61b954dd09b1692ecc730319bc6a38b58bfc111899"
+	identifier, err := releaseAuthorityID("sovereign46/cli", "v0.3.0")
+	if err != nil || identifier != expectedID {
+		t.Fatalf("release authority ID = %q, %v; want %s", identifier, err, expectedID)
+	}
+	commit := strings.Repeat("a", 40)
+	sourceTree := strings.Repeat("d", 40)
+	bundle := writeReleaseBundle(t, "1.2.3", commit)
+	initial, sequenceTwo, identity, err := releaseAuthorityCandidate("1.2.3", commit, sourceTree, bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sequenceThree, qualifiedIdentity, err := releaseAuthorityQualifiedCandidate("1.2.3", commit, sourceTree, bundle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if initial.Sequence != 1 || len(initial.Assets) != 7 || initial.Source.TagObject != "" || initial.Source.BundleSHA256 != identity.BundleSHA256 {
+		t.Fatalf("invalid sequence-1 build cohort: %#v", initial)
+	}
+	if sequenceTwo.Sequence != 2 || len(sequenceTwo.Assets) != 7 || sequenceTwo.PreviousETag == "" || identity.ETag == "" || identity.RecordSHA256 == "" {
+		t.Fatalf("invalid sequence-2 qualification head: %#v %#v", sequenceTwo, identity)
+	}
+	annotations := map[string]string{}
+	for _, annotation := range sequenceTwo.Annotations {
+		annotations[annotation.Name] = annotation.Value
+	}
+	if annotations["cas-probe"] != "sequence-2" || annotations["source-tree"] != sourceTree || annotations["build-receipt-sha256"] != identity.BundleSHA256 || annotations["build-signature-sha256"] != identity.BuildSignatureSHA256 {
+		t.Fatalf("sequence-2 annotations do not bind source/build and CAS: %#v", annotations)
+	}
+	if sequenceThree.Sequence != 3 || len(sequenceThree.Assets) != 15 || sequenceThree.PreviousETag != identity.ETag || qualifiedIdentity != identity {
+		t.Fatalf("invalid atomic sequence-3 qualified cohort: %#v", sequenceThree)
+	}
+}
+
 func TestCandidateBuildBundleContainsOnlyExactSignedBuildBytes(t *testing.T) {
 	commit := strings.Repeat("a", 40)
 	bundle := writeReleaseBundle(t, "1.2.3", commit)
@@ -649,44 +684,44 @@ func TestReleaseQualificationRejectsWeakenedEnvironmentProtection(t *testing.T) 
 	}
 }
 
-func TestReleaseQualificationRejectsInvalidCandidateReleaseID(t *testing.T) {
+func TestReleaseQualificationRejectsInvalidAuthorityID(t *testing.T) {
 	commit := strings.Repeat("a", 40)
 	bundle := writeReleaseBundle(t, "1.2.3", commit)
 	archive := expectedReleaseArchives("1.2.3")[0]
 	path := filepath.Join(bundle, archive+qualificationSuffix)
 	record := readQualificationRecordForTest(t, path)
-	record.Qualification.Execution.CandidateReleaseID = "not-numeric"
+	record.Qualification.Execution.ReleaseAuthorityID = "not-an-authority-id"
 	writeQualificationRecordForTest(t, path, record)
 	archivePath := filepath.Join(bundle, archive)
 	info, err := os.Stat(archivePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := validateQualificationRecord(path, archive, fileSHA256(t, archivePath), info.Size(), "1.2.3", commit); err == nil || !strings.Contains(err.Error(), "candidate release id") {
-		t.Fatalf("invalid candidate release id was accepted: %v", err)
+	if err := validateQualificationRecord(path, archive, fileSHA256(t, archivePath), info.Size(), "1.2.3", commit); err == nil || !strings.Contains(err.Error(), "release-authority candidate identity") {
+		t.Fatalf("invalid release authority id was accepted: %v", err)
 	}
 }
 
-func TestReleaseQualificationBundleRequiresOneCandidateReleaseLedger(t *testing.T) {
+func TestReleaseQualificationBundleRequiresOneAuthorityCandidate(t *testing.T) {
 	commit := strings.Repeat("a", 40)
 	bundle := writeReleaseBundle(t, "1.2.3", commit)
 	archive := expectedReleaseArchives("1.2.3")[1]
 	path := filepath.Join(bundle, archive+qualificationSuffix)
 	record := readQualificationRecordForTest(t, path)
-	record.Qualification.Execution.CandidateReleaseID = "123456"
+	record.Qualification.Execution.ReleaseAuthorityID = "sha256-" + strings.Repeat("f", 64)
 	writeQualificationRecordForTest(t, path, record)
 	writeTestReleaseEvidenceSignature(t, path, testQualificationPrivateKey)
-	if _, err := validateQualificationBundle(bundle, "1.2.3", commit, strings.Repeat("d", 40)); err == nil || !strings.Contains(err.Error(), "one candidate release ledger") {
-		t.Fatalf("mixed candidate release ledgers were accepted: %v", err)
+	if _, err := validateQualificationBundle(bundle, "1.2.3", commit, strings.Repeat("d", 40)); err == nil || !strings.Contains(err.Error(), "sequence-2 release-authority") {
+		t.Fatalf("mixed authority candidates were accepted: %v", err)
 	}
 }
 
-func TestReleaseQualificationRejectsMissingCandidateDraftCASProof(t *testing.T) {
+func TestReleaseQualificationRejectsWrongAuthorityCandidateProof(t *testing.T) {
 	commit := strings.Repeat("a", 40)
 	for name, mutate := range map[string]func(*qualificationExecution){
-		"wrong API": func(execution *qualificationExecution) { execution.ReleaseAPIVersion = "unsupported" },
-		"no CAS":    func(execution *qualificationExecution) { execution.CandidateDraftAssetETagCAS = false },
-		"not 412":   func(execution *qualificationExecution) { execution.CandidateDraftStaleIfMatchStatus = 200 },
+		"wrong origin":   func(execution *qualificationExecution) { execution.ReleaseAuthorityOrigin = "https://github.com" },
+		"wrong sequence": func(execution *qualificationExecution) { execution.CandidateSequence = 3 },
+		"not 412":        func(execution *qualificationExecution) { execution.CandidateStaleIfMatchStatus = 200 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			bundle := writeReleaseBundle(t, "1.2.3", commit)
@@ -700,8 +735,8 @@ func TestReleaseQualificationRejectsMissingCandidateDraftCASProof(t *testing.T) 
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := validateQualificationRecord(path, archive, fileSHA256(t, archivePath), info.Size(), "1.2.3", commit); err == nil || !strings.Contains(err.Error(), "asset-sensitive ETag CAS proof") {
-				t.Fatalf("missing candidate draft CAS proof was accepted: %v", err)
+			if err := validateQualificationRecord(path, archive, fileSHA256(t, archivePath), info.Size(), "1.2.3", commit); err == nil || !strings.Contains(err.Error(), "sequence-2 release-authority") {
+				t.Fatalf("wrong authority candidate proof was accepted: %v", err)
 			}
 		})
 	}
@@ -874,7 +909,7 @@ func TestValidateQualificationBundleRejectsMissingExtraAndForgedEvidence(t *test
 
 	t.Run("wrong source tree", func(t *testing.T) {
 		bundle := writeReleaseBundle(t, "1.2.3", commit)
-		if _, err := validateQualificationBundle(bundle, "1.2.3", commit, strings.Repeat("e", 40)); err == nil || !strings.Contains(err.Error(), "source tree") {
+		if _, err := validateQualificationBundle(bundle, "1.2.3", commit, strings.Repeat("e", 40)); err == nil || (!strings.Contains(err.Error(), "source tree") && !strings.Contains(err.Error(), "source/build receipt identities")) {
 			t.Fatalf("forged source tree should fail, got %v", err)
 		}
 	})
@@ -1002,7 +1037,7 @@ func TestQualifiedReleaseTagRetryReusesCapturedObject(t *testing.T) {
 }
 
 func TestMainBranchProtectionPreflightFailsClosed(t *testing.T) {
-	protected := `{"enforce_admins":{"enabled":true},"required_linear_history":{"enabled":true},"allow_force_pushes":{"enabled":false},"allow_deletions":{"enabled":false}}`
+	protected := `{"enforce_admins":{"enabled":true},"required_linear_history":{"enabled":true},"allow_force_pushes":{"enabled":false},"allow_deletions":{"enabled":false},"required_status_checks":{"strict":true,"checks":[{"context":"test","app_id":15368}]},"required_pull_request_reviews":{"dismiss_stale_reviews":true,"required_approving_review_count":1,"require_last_push_approval":true},"required_conversation_resolution":{"enabled":true}}`
 	for _, test := range []struct {
 		name    string
 		output  string
@@ -1012,6 +1047,10 @@ func TestMainBranchProtectionPreflightFailsClosed(t *testing.T) {
 		{name: "protected", output: protected, wantErr: false},
 		{name: "unprotected", output: `{}`, wantErr: true},
 		{name: "force-pushes", output: strings.Replace(protected, `"allow_force_pushes":{"enabled":false}`, `"allow_force_pushes":{"enabled":true}`, 1), wantErr: true},
+		{name: "untrusted-check", output: strings.Replace(protected, `"app_id":15368`, `"app_id":null`, 1), wantErr: true},
+		{name: "stale-review", output: strings.Replace(protected, `"dismiss_stale_reviews":true`, `"dismiss_stale_reviews":false`, 1), wantErr: true},
+		{name: "no-last-push-approval", output: strings.Replace(protected, `"require_last_push_approval":true`, `"require_last_push_approval":false`, 1), wantErr: true},
+		{name: "unresolved-conversations", output: strings.Replace(protected, `"required_conversation_resolution":{"enabled":true}`, `"required_conversation_resolution":{"enabled":false}`, 1), wantErr: true},
 		{name: "missing", exit: 1, wantErr: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -1022,6 +1061,44 @@ func TestMainBranchProtectionPreflightFailsClosed(t *testing.T) {
 			}
 			t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 			err := requireMainBranchProtection(context.Background(), "sovereign46/cli")
+			if (err != nil) != test.wantErr {
+				t.Fatalf("error = %v, wantErr %v", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestImmutableReleaseTagRulesetPreflightFailsClosed(t *testing.T) {
+	list := `[{"id":123,"name":"Immutable semantic release tags","target":"tag","source_type":"Repository","source":"sovereign46/cli","enforcement":"active"}]`
+	detail := `{"id":123,"name":"Immutable semantic release tags","target":"tag","source_type":"Repository","source":"sovereign46/cli","enforcement":"active","bypass_actors":[],"current_user_can_bypass":"never","conditions":{"ref_name":{"include":["refs/tags/v*.*.*"],"exclude":[]}},"rules":[{"type":"update"},{"type":"deletion"}]}`
+	for _, test := range []struct {
+		name       string
+		list       string
+		detail     string
+		exitDetail int
+		wantErr    bool
+	}{
+		{name: "protected", list: list, detail: detail},
+		{name: "missing", list: `[]`, detail: detail, wantErr: true},
+		{name: "bypass", list: list, detail: strings.Replace(detail, `"bypass_actors":[]`, `"bypass_actors":[{}]`, 1), wantErr: true},
+		{name: "deletion-allowed", list: list, detail: strings.Replace(detail, `,{"type":"deletion"}`, ``, 1), wantErr: true},
+		{name: "inactive", list: list, detail: strings.Replace(detail, `"enforcement":"active"`, `"enforcement":"disabled"`, 1), wantErr: true},
+		{name: "detail-missing", list: list, exitDetail: 1, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fakeBin := t.TempDir()
+			script := fmt.Sprintf(`#!/bin/sh
+case "$2" in
+  repos/sovereign46/cli/rulesets) printf '%%s' %q ;;
+  repos/sovereign46/cli/rulesets/123) printf '%%s' %q; exit %d ;;
+  *) exit 2 ;;
+esac
+`, test.list, test.detail, test.exitDetail)
+			if err := os.WriteFile(filepath.Join(fakeBin, "gh"), []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			err := requireImmutableReleaseTagRuleset(context.Background(), "sovereign46/cli")
 			if (err != nil) != test.wantErr {
 				t.Fatalf("error = %v, wantErr %v", err, test.wantErr)
 			}
@@ -1056,6 +1133,78 @@ func TestImmutableReleasePreflightFailsClosed(t *testing.T) {
 	}
 }
 
+func TestSynchronizeCandidateBuildAssetsRecoversOnlyAnEmptyStarter(t *testing.T) {
+	directory := t.TempDir()
+	uploadedPath := filepath.Join(directory, "uploaded.tar.gz")
+	starterPath := filepath.Join(directory, "starter.txt")
+	if err := os.WriteFile(uploadedPath, []byte("uploaded"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(starterPath, []byte("replacement"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	digest, size, err := hashRegularFile(uploadedPath, 256*1024*1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit := strings.Repeat("a", 40)
+	tag := "candidate-v1.2.3-" + commit
+	view := fmt.Sprintf(`{"isDraft":true,"tagName":%q,"targetCommitish":%q}`, tag, commit)
+	ledger := fmt.Sprintf(`{"id":9,"draft":true,"tag_name":%q,"target_commitish":%q,"assets":[{"id":10,"name":"uploaded.tar.gz","state":"uploaded","size":%d,"digest":"sha256:%s"},{"id":11,"name":"starter.txt","state":"starter","size":0,"digest":null}]}`, tag, commit, size, digest)
+	fakeBin := t.TempDir()
+	logPath := filepath.Join(fakeBin, "calls")
+	script := fmt.Sprintf(`#!/bin/sh
+set -eu
+printf '%%s\n' "$*" >> "$S46_TEST_GH_LOG"
+if [ "$1" = release ] && [ "$2" = view ]; then printf '%%s' %q; exit 0; fi
+if [ "$1" = api ] && [ "$2" = "repos/sovereign46/cli/releases/tags/%s" ]; then printf '%%s' %q; exit 0; fi
+if [ "$1" = api ] && [ "$2" = --method ] && [ "$3" = DELETE ] && [ "$4" = repos/sovereign46/cli/releases/assets/11 ]; then exit 0; fi
+if [ "$1" = release ] && [ "$2" = upload ] && [ "$3" = %q ] && [ "$4" = %q ]; then exit 0; fi
+exit 2
+`, view, tag, ledger, tag, starterPath)
+	if err := os.WriteFile(filepath.Join(fakeBin, "gh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("S46_TEST_GH_LOG", logPath)
+	if err := synchronizeCandidateBuildAssets(context.Background(), tag, commit, []string{uploadedPath, starterPath}); err != nil {
+		t.Fatal(err)
+	}
+	calls, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(calls)
+	if !strings.Contains(text, "api --method DELETE repos/sovereign46/cli/releases/assets/11") || !strings.Contains(text, "release upload "+tag+" "+starterPath) || strings.Contains(text, "release upload "+tag+" "+uploadedPath) {
+		t.Fatalf("unexpected recovery calls:\n%s", text)
+	}
+}
+
+func TestSynchronizeCandidateBuildAssetsRejectsNonemptyStarter(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "starter.txt")
+	if err := os.WriteFile(path, []byte("replacement"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	commit := strings.Repeat("a", 40)
+	tag := "candidate-v1.2.3-" + commit
+	view := fmt.Sprintf(`{"isDraft":true,"tagName":%q,"targetCommitish":%q}`, tag, commit)
+	ledger := fmt.Sprintf(`{"id":9,"draft":true,"tag_name":%q,"target_commitish":%q,"assets":[{"id":11,"name":"starter.txt","state":"starter","size":1,"digest":null}]}`, tag, commit)
+	fakeBin := t.TempDir()
+	script := fmt.Sprintf(`#!/bin/sh
+if [ "$1" = release ] && [ "$2" = view ]; then printf '%%s' %q; exit 0; fi
+if [ "$1" = api ] && [ "$2" = "repos/sovereign46/cli/releases/tags/%s" ]; then printf '%%s' %q; exit 0; fi
+exit 2
+`, view, tag, ledger)
+	if err := os.WriteFile(filepath.Join(fakeBin, "gh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := synchronizeCandidateBuildAssets(context.Background(), tag, commit, []string{path}); err == nil || !strings.Contains(err.Error(), "not safely recoverable") {
+		t.Fatalf("nonempty starter error = %v", err)
+	}
+}
+
 func TestCandidateReleaseAdoptionRequiresExactDraftAndCommit(t *testing.T) {
 	valid := candidateRelease{IsDraft: true, TagName: "candidate-v1.2.3-abc", TargetCommitish: strings.Repeat("a", 40)}
 	if err := validateCandidateRelease(valid, valid.TagName, valid.TargetCommitish); err != nil {
@@ -1072,62 +1221,47 @@ func TestCandidateReleaseAdoptionRequiresExactDraftAndCommit(t *testing.T) {
 	}
 }
 
-func TestNativeQualificationWorkflowUsesExactCreateOnlyCandidateEvidence(t *testing.T) {
+func TestNativeQualificationWorkflowUsesExactAuthorityEvidence(t *testing.T) {
 	workflow, err := os.ReadFile(filepath.Join("..", ".github", "workflows", "qualify-candidate.yml"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	text := string(workflow)
 	for _, required := range []string{
-		"runner: macos-15-intel",
-		"runner: ubuntu-24.04",
-		"runner: ubuntu-24.04-arm",
+		"runner: macos-15-intel", "runner: ubuntu-24.04", "runner: ubuntu-24.04-arm",
 		"runs-on: [self-hosted, macOS, ARM64, s46-airplane-qualification]",
-		"scripts/qualify-cloud-native",
-		"S46_E2E_QUALIFICATION_SCOPE=airplane",
-		"go run ./scripts check-candidate",
-		"go run ./scripts check-qualification",
-		"persist-credentials: false",
-		"environment: cloud-qualification",
-		"environment: airplane-qualification",
-		"S46_E2E_ENVIRONMENT_APPROVAL_SHA256",
-		"S46_E2E_RUNNER_IDENTITY_SHA256",
-		"macos_major\" = 26",
-		`group: release-homebrew-writer`,
-		"max-parallel: 1",
-		"needs: [candidate-draft-cas, native-cloud]",
-		"environment: qualification-signature-upload",
-		"inputs.target == 'qualification-signatures'",
-		"go run ./scripts check-bundle",
-		`reviewers != ["goncalossilva"]`,
-		`S46_E2E_ENVIRONMENT_PREVENT_SELF_REVIEW`,
-		`S46_E2E_ENVIRONMENT_ADMINS_BYPASS`,
-		`candidate-draft-cas:`,
-		`s46.release-candidate-tag.v1`,
-		`git/ref/tags/$candidate_tag`,
-		`--data '{"draft":true}'`,
-		`S46_E2E_CANDIDATE_RELEASE_ID`,
-		`S46_E2E_CANDIDATE_DRAFT_ASSET_ETAG_CAS`,
-		`S46_E2E_CANDIDATE_DRAFT_STALE_IF_MATCH_STATUS`,
-		`actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02`,
-		`qualification-evidence-publisher:`,
-		`qualification-signature-publisher:`,
-		`contents: read`,
-		`actions: write`,
-		`contents: write`,
-		`candidateDraftAssetEtagCas`,
+		"scripts/qualify-cloud-native", "go run ./scripts check-candidate", "go run ./scripts check-qualification",
+		"environment: cloud-qualification", "environment: airplane-qualification",
+		"environment: qualification-signature-upload", "environment: cli-release-authority-stage",
+		"authority-candidate:", "authority-qualified:",
+		"authority_stage_run_id:", "authority_stage_artifact_id:",
+		"stage-release-authority.yml", "actions/artifacts/$STAGE_ARTIFACT_ID/zip", "stale_status=$(jq -er '.staleIfMatchStatus'",
+		"scripts/release_authority.py download --kind candidate", "qualified-recovery-records",
+		"S46_E2E_RELEASE_AUTHORITY_ORIGIN", "S46_E2E_RELEASE_AUTHORITY_ID", "S46_E2E_CANDIDATE_SEQUENCE",
+		"S46_E2E_CANDIDATE_ETAG", "S46_E2E_CANDIDATE_RECORD_SHA256", "S46_E2E_CANDIDATE_STALE_IF_MATCH_STATUS",
+		"S46_E2E_BUILD_RECEIPT_SHA256", "S46_E2E_BUILD_SIGNATURE_SHA256", "S46_E2E_SOURCE_TREE",
+		"--record \"$expected_three\" --if-match", "qualification-evidence-publisher:", "qualification-signature-publisher:",
+		"qualification-${{ matrix.target }}-${{ github.run_attempt }}", "qualification-darwin-arm64-airplane-${{ github.run_attempt }}",
+		"needs.qualification-signature-validation.outputs.artifact_id", "validated-qualification-signatures-$PRODUCER_ATTEMPT",
+		`execution.get("runAttempt") != attempt`, "evidence-attempts.tsv", "retention-days: 90",
+		"len(rules) != 2", "len(branch_rules) != 1", `deployment_policy != {"protected_branches": True, "custom_branch_policies": False}`,
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("native qualification workflow missing %q", required)
 		}
 	}
-	if strings.Contains(text, "--clobber") {
-		t.Fatal("native qualification workflow permits evidence replacement")
+	for _, forbidden := range []string{
+		"candidate-draft-cas:", "candidateDraftAssetEtagCas", "S46_E2E_CANDIDATE_DRAFT_ASSET_ETAG_CAS",
+		"S46_E2E_CANDIDATE_RELEASE_ID", "--data '{\"draft\":true}'", "--clobber", "stale_if_match_status=412",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("native qualification workflow retains unsupported GitHub authority policy %q", forbidden)
+		}
 	}
-	for _, job := range []string{"candidate-draft-cas", "qualification-evidence-publisher", "qualification-signature-publisher"} {
+	for _, job := range []string{"native-cloud", "darwin-arm64-airplane"} {
 		start := strings.Index(text, "  "+job+":")
 		if start < 0 {
-			t.Fatalf("missing publisher job %s", job)
+			t.Fatalf("missing qualification job %s", job)
 		}
 		rest := text[start+3:]
 		end := strings.Index(rest, "\n  ")
@@ -1135,96 +1269,76 @@ func TestNativeQualificationWorkflowUsesExactCreateOnlyCandidateEvidence(t *test
 		if end >= 0 {
 			section = rest[:end]
 		}
-		for _, forbidden := range []string{"actions/checkout", "setup-go", "go run ./scripts", "e2e-airplane-harnesses", "qualify-cloud-native"} {
-			if strings.Contains(section, forbidden) {
-				t.Fatalf("write-capable publisher %s executes build context through %q", job, forbidden)
-			}
+		if strings.Contains(section, "contents: write") || strings.Contains(section, "gh release upload") {
+			t.Fatalf("candidate execution job %s retains repository-write capability", job)
 		}
 	}
-	nativeStart := strings.Index(text, "  native-cloud:")
-	nativeEnd := strings.Index(text[nativeStart+1:], "\n  qualification-signature-validation:")
-	if nativeStart < 0 || nativeEnd < 0 {
-		t.Fatal("could not inspect native qualification job permissions")
-	}
-	nativeSection := text[nativeStart : nativeStart+1+nativeEnd]
-	if strings.Contains(nativeSection, "contents: write") || strings.Contains(nativeSection, "gh release upload") {
-		t.Fatal("native candidate execution retains repository-write capability")
-	}
-	airStart := strings.Index(text, "  darwin-arm64-airplane:")
-	airEnd := strings.Index(text[airStart+1:], "\n  qualification-evidence-publisher:")
-	if airStart < 0 || airEnd < 0 {
-		t.Fatal("could not inspect airplane qualification job permissions")
-	}
-	airSection := text[airStart : airStart+1+airEnd]
-	if strings.Contains(airSection, "contents: write") || strings.Contains(airSection, "gh release upload") {
-		t.Fatal("airplane candidate execution retains repository-write capability")
-	}
 	if count := strings.Count(text, "environment: qualification-signature-upload"); count != 1 {
-		t.Fatalf("qualification-signature-upload protects %d jobs, want only the signature publisher", count)
+		t.Fatalf("qualification-signature-upload protects %d jobs, want only signature publication", count)
 	}
 	if strings.Contains(text, `test "$macos_major" = 14`) || strings.Contains(text, `test "$macos_major" = 15`) {
 		t.Fatal("airplane qualification permits a macOS version other than 26")
 	}
-	wrapper, err := os.ReadFile("qualify-cloud-native")
+}
+
+func TestAirplaneQualificationPolicyFixtureIncludesProtectedBranchRule(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "airplane-environment-policy.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{"unshare --net", "--no-new-privs", "sandbox-exec", "S46_E2E_ISOLATION_PROFILE_SHA256", "/usr/bin/env -i", "S46_E2E_QUALIFICATION_SCOPE=cloud"} {
-		if !strings.Contains(string(wrapper), required) {
-			t.Fatalf("native cloud isolation wrapper missing %q", required)
+	var policy struct {
+		CanAdminsBypass bool `json:"can_admins_bypass"`
+		ProtectionRules []struct {
+			Type              string `json:"type"`
+			PreventSelfReview bool   `json:"prevent_self_review"`
+			Reviewers         []struct {
+				Reviewer struct {
+					Login string `json:"login"`
+				} `json:"reviewer"`
+			} `json:"reviewers"`
+		} `json:"protection_rules"`
+		DeploymentBranchPolicy struct {
+			ProtectedBranches    bool `json:"protected_branches"`
+			CustomBranchPolicies bool `json:"custom_branch_policies"`
+		} `json:"deployment_branch_policy"`
+	}
+	if err := json.Unmarshal(raw, &policy); err != nil {
+		t.Fatal(err)
+	}
+	if policy.CanAdminsBypass || len(policy.ProtectionRules) != 2 || !policy.DeploymentBranchPolicy.ProtectedBranches || policy.DeploymentBranchPolicy.CustomBranchPolicies {
+		t.Fatalf("airplane policy fixture does not match the protected-branch deployment contract: %#v", policy)
+	}
+	rules := map[string]bool{}
+	for _, rule := range policy.ProtectionRules {
+		rules[rule.Type] = true
+		if rule.Type == "required_reviewers" && (!rule.PreventSelfReview || len(rule.Reviewers) != 1 || rule.Reviewers[0].Reviewer.Login != "goncalossilva") {
+			t.Fatalf("airplane reviewer rule is invalid: %#v", rule)
 		}
 	}
-	if strings.Contains(string(wrapper), "pfctl") {
-		t.Fatal("native cloud qualification mutates global PF state")
+	if !rules["required_reviewers"] || !rules["branch_policy"] {
+		t.Fatalf("airplane policy fixture rules = %#v", rules)
 	}
 }
 
-func TestCASWorkflowsRecoverInterruptedReservedProbes(t *testing.T) {
-	raw, err := os.ReadFile(filepath.Join("testdata", "interrupted-cas-probe-assets.json"))
+func TestAuthorityWorkflowsHaveDeterministicRecoveryProfiles(t *testing.T) {
+	stageRaw, err := os.ReadFile(filepath.Join("..", ".github", "workflows", "stage-release-authority.yml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var fixture struct {
-		Assets []struct {
-			ID   int    `json:"id"`
-			Name string `json:"name"`
-			Size int    `json:"size"`
-		} `json:"assets"`
-	}
-	if err := json.Unmarshal(raw, &fixture); err != nil {
-		t.Fatal(err)
-	}
-	const prefix = "s46-release-cas-probe-"
-	probes := 0
-	for _, asset := range fixture.Assets {
-		if strings.HasPrefix(asset.Name, prefix) {
-			probes++
-			if asset.ID <= 0 || asset.Size != 65 || len(asset.Name) != len(prefix)+24+len(".txt") || !strings.HasSuffix(asset.Name, ".txt") {
-				t.Fatalf("interrupted probe fixture is not canonical: %+v", asset)
-			}
-		}
-	}
-	if probes != 1 {
-		t.Fatalf("interrupted probe fixture contains %d reserved probes, want 1", probes)
-	}
-
-	qualificationRaw, err := os.ReadFile(filepath.Join("..", ".github", "workflows", "qualify-candidate.yml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	qualification := string(qualificationRaw)
+	stage := string(stageRaw)
 	for _, required := range []string{
-		"reserved_prefix=s46-release-cas-probe-",
-		"validate_candidate_assets",
-		"interrupted CAS probe content is not a canonical nonce",
-		`name != prefix + content[:24].decode("ascii") + ".txt"`,
-		`test "$recovered_etag" != "$before_etag"`,
-		`test ! -s "$work/recovered-probes.tsv"`,
-		`test ! -s "$work/final-probes.tsv"`,
+		"cli_release_authority.py stage-records", "candidate-sequence-1.json", "candidate-sequence-2.json",
+		"candidate-stale-replace.request", `test "$stale_status" = 412`, "outside the exact deterministic recovery profile",
+		"environment: cli-release-authority-stage", "AUTHORITY_STAGE_SSH_KEY", "actions: read", "contents: read", "retention-days: 90",
+		"id: handoff", "steps.handoff.outputs.artifact-id", "steps.handoff.outputs.artifact-digest",
+		"s46.cli-release-authority-stage.v1", "staleIfMatchStatus:$staleStatus",
 	} {
-		if !strings.Contains(qualification, required) {
-			t.Errorf("candidate CAS recovery is missing %q", required)
+		if !strings.Contains(stage, required) {
+			t.Errorf("authority stage workflow is missing %q", required)
 		}
+	}
+	if strings.Contains(stage, "contents: write") || strings.Contains(stage, "AUTHORITY_PUBLISH_SSH_KEY") {
+		t.Fatal("authority stage job has repository-write or publish-only authority")
 	}
 
 	releaseRaw, err := os.ReadFile(filepath.Join("..", ".github", "workflows", "release.yml"))
@@ -1233,20 +1347,31 @@ func TestCASWorkflowsRecoverInterruptedReservedProbes(t *testing.T) {
 	}
 	release := string(releaseRaw)
 	for _, required := range []string{
-		"recover_reserved_probes",
-		"validate_final_assets",
-		"interrupted final CAS probe content is not a canonical nonce",
-		`test "$after_etag" != "$before_etag"`,
-		`test ! -s "$cas_work/recovery-final-probes.tsv"`,
-		`test ! -s "$cas_work/final-probes.tsv"`,
+		"candidate-sequence-4.json", "release-sequence-5.json", "outside the exact tag-binding recovery profile",
+		"environment: cli-release-authority-stage", "environment: cli-release-authority-publish",
+		"AUTHORITY_STAGE_SSH_KEY", "AUTHORITY_PUBLISH_SSH_KEY", "scripts/release_authority.py finalize",
+		"artifact-ids: ${{ needs.validate.outputs.artifact_id }}", "steps.publication.outputs.artifact-digest",
+		"environments/cli-release-authority-stage", "environments/cli-release-authority-publish",
+		"branches/main/protection", ".can_admins_bypass == false", ".prevent_self_review == true",
 	} {
 		if !strings.Contains(release, required) {
-			t.Errorf("final release CAS recovery is missing %q", required)
+			t.Errorf("release-authority workflow is missing %q", required)
 		}
 	}
-	call := strings.Index(release, "            recover_reserved_probes")
-	if call < 0 || strings.Index(release[call:], "          verify_assets") < 0 {
-		t.Fatal("final release does not recover reserved probes before exact asset verification")
+	for _, job := range []string{"bind-tag", "finalize-authority"} {
+		start := strings.Index(release, "  "+job+":")
+		if start < 0 {
+			t.Fatalf("missing authority job %s", job)
+		}
+		rest := release[start+3:]
+		end := strings.Index(rest, "\n  ")
+		section := rest
+		if end >= 0 {
+			section = rest[:end]
+		}
+		if strings.Contains(section, "contents: write") {
+			t.Fatalf("authority job %s coexists with repository write authority", job)
+		}
 	}
 }
 
@@ -1266,89 +1391,44 @@ func TestGoReleaserCannotPublishOrReplaceAssets(t *testing.T) {
 	}
 }
 
-func TestReleaseWorkflowUsesQualifiedBytesWithoutRebuilding(t *testing.T) {
+func TestReleaseWorkflowUsesImmutableAuthorityBeforeMirrors(t *testing.T) {
 	raw, err := os.ReadFile(filepath.Join("..", ".github", "workflows", "release.yml"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	workflow := string(raw)
 	for _, required := range []string{
-		"check-tag",
-		"candidate-$GITHUB_REF_NAME-$commit",
-		"refs/tags/$GITHUB_REF_NAME:refs/tags/$GITHUB_REF_NAME",
-		"git cat-file -t",
-		"gh release download",
-		"gh release create",
-		"cmp --silent",
-		`check-tag "$GITHUB_REF_NAME" "$commit" "$bundle"`,
-		"validated-release-publication",
-		"homebrew-formula",
-		"secrets.GORELEASER_TOKEN",
+		"go run ./scripts check-tag", "go run ./scripts homebrew-formula",
+		"scripts/cli_release_authority.py tagged-record", "scripts/cli_release_authority.py expected-release",
+		"scripts/release_authority.py append", "scripts/release_authority.py finalize",
+		"sequence == 3", "source.tagObject == \"\"", "candidate-sequence-4.json", "release-sequence-5.json",
+		"github-mirror:", "needs: [validate, finalize-authority]", "homebrew:", "needs: [validate, github-mirror]",
+		"https://models.s46.dev/release-authority/v1/releases/",
+		"test \"$(find \"$remote\" -maxdepth 1 -type f | wc -l | tr -d '[:space:]')\" = 15",
+		"group: release-homebrew-writer", "secrets.GORELEASER_TOKEN",
 		"repos/sovereign46/homebrew-tap/contents/Formula/s46.rb",
-		`--raw-field sha="$current_sha"`,
-		`repos/$GITHUB_REPOSITORY/branches/main`,
-		`--jq .protected`,
-		`repos/$GITHUB_REPOSITORY/branches/main/protection`,
-		`repos/$GITHUB_REPOSITORY/immutable-releases`,
-		`git rev-parse refs/remotes/origin/main`,
-		`= "$GITHUB_SHA"`,
-		`--jq .immutable`,
-		`group: release-homebrew-writer`,
-		`policy_api() { GH_TOKEN="$GH_TOKEN" gh api --method GET "$@"; }`,
-		`environment: release-publication`,
-		`actions/runs/$GITHUB_RUN_ID/approvals`,
-		`candidate-ledger.json`,
-		`candidate-ledger-current.json`,
-		`actions/runs?head_sha=$GITHUB_SHA&status=$state`,
-		`["fredoliveira", "goncalossilva"]`,
-		`.can_admins_bypass == false`,
-		`.prevent_self_review == true`,
-		`--header "If-Match: $final_etag"`,
-		`--data '{"draft":false}'`,
-		`test "$stale_status" = 412`,
-		`--data '{"draft":true}'`,
-		`actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02`,
-		`for attempt in 1 2 3 4`,
-		`equal Homebrew version does not match the exact qualified formula bytes`,
-		`Preserving verified newer Homebrew formula version`,
+		"actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02", "retention-days: 90",
+		`[[ "$ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]]`, `--arg digest "sha256:$ARTIFACT_DIGEST"`,
+		"needs.validate.outputs.artifact_name", "needs.validate.outputs.producer_attempt",
+		"published GitHub mirror identity or exact asset cohort is wrong", "github-mirror-final",
 	} {
 		if !strings.Contains(workflow, required) {
 			t.Errorf("release workflow is missing %q", required)
 		}
 	}
-	for _, required := range []string{
-		`test "$upload_etag" != "$before_etag"`,
-		`test "$delete_etag" != "$upload_etag"`,
-		`s46-release-cas-probe-`,
-		`X-GitHub-Api-Version: $api_version`,
-		`gh release download "$candidate_tag" --dir "$remote_candidate"`,
-		`cmp --silent "$source" "$remote_candidate/$(basename "$source")"`,
+	for _, forbidden := range []string{
+		"s46-release-cas-probe-", `--header "If-Match: $final_etag"`, `--data '{"draft":true}'`,
+		"releases/latest", "goreleaser release", "go build", "--clobber",
 	} {
-		if !strings.Contains(workflow, required) {
-			t.Errorf("release workflow is missing publication invariant %q", required)
-		}
-	}
-	publishStart := strings.Index(workflow, "  publish:")
-	if publishStart < 0 {
-		t.Fatal("release workflow is missing fresh publisher job")
-	}
-	publisher := workflow[publishStart:]
-	for _, forbidden := range []string{"actions/checkout", "setup-go", "go run ./scripts", "check-tag", "homebrew-formula"} {
-		if strings.Contains(publisher, forbidden) {
-			t.Errorf("write-capable release publisher executes build context through %q", forbidden)
-		}
-	}
-	validation := workflow[:publishStart]
-	if strings.Contains(validation, "contents: write") {
-		t.Error("release validation runs build context with repository-write capability")
-	}
-	if strings.Contains(validation, "GORELEASER_TOKEN") {
-		t.Error("release validation exposes a cross-repository write token to build-context code")
-	}
-	for _, forbidden := range []string{"goreleaser-action", "goreleaser release", "go build", "--clobber", `gh release edit`} {
 		if strings.Contains(workflow, forbidden) {
-			t.Errorf("release workflow must not rebuild qualified bytes; found %q", forbidden)
+			t.Errorf("release workflow retains unsupported publication behavior %q", forbidden)
 		}
+	}
+	mirror := strings.Index(workflow, "  github-mirror:")
+	finalize := strings.Index(workflow, "  finalize-authority:")
+	homebrew := strings.Index(workflow, "  homebrew:")
+	if finalize < 0 || mirror < finalize || homebrew < mirror {
+		t.Fatal("authority finalization must precede the GitHub and Homebrew mirrors")
 	}
 }
 
@@ -1445,7 +1525,7 @@ func writeReleaseBundle(t *testing.T, version string, commit string) string {
 			QualifiedAt: "2026-05-20T11:00:00Z",
 			Artifact:    qualifiedArtifact{Name: name, SHA256: digest, Size: int64(len(content)), Kind: "archive"},
 			Binary:      qualifiedBinary{SHA256: strings.Repeat("a", 64), Size: 1234, SourceMode: "0755"},
-			Build:       qualifiedBuild{Version: version, Commit: commit, Date: "2026-05-20T10:00:00Z", GoVersion: "go1.26.9", Release: true},
+			Build:       qualifiedBuild{Version: version, Commit: commit, Date: "2026-05-20T10:00:00Z", GoVersion: "go1.26.9", Release: true, SourceTree: strings.Repeat("d", 40)},
 			Qualification: qualificationDetail{
 				ExpectedVersion:     version,
 				ExpectedCommit:      commit,
@@ -1460,7 +1540,7 @@ func writeReleaseBundle(t *testing.T, version string, commit string) string {
 					WorkflowRef: "sovereign46/cli/.github/workflows/qualify-candidate.yml@refs/heads/main", WorkflowSHA: commit,
 					RunID: "12345", RunAttempt: "1", Environment: environment, EnvironmentApprover: "goncalossilva",
 					EnvironmentReviewers: []string{"goncalossilva"}, EnvironmentPreventSelfReview: true, EnvironmentAdminsBypass: false,
-					ReleaseAPIVersion: "2022-11-28", CandidateReleaseID: "987654", CandidateDraftAssetETagCAS: true, CandidateDraftStaleIfMatchStatus: 412,
+					ReleaseAuthorityOrigin: releaseAuthorityOrigin, CandidateSequence: 2, CandidateStaleIfMatchStatus: 412,
 					EnvironmentApprovalSHA256: strings.Repeat("2", 64), RunnerIdentitySHA256: strings.Repeat("3", 64), IsolationProfileSHA256: strings.Repeat("4", 64),
 				},
 				Runner: qualificationRunner{
@@ -1516,6 +1596,48 @@ func writeReleaseBundle(t *testing.T, version string, commit string) string {
 		t.Fatal(err)
 	}
 	writeTestReleaseEvidenceSignature(t, receiptPath, testBuildPrivateKey)
+
+	buildDirectory := t.TempDir()
+	buildNames := append(expectedReleaseArchives(version), releaseChecksumsFile, releaseBuildFile, releaseBuildFile+releaseEvidenceSignatureSuffix)
+	for _, name := range buildNames {
+		content, err := os.ReadFile(filepath.Join(directory, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(buildDirectory, name), content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, _, authority, err := releaseAuthorityCandidate(version, commit, strings.Repeat("d", 40), buildDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range expectedReleaseArchives(version) {
+		evidencePath := filepath.Join(directory, name+qualificationSuffix)
+		content, err := os.ReadFile(evidencePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var record qualificationRecord
+		if err := json.Unmarshal(content, &record); err != nil {
+			t.Fatal(err)
+		}
+		record.Build.BuildReceiptSHA256 = authority.BundleSHA256
+		record.Build.BuildSignatureSHA256 = authority.BuildSignatureSHA256
+		record.Qualification.Execution.ReleaseAuthorityOrigin = releaseAuthorityOrigin
+		record.Qualification.Execution.ReleaseAuthorityID = authority.ID
+		record.Qualification.Execution.CandidateSequence = 2
+		record.Qualification.Execution.CandidateETag = authority.ETag
+		record.Qualification.Execution.CandidateRecordSHA256 = authority.RecordSHA256
+		raw, err := json.MarshalIndent(record, "", "  ")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(evidencePath, append(raw, '\n'), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		writeTestReleaseEvidenceSignature(t, evidencePath, testQualificationPrivateKey)
+	}
 	return directory
 }
 

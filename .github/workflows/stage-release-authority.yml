@@ -1,0 +1,221 @@
+name: stage release-authority candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Exact semantic release tag (for example v0.3.0)
+        required: true
+        type: string
+      prepared_commit:
+        description: Exact full main commit containing the prepared release
+        required: true
+        type: string
+
+concurrency:
+  group: cli-release-authority-stage-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  stage:
+    name: create exact sequence-1 and sequence-2 candidate
+    runs-on: ubuntu-24.04
+    environment: cli-release-authority-stage
+    permissions:
+      actions: read
+      contents: read
+      deployments: read
+    outputs:
+      artifact_id: ${{ steps.handoff.outputs.artifact-id }}
+      artifact_digest: ${{ steps.handoff.outputs.artifact-digest }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ inputs.prepared_commit }}
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version-file: go.mod
+      - name: Validate protected stage inputs
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          PREPARED_COMMIT: ${{ inputs.prepared_commit }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = sovereign46/cli
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_SHA" = "$PREPARED_COMMIT"
+          test "$GITHUB_WORKFLOW_REF" = sovereign46/cli/.github/workflows/stage-release-authority.yml@refs/heads/main
+          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          [[ "$PREPARED_COMMIT" =~ ^[0-9a-f]{40}$|^[0-9a-f]{64}$ ]]
+          test "$(git rev-parse HEAD)" = "$PREPARED_COMMIT"
+          test "$(gh api repos/$GITHUB_REPOSITORY/git/ref/heads/main --jq .object.sha)" = "$PREPARED_COMMIT"
+          git fetch --quiet --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          test "$(git rev-parse refs/remotes/origin/main)" = "$PREPARED_COMMIT"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+      - name: Validate build bytes and construct exact recoverable revisions without authority credentials
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          PREPARED_COMMIT: ${{ inputs.prepared_commit }}
+        run: |
+          set -euo pipefail
+          version=${RELEASE_TAG#v}
+          candidate_tag="candidate-$RELEASE_TAG-$PREPARED_COMMIT"
+          bundle="$RUNNER_TEMP/build-cohort"
+          records="$RUNNER_TEMP/authority-records"
+          mkdir -m 0700 "$bundle"
+          for asset in \
+            "s46_${version}_darwin_amd64.tar.gz" \
+            "s46_${version}_darwin_arm64.tar.gz" \
+            "s46_${version}_linux_amd64.tar.gz" \
+            "s46_${version}_linux_arm64.tar.gz" \
+            checksums.txt release-build.json release-build.json.sig; do
+            gh release download "$candidate_tag" --dir "$bundle" --pattern "$asset"
+          done
+          go run ./scripts check-candidate "$RELEASE_TAG" "$PREPARED_COMMIT" "$bundle"
+          scripts/cli_release_authority.py stage-records \
+            --tag "$RELEASE_TAG" --commit "$PREPARED_COMMIT" --source-tree "$(git rev-parse HEAD^{tree})" \
+            --bundle "$bundle" --output "$records"
+          release_id=$(<"$records/release-id")
+          if scripts/release_authority.py capture --kind release --id "$release_id" \
+              --record-output "$RUNNER_TEMP/current.json" --etag-output "$RUNNER_TEMP/current.etag"; then
+            echo "release ID is already immutable" >&2
+            exit 1
+          fi
+          if scripts/release_authority.py capture --kind candidate --id "$release_id" \
+              --record-output "$RUNNER_TEMP/current.json" --etag-output "$RUNNER_TEMP/current.etag"; then
+            if cmp -s "$RUNNER_TEMP/current.json" "$records/candidate-sequence-2.json" && cmp -s "$RUNNER_TEMP/current.etag" "$records/candidate-sequence-2.etag"; then
+              phase=sequence-2
+            elif cmp -s "$RUNNER_TEMP/current.json" "$records/candidate-sequence-1.json" && cmp -s "$RUNNER_TEMP/current.etag" "$records/candidate-sequence-1.etag"; then
+              phase=sequence-1
+            else
+              echo "authority candidate is outside the exact deterministic recovery profile" >&2
+              exit 1
+            fi
+          else
+            phase=absent
+          fi
+          printf '%s\n' "$phase" > "$records/phase"
+      - name: Verify protected stage policy before authority mutation
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.AUTHORITY_POLICY_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$GH_TOKEN"
+          gh api "repos/$GITHUB_REPOSITORY/environments/cli-release-authority-stage" > "$RUNNER_TEMP/stage-environment.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals" > "$RUNNER_TEMP/stage-approvals.json"
+          jq -e '.can_admins_bypass == false and (.protection_rules | length) == 1 and .protection_rules[0].type == "required_reviewers" and .protection_rules[0].prevent_self_review == true and ([.protection_rules[0].reviewers[] | select(.type == "User") | .reviewer.login] | sort) == ["fredoliveira", "goncalossilva"]' "$RUNNER_TEMP/stage-environment.json" >/dev/null
+          jq -e 'any(.[]; (.state | ascii_downcase) == "approved" and (.user.login == "fredoliveira" or .user.login == "goncalossilva") and any(.environments[]?; .name == "cli-release-authority-stage"))' "$RUNNER_TEMP/stage-approvals.json" >/dev/null
+          test "$(gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq .protected)" = true
+          test "$(gh api "repos/$GITHUB_REPOSITORY/branches/main/protection" --jq '.enforce_admins.enabled and .required_linear_history.enabled and (.allow_force_pushes.enabled | not) and (.allow_deletions.enabled | not) and .required_status_checks.strict and any(.required_status_checks.checks[]?; .context == "test" and .app_id == 15368) and .required_pull_request_reviews.dismiss_stale_reviews and (.required_pull_request_reviews.required_approving_review_count >= 1) and .required_pull_request_reviews.require_last_push_approval and .required_conversation_resolution.enabled')" = true
+          test "$(gh api "repos/$GITHUB_REPOSITORY/immutable-releases" --jq .enabled)" = true
+          gh api "repos/$GITHUB_REPOSITORY/rulesets?per_page=100" > "$RUNNER_TEMP/tag-rulesets.json"
+          ruleset_id=$(jq -er --arg repository "$GITHUB_REPOSITORY" '[.[] | select(.name == "Immutable semantic release tags" and .target == "tag" and .source_type == "Repository" and .source == $repository and .enforcement == "active")] | if length == 1 then .[0].id else error("missing or ambiguous immutable tag ruleset") end' "$RUNNER_TEMP/tag-rulesets.json")
+          gh api "repos/$GITHUB_REPOSITORY/rulesets/$ruleset_id" > "$RUNNER_TEMP/tag-ruleset.json"
+          jq -e --argjson id "$ruleset_id" --arg repository "$GITHUB_REPOSITORY" '
+            .id == $id and .name == "Immutable semantic release tags" and .target == "tag" and
+            .source_type == "Repository" and .source == $repository and .enforcement == "active" and
+            .bypass_actors == [] and .current_user_can_bypass == "never" and
+            .conditions.ref_name == {exclude:[],include:["refs/tags/v*.*.*"]} and
+            ([.rules[].type] | sort) == ["deletion","update"]
+          ' "$RUNNER_TEMP/tag-ruleset.json" >/dev/null
+      - name: Upload exact build cohort and prove sequence-2 stale-write rejection
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          PREPARED_COMMIT: ${{ inputs.prepared_commit }}
+          AUTHORITY_SSH_TARGET: ${{ vars.AUTHORITY_STAGE_SSH_TARGET }}
+          AUTHORITY_STAGE_SSH_KEY: ${{ secrets.AUTHORITY_STAGE_SSH_KEY }}
+          AUTHORITY_STAGE_KNOWN_HOSTS: ${{ secrets.AUTHORITY_STAGE_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          cleanup_authority_credentials() {
+            cleanup_status=0
+            rm -f "$HOME/.ssh/id_ed25519" "$HOME/.ssh/known_hosts" || cleanup_status=$?
+            unset AUTHORITY_SSH_TARGET AUTHORITY_STAGE_SSH_KEY AUTHORITY_STAGE_KNOWN_HOSTS
+            return "$cleanup_status"
+          }
+          trap cleanup_authority_credentials EXIT
+          test -n "$AUTHORITY_SSH_TARGET"
+          test -n "$AUTHORITY_STAGE_SSH_KEY"
+          test -n "$AUTHORITY_STAGE_KNOWN_HOSTS"
+          install -d -m 0700 "$HOME/.ssh"
+          printf '%s\n' "$AUTHORITY_STAGE_SSH_KEY" > "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$AUTHORITY_STAGE_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 0600 "$HOME/.ssh/id_ed25519" "$HOME/.ssh/known_hosts"
+          bundle="$RUNNER_TEMP/build-cohort"
+          records="$RUNNER_TEMP/authority-records"
+          release_id=$(<"$records/release-id")
+          phase=$(<"$records/phase")
+          authority=(--ssh-host "$AUTHORITY_SSH_TARGET" --ssh-key "$HOME/.ssh/id_ed25519" --known-hosts "$HOME/.ssh/known_hosts")
+
+          for asset in "$bundle"/*; do
+            scripts/release_authority.py put-blob "${authority[@]}" --file "$asset"
+          done
+          if test "$phase" = absent; then
+            scripts/release_authority.py create "${authority[@]}" \
+              --record "$records/candidate-sequence-1.json" --response-output "$RUNNER_TEMP/created.json"
+            phase=sequence-1
+          fi
+          if test "$phase" = sequence-1; then
+            scripts/release_authority.py append "${authority[@]}" \
+              --record "$records/candidate-sequence-2.json" --if-match "$(<"$records/candidate-sequence-1.etag")" \
+              --response-output "$RUNNER_TEMP/replaced.json"
+          fi
+
+          # The raw command performs no local ETag preflight and emits only the authenticated remote status.
+          stale_status=$(scripts/release_authority.py raw "${authority[@]}" \
+            --request "$records/candidate-stale-replace.request")
+          test "$stale_status" = 412
+          cleanup_authority_credentials
+          trap - EXIT
+          scripts/release_authority.py capture --kind candidate --id "$release_id" \
+            --record-output "$RUNNER_TEMP/final.json" --etag-output "$RUNNER_TEMP/final.etag"
+          cmp -s "$RUNNER_TEMP/final.json" "$records/candidate-sequence-2.json"
+          cmp -s "$RUNNER_TEMP/final.etag" "$records/candidate-sequence-2.etag"
+
+          handoff="$RUNNER_TEMP/stage-handoff"
+          mkdir -m 0700 "$handoff"
+          cp "$RUNNER_TEMP/final.json" "$handoff/candidate-record.json"
+          cp "$RUNNER_TEMP/final.etag" "$handoff/candidate.etag"
+          record_sha=$(sha256sum "$handoff/candidate-record.json" | cut -d' ' -f1)
+          source_tree=$(jq -er '[.annotations[] | select(.name == "source-tree")][0].value' "$handoff/candidate-record.json")
+          receipt_sha=$(jq -er '.source.bundleSha256' "$handoff/candidate-record.json")
+          signature_sha=$(jq -er '[.annotations[] | select(.name == "build-signature-sha256")][0].value' "$handoff/candidate-record.json")
+          jq -cnS \
+            --arg schema s46.cli-release-authority-stage.v1 \
+            --arg workflowRef "$GITHUB_WORKFLOW_REF" \
+            --arg runId "$GITHUB_RUN_ID" --arg runAttempt "$GITHUB_RUN_ATTEMPT" \
+            --arg tag "$RELEASE_TAG" --arg commit "$PREPARED_COMMIT" --arg sourceTree "$source_tree" \
+            --arg origin https://models.s46.dev/release-authority/v1 --arg releaseId "$release_id" \
+            --arg etag "$(<"$handoff/candidate.etag")" --arg recordSha256 "$record_sha" \
+            --arg receiptSha256 "$receipt_sha" --arg signatureSha256 "$signature_sha" --argjson staleStatus "$stale_status" \
+            '{schema:$schema,workflowRef:$workflowRef,runId:$runId,runAttempt:$runAttempt,tag:$tag,commit:$commit,sourceTree:$sourceTree,releaseAuthorityOrigin:$origin,releaseAuthorityId:$releaseId,candidateSequence:2,candidateEtag:$etag,candidateRecordSha256:$recordSha256,staleIfMatchStatus:$staleStatus,buildReceiptSha256:$receiptSha256,buildSignatureSha256:$signatureSha256}' \
+            > "$handoff/handoff.json"
+      - name: Upload immutable attempt-qualified stage handoff
+        id: handoff
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: cli-release-authority-stage-${{ inputs.release_tag }}-${{ inputs.prepared_commit }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/stage-handoff
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+          overwrite: false
+      - name: Report exact handoff identity
+        shell: bash
+        env:
+          ARTIFACT_ID: ${{ steps.handoff.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.handoff.outputs.artifact-digest }}
+        run: |
+          set -euo pipefail
+          [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+          printf 'Authority stage run ID: `%s`\n\nArtifact ID: `%s`\n\nArtifact digest: `%s`\n' \
+            "$GITHUB_RUN_ID" "$ARTIFACT_ID" "$ARTIFACT_DIGEST" >> "$GITHUB_STEP_SUMMARY"

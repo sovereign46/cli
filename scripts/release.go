@@ -59,6 +59,11 @@ const (
 	qualifiedRuntimeBinaryMaxSize = int64(256 * 1024 * 1024)
 	qualificationRunnerMaxSize    = int64(2 * 1024 * 1024)
 	qualificationRunnerSource     = "scripts/e2e-airplane-harnesses"
+	releaseAuthorityOrigin        = "https://models.s46.dev/release-authority/v1"
+	releaseAuthorityRepository    = "sovereign46/cli"
+	releaseAuthorityRecordSchema  = "s46.release-authority.record.v1"
+	releaseAuthorityIDDomain      = "s46/release-authority-id/v1\x00"
+	releaseAuthorityETagDomain    = "s46/release-authority-record/v1\x00"
 )
 
 var (
@@ -195,6 +200,9 @@ func stageCandidateBuild(ctx context.Context, tag, preparedCommit, bundleDirecto
 		return err
 	}
 	if state, viewErr := loadCandidateRelease(ctx, candidateTag); viewErr == nil {
+		if err := synchronizeCandidateBuildAssets(ctx, candidateTag, preparedCommit, paths); err != nil {
+			return fmt.Errorf("recover existing candidate release %s: %w", candidateTag, err)
+		}
 		if err := verifyCandidateBuildRelease(ctx, candidateTag, preparedCommit, bundleDirectory, version, sourceTree, paths); err != nil {
 			return fmt.Errorf("existing candidate release %s is not the exact create-only build: %w", candidateTag, err)
 		}
@@ -202,9 +210,13 @@ func stageCandidateBuild(ctx context.Context, tag, preparedCommit, bundleDirecto
 		return nil
 	}
 	args := []string{"release", "create", candidateTag, "--draft", "--verify-tag", "--target", preparedCommit, "--title", "Candidate " + tag, "--notes", "Create-only exact build candidate for native qualification. Assets must never be replaced."}
-	args = append(args, paths...)
 	if err := run(ctx, "gh", args...); err != nil {
-		return fmt.Errorf("create exact build candidate: %w", err)
+		if _, loadErr := loadCandidateRelease(ctx, candidateTag); loadErr != nil {
+			return fmt.Errorf("create exact build candidate: %w", err)
+		}
+	}
+	if err := synchronizeCandidateBuildAssets(ctx, candidateTag, preparedCommit, paths); err != nil {
+		return fmt.Errorf("upload exact build candidate: %w", err)
 	}
 	if err := verifyCandidateBuildRelease(ctx, candidateTag, preparedCommit, bundleDirectory, version, sourceTree, paths); err != nil {
 		return err
@@ -222,11 +234,8 @@ func checkCandidateBuild(ctx context.Context, tag, preparedCommit, bundleDirecto
 	if err != nil {
 		return err
 	}
-	paths, err := validateCandidateBuildBundle(bundleDirectory, version, preparedCommit, sourceTree)
-	if err != nil {
-		return err
-	}
-	return verifyCandidateBuildRelease(ctx, candidateReleaseTag(tag, preparedCommit), preparedCommit, bundleDirectory, version, sourceTree, paths)
+	_, err = validateCandidateBuildBundle(bundleDirectory, version, preparedCommit, sourceTree)
+	return err
 }
 
 func checkNativeQualification(ctx context.Context, tag, preparedCommit, archivePath, evidencePath string) error {
@@ -255,7 +264,19 @@ func checkNativeQualification(ctx context.Context, tag, preparedCommit, archiveP
 	if size == 0 {
 		return errors.New("qualification archive is empty")
 	}
-	if err := validateQualificationRecord(evidencePath, archive, digest, size, version, preparedCommit); err != nil {
+	sourceTree, err := resolveTree(ctx, preparedCommit)
+	if err != nil {
+		return err
+	}
+	bundleDirectory := filepath.Dir(archivePath)
+	if _, err := validateCandidateBuildBundle(bundleDirectory, version, preparedCommit, sourceTree); err != nil {
+		return fmt.Errorf("validate authority build cohort used for qualification: %w", err)
+	}
+	_, _, authority, err := releaseAuthorityCandidate(version, preparedCommit, sourceTree, bundleDirectory)
+	if err != nil {
+		return err
+	}
+	if err := validateQualificationRecord(evidencePath, archive, digest, size, version, preparedCommit, authority); err != nil {
 		return err
 	}
 	return validateQualificationRunnerForCurrentSource([]string{evidencePath}, 1)
@@ -326,6 +347,9 @@ func publishRelease(ctx context.Context, tag string, preparedCommit string, bund
 		return err
 	}
 	if err := requireImmutableReleasesEnabled(ctx, "sovereign46/cli"); err != nil {
+		return err
+	}
+	if err := requireImmutableReleaseTagRuleset(ctx, "sovereign46/cli"); err != nil {
 		return err
 	}
 	if err := stageQualificationBundle(ctx, tag, preparedCommit, sourceTree, bundleDirectory, version, bundleDigest); err != nil {
@@ -716,11 +740,14 @@ type qualifiedBinary struct {
 }
 
 type qualifiedBuild struct {
-	Version   string `json:"version"`
-	Commit    string `json:"commit"`
-	Date      string `json:"date"`
-	GoVersion string `json:"goVersion"`
-	Release   bool   `json:"release"`
+	Version              string `json:"version"`
+	Commit               string `json:"commit"`
+	Date                 string `json:"date"`
+	GoVersion            string `json:"goVersion"`
+	Release              bool   `json:"release"`
+	SourceTree           string `json:"sourceTree"`
+	BuildReceiptSHA256   string `json:"buildReceiptSha256"`
+	BuildSignatureSHA256 string `json:"buildSignatureSha256"`
 }
 
 type qualificationDetail struct {
@@ -755,27 +782,29 @@ type qualifiedRuntimeInventory struct {
 }
 
 type qualificationExecution struct {
-	RunnerOS                         string   `json:"runnerOs"`
-	RunnerArch                       string   `json:"runnerArch"`
-	OSVersion                        string   `json:"osVersion"`
-	RunnerEnvironment                string   `json:"runnerEnvironment"`
-	RunnerName                       string   `json:"runnerName"`
-	WorkflowRef                      string   `json:"workflowRef"`
-	WorkflowSHA                      string   `json:"workflowSha"`
-	RunID                            string   `json:"runId"`
-	RunAttempt                       string   `json:"runAttempt"`
-	Environment                      string   `json:"environment"`
-	EnvironmentApprover              string   `json:"environmentApprover"`
-	EnvironmentReviewers             []string `json:"environmentReviewers"`
-	EnvironmentPreventSelfReview     bool     `json:"environmentPreventSelfReview"`
-	EnvironmentAdminsBypass          bool     `json:"environmentAdminsBypass"`
-	ReleaseAPIVersion                string   `json:"releaseApiVersion"`
-	CandidateReleaseID               string   `json:"candidateReleaseId"`
-	CandidateDraftAssetETagCAS       bool     `json:"candidateDraftAssetEtagCas"`
-	CandidateDraftStaleIfMatchStatus int      `json:"candidateDraftStaleIfMatchStatus"`
-	EnvironmentApprovalSHA256        string   `json:"environmentApprovalSha256"`
-	RunnerIdentitySHA256             string   `json:"runnerIdentitySha256"`
-	IsolationProfileSHA256           string   `json:"isolationProfileSha256"`
+	RunnerOS                     string   `json:"runnerOs"`
+	RunnerArch                   string   `json:"runnerArch"`
+	OSVersion                    string   `json:"osVersion"`
+	RunnerEnvironment            string   `json:"runnerEnvironment"`
+	RunnerName                   string   `json:"runnerName"`
+	WorkflowRef                  string   `json:"workflowRef"`
+	WorkflowSHA                  string   `json:"workflowSha"`
+	RunID                        string   `json:"runId"`
+	RunAttempt                   string   `json:"runAttempt"`
+	Environment                  string   `json:"environment"`
+	EnvironmentApprover          string   `json:"environmentApprover"`
+	EnvironmentReviewers         []string `json:"environmentReviewers"`
+	EnvironmentPreventSelfReview bool     `json:"environmentPreventSelfReview"`
+	EnvironmentAdminsBypass      bool     `json:"environmentAdminsBypass"`
+	ReleaseAuthorityOrigin       string   `json:"releaseAuthorityOrigin"`
+	ReleaseAuthorityID           string   `json:"releaseAuthorityId"`
+	CandidateSequence            uint64   `json:"candidateSequence"`
+	CandidateETag                string   `json:"candidateEtag"`
+	CandidateRecordSHA256        string   `json:"candidateRecordSha256"`
+	CandidateStaleIfMatchStatus  int      `json:"candidateStaleIfMatchStatus"`
+	EnvironmentApprovalSHA256    string   `json:"environmentApprovalSha256"`
+	RunnerIdentitySHA256         string   `json:"runnerIdentitySha256"`
+	IsolationProfileSHA256       string   `json:"isolationProfileSha256"`
 }
 
 type qualificationRunner struct {
@@ -800,6 +829,47 @@ type candidateReleaseTagRecord struct {
 	Schema string `json:"schema"`
 	Tag    string `json:"tag"`
 	Commit string `json:"commit"`
+}
+
+type releaseAuthoritySource struct {
+	Repository   string `json:"repository"`
+	Tag          string `json:"tag"`
+	Commit       string `json:"commit"`
+	TagObject    string `json:"tagObject"`
+	BundleSHA256 string `json:"bundleSha256"`
+}
+
+type releaseAuthorityAsset struct {
+	Name      string `json:"name"`
+	SHA256    string `json:"sha256"`
+	Size      int64  `json:"size"`
+	MediaType string `json:"mediaType"`
+	Role      string `json:"role"`
+}
+
+type releaseAuthorityAnnotation struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+type releaseAuthorityRecord struct {
+	Schema       string                       `json:"schema"`
+	ID           string                       `json:"id"`
+	State        string                       `json:"state"`
+	Sequence     uint64                       `json:"sequence"`
+	PreviousETag string                       `json:"previousETag"`
+	Source       releaseAuthoritySource       `json:"source"`
+	Assets       []releaseAuthorityAsset      `json:"assets"`
+	Annotations  []releaseAuthorityAnnotation `json:"annotations"`
+}
+
+type releaseAuthorityCandidateIdentity struct {
+	ID                   string
+	ETag                 string
+	RecordSHA256         string
+	BundleSHA256         string
+	BuildSignatureSHA256 string
+	SourceTree           string
 }
 
 func createQualifiedReleaseTag(ctx context.Context, tag, commit, bundleDigest string) error {
@@ -882,6 +952,144 @@ func validateQualifiedReleaseTagObject(ctx context.Context, tagObject, tag, comm
 		return fmt.Errorf("release tag %s does not bind the exact qualified bundle", tag)
 	}
 	return nil
+}
+
+func releaseAuthorityID(repository, tag string) (string, error) {
+	if !regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*$`).MatchString(repository) {
+		return "", errors.New("release authority repository is not canonical")
+	}
+	if tag == "" || strings.Contains(tag, "..") || strings.Contains(tag, "@{") || strings.HasSuffix(tag, ".") || strings.HasSuffix(strings.ToLower(tag), ".lock") {
+		return "", errors.New("release authority tag is not canonical")
+	}
+	digest := sha256.Sum256([]byte(releaseAuthorityIDDomain + repository + "\x00" + tag))
+	return "sha256-" + hex.EncodeToString(digest[:]), nil
+}
+
+func releaseAuthorityCandidate(version, preparedCommit, sourceTree, directory string) (releaseAuthorityRecord, releaseAuthorityRecord, releaseAuthorityCandidateIdentity, error) {
+	buildAssets, err := releaseAuthorityAssets(directory, version, false)
+	if err != nil {
+		return releaseAuthorityRecord{}, releaseAuthorityRecord{}, releaseAuthorityCandidateIdentity{}, err
+	}
+	buildReceiptSHA256 := ""
+	buildSignatureSHA256 := ""
+	for _, asset := range buildAssets {
+		switch asset.Name {
+		case releaseBuildFile:
+			buildReceiptSHA256 = asset.SHA256
+		case releaseBuildFile + releaseEvidenceSignatureSuffix:
+			buildSignatureSHA256 = asset.SHA256
+		}
+	}
+	if buildReceiptSHA256 == "" || buildSignatureSHA256 == "" {
+		return releaseAuthorityRecord{}, releaseAuthorityRecord{}, releaseAuthorityCandidateIdentity{}, errors.New("release authority build cohort has no receipt identity")
+	}
+	tag := "v" + version
+	identifier, err := releaseAuthorityID(releaseAuthorityRepository, tag)
+	if err != nil {
+		return releaseAuthorityRecord{}, releaseAuthorityRecord{}, releaseAuthorityCandidateIdentity{}, err
+	}
+	annotations := []releaseAuthorityAnnotation{
+		{Name: "build-receipt-sha256", Value: buildReceiptSHA256},
+		{Name: "build-signature-sha256", Value: buildSignatureSHA256},
+		{Name: "source-tree", Value: sourceTree},
+	}
+	initial := releaseAuthorityRecord{
+		Schema:   releaseAuthorityRecordSchema,
+		ID:       identifier,
+		State:    "candidate",
+		Sequence: 1,
+		Source: releaseAuthoritySource{
+			Repository:   releaseAuthorityRepository,
+			Tag:          tag,
+			Commit:       preparedCommit,
+			TagObject:    "",
+			BundleSHA256: buildReceiptSHA256,
+		},
+		Assets:      buildAssets,
+		Annotations: annotations,
+	}
+	initialETag, _, err := releaseAuthorityRecordIdentity(initial)
+	if err != nil {
+		return releaseAuthorityRecord{}, releaseAuthorityRecord{}, releaseAuthorityCandidateIdentity{}, err
+	}
+	sequenceTwo := initial
+	sequenceTwo.Sequence = 2
+	sequenceTwo.PreviousETag = initialETag
+	sequenceTwo.Annotations = append(append([]releaseAuthorityAnnotation{}, annotations...), releaseAuthorityAnnotation{Name: "cas-probe", Value: "sequence-2"})
+	sort.Slice(sequenceTwo.Annotations, func(i, j int) bool { return sequenceTwo.Annotations[i].Name < sequenceTwo.Annotations[j].Name })
+	etag, digest, err := releaseAuthorityRecordIdentity(sequenceTwo)
+	if err != nil {
+		return releaseAuthorityRecord{}, releaseAuthorityRecord{}, releaseAuthorityCandidateIdentity{}, err
+	}
+	identity := releaseAuthorityCandidateIdentity{
+		ID:                   identifier,
+		ETag:                 etag,
+		RecordSHA256:         digest,
+		BundleSHA256:         buildReceiptSHA256,
+		BuildSignatureSHA256: buildSignatureSHA256,
+		SourceTree:           sourceTree,
+	}
+	return initial, sequenceTwo, identity, nil
+}
+
+func releaseAuthorityQualifiedCandidate(version, preparedCommit, sourceTree, directory string) (releaseAuthorityRecord, releaseAuthorityCandidateIdentity, error) {
+	_, sequenceTwo, identity, err := releaseAuthorityCandidate(version, preparedCommit, sourceTree, directory)
+	if err != nil {
+		return releaseAuthorityRecord{}, releaseAuthorityCandidateIdentity{}, err
+	}
+	assets, err := releaseAuthorityAssets(directory, version, true)
+	if err != nil {
+		return releaseAuthorityRecord{}, releaseAuthorityCandidateIdentity{}, err
+	}
+	sequenceThree := sequenceTwo
+	sequenceThree.Sequence = 3
+	sequenceThree.PreviousETag = identity.ETag
+	sequenceThree.Assets = assets
+	return sequenceThree, identity, nil
+}
+
+func releaseAuthorityAssets(directory, version string, qualified bool) ([]releaseAuthorityAsset, error) {
+	profiles := map[string][2]string{
+		releaseChecksumsFile: {"text/plain", "archive-checksums"},
+		releaseBuildFile:     {"application/json", "build-receipt"},
+		releaseBuildFile + releaseEvidenceSignatureSuffix: {"text/plain", "build-receipt-signature"},
+	}
+	for _, archive := range expectedReleaseArchives(version) {
+		profiles[archive] = [2]string{"application/gzip", "cli-archive"}
+		if qualified {
+			profiles[archive+qualificationSuffix] = [2]string{"application/json", "qualification"}
+			profiles[archive+qualificationSuffix+releaseEvidenceSignatureSuffix] = [2]string{"text/plain", "qualification-signature"}
+		}
+	}
+	names := make([]string, 0, len(profiles))
+	for name := range profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	assets := make([]releaseAuthorityAsset, 0, len(names))
+	for _, name := range names {
+		digest, size, err := hashRegularFile(filepath.Join(directory, name), 256*1024*1024)
+		if err != nil {
+			return nil, err
+		}
+		if size == 0 {
+			return nil, fmt.Errorf("release authority asset %q is empty", name)
+		}
+		profile := profiles[name]
+		assets = append(assets, releaseAuthorityAsset{Name: name, SHA256: digest, Size: size, MediaType: profile[0], Role: profile[1]})
+	}
+	return assets, nil
+}
+
+func releaseAuthorityRecordIdentity(record releaseAuthorityRecord) (string, string, error) {
+	body, err := json.Marshal(record)
+	if err != nil {
+		return "", "", err
+	}
+	body = append(body, '\n')
+	recordDigest := sha256.Sum256(body)
+	etagDigest := sha256.Sum256(append([]byte(releaseAuthorityETagDomain), body...))
+	return `"sha256:` + hex.EncodeToString(etagDigest[:]) + `"`, hex.EncodeToString(recordDigest[:]), nil
 }
 
 func validateCandidateBuildBundle(directory, version, preparedCommit, sourceTree string) ([]string, error) {
@@ -1036,7 +1244,10 @@ func validateQualificationBundleWithTrust(directory string, version string, prep
 	if len(checksums) != len(archives) {
 		return nil, fmt.Errorf("%s must contain exactly %d archive digests", releaseChecksumsFile, len(archives))
 	}
-	candidateReleaseID := ""
+	_, _, authority, err := releaseAuthorityCandidate(version, preparedCommit, sourceTree, directory)
+	if err != nil {
+		return nil, err
+	}
 	for _, archive := range archives {
 		archivePath := filepath.Join(directory, archive)
 		digest, size, err := hashRegularFile(archivePath, 256*1024*1024)
@@ -1050,21 +1261,8 @@ func validateQualificationBundleWithTrust(directory string, version string, prep
 			return nil, fmt.Errorf("%s digest for %q is %q, want %s", releaseChecksumsFile, archive, checksums[archive], digest)
 		}
 		evidencePath := filepath.Join(directory, archive+qualificationSuffix)
-		if err := validateQualificationRecord(evidencePath, archive, digest, size, version, preparedCommit); err != nil {
+		if err := validateQualificationRecord(evidencePath, archive, digest, size, version, preparedCommit, authority); err != nil {
 			return nil, err
-		}
-		raw, err := readSmallRegularFile(evidencePath, maxQualificationFileSize)
-		if err != nil {
-			return nil, err
-		}
-		var evidence qualificationRecord
-		if err := json.Unmarshal(raw, &evidence); err != nil {
-			return nil, err
-		}
-		if candidateReleaseID == "" {
-			candidateReleaseID = evidence.Qualification.Execution.CandidateReleaseID
-		} else if evidence.Qualification.Execution.CandidateReleaseID != candidateReleaseID {
-			return nil, errors.New("qualification records do not bind one candidate release ledger")
 		}
 		if err := verifyReleaseEvidenceSignature(evidencePath, trust.QualificationKey, releaseEvidenceQualificationRole); err != nil {
 			return nil, err
@@ -1157,6 +1355,11 @@ func writeHomebrewFormula(tag, bundleDirectory string, output io.Writer) error {
 	if err != nil {
 		return err
 	}
+	releaseID, err := releaseAuthorityID(releaseAuthorityRepository, tag)
+	if err != nil {
+		return err
+	}
+	assetBase := releaseAuthorityOrigin + "/releases/" + releaseID + "/assets"
 	formula := fmt.Sprintf(`# typed: false
 # frozen_string_literal: true
 
@@ -1169,7 +1372,7 @@ class S46 < Formula
 
   on_macos do
     if Hardware::CPU.intel?
-      url "https://github.com/sovereign46/cli/releases/download/%s/s46_%s_darwin_amd64.tar.gz"
+      url "%s/s46_%s_darwin_amd64.tar.gz"
       sha256 %q
 
       define_method(:install) do
@@ -1178,7 +1381,7 @@ class S46 < Formula
       end
     end
     if Hardware::CPU.arm?
-      url "https://github.com/sovereign46/cli/releases/download/%s/s46_%s_darwin_arm64.tar.gz"
+      url "%s/s46_%s_darwin_arm64.tar.gz"
       sha256 %q
 
       define_method(:install) do
@@ -1190,7 +1393,7 @@ class S46 < Formula
 
   on_linux do
     if Hardware::CPU.intel? && Hardware::CPU.is_64_bit?
-      url "https://github.com/sovereign46/cli/releases/download/%s/s46_%s_linux_amd64.tar.gz"
+      url "%s/s46_%s_linux_amd64.tar.gz"
       sha256 %q
       define_method(:install) do
         bin.install "s46"
@@ -1198,7 +1401,7 @@ class S46 < Formula
       end
     end
     if Hardware::CPU.arm? && Hardware::CPU.is_64_bit?
-      url "https://github.com/sovereign46/cli/releases/download/%s/s46_%s_linux_arm64.tar.gz"
+      url "%s/s46_%s_linux_arm64.tar.gz"
       sha256 %q
       define_method(:install) do
         bin.install "s46"
@@ -1211,7 +1414,7 @@ class S46 < Formula
     system "#{bin}/s46", "--help"
   end
 end
-`, version, tag, version, darwinAMD64, tag, version, darwinARM64, tag, version, linuxAMD64, tag, version, linuxARM64)
+`, version, assetBase, version, darwinAMD64, assetBase, version, darwinARM64, assetBase, version, linuxAMD64, assetBase, version, linuxARM64)
 	_, err = io.WriteString(output, formula)
 	return err
 }
@@ -1244,7 +1447,7 @@ func readReleaseChecksums(path string) (map[string]string, error) {
 	return checksums, nil
 }
 
-func validateQualificationRecord(path string, archive string, digest string, size int64, version string, preparedCommit string) error {
+func validateQualificationRecord(path string, archive string, digest string, size int64, version string, preparedCommit string, authorities ...releaseAuthorityCandidateIdentity) error {
 	raw, err := readSmallRegularFile(path, maxQualificationFileSize)
 	if err != nil {
 		return err
@@ -1257,6 +1460,20 @@ func validateQualificationRecord(path string, archive string, digest string, siz
 	}
 	if err := ensureJSONEOF(decoder); err != nil {
 		return fmt.Errorf("decode qualification evidence for %q: %w", archive, err)
+	}
+	if len(authorities) > 1 {
+		return errors.New("qualification validation received multiple release-authority identities")
+	}
+	authority := releaseAuthorityCandidateIdentity{
+		ID:                   record.Qualification.Execution.ReleaseAuthorityID,
+		ETag:                 record.Qualification.Execution.CandidateETag,
+		RecordSHA256:         record.Qualification.Execution.CandidateRecordSHA256,
+		BundleSHA256:         record.Build.BuildReceiptSHA256,
+		BuildSignatureSHA256: record.Build.BuildSignatureSHA256,
+		SourceTree:           record.Build.SourceTree,
+	}
+	if len(authorities) == 1 {
+		authority = authorities[0]
 	}
 	if record.Schema != qualificationSchema || record.Result != "passed" {
 		return fmt.Errorf("qualification evidence for %q is not a passed %s record", archive, qualificationSchema)
@@ -1271,8 +1488,8 @@ func validateQualificationRecord(path string, archive string, digest string, siz
 	if !sha256Regexp.MatchString(record.Binary.SHA256) || record.Binary.Size <= 0 || record.Binary.SourceMode != "0755" {
 		return fmt.Errorf("qualification evidence for %q has invalid binary identity", archive)
 	}
-	if record.Build.Version != version || record.Build.Commit != preparedCommit || !record.Build.Release || record.Build.Date == "" || record.Build.GoVersion == "" {
-		return fmt.Errorf("qualification evidence for %q does not match release v%s commit %s", archive, version, preparedCommit)
+	if record.Build.Version != version || record.Build.Commit != preparedCommit || !record.Build.Release || record.Build.Date == "" || record.Build.GoVersion == "" || record.Build.SourceTree != authority.SourceTree || record.Build.BuildReceiptSHA256 != authority.BundleSHA256 || record.Build.BuildSignatureSHA256 != authority.BuildSignatureSHA256 {
+		return fmt.Errorf("qualification evidence for %q does not match release v%s commit %s and its exact source/build receipt identities", archive, version, preparedCommit)
 	}
 	if _, err := time.Parse(time.RFC3339, record.Build.Date); err != nil {
 		return fmt.Errorf("qualification evidence for %q has invalid build date: %w", archive, err)
@@ -1309,13 +1526,16 @@ func validateQualificationRecord(path string, archive string, digest string, siz
 	if err := validateQualificationRunner(detail.Runner, qualifiedAt, requiresAirplane); err != nil {
 		return fmt.Errorf("qualification evidence for %q: %w", archive, err)
 	}
-	if err := validateQualificationExecution(detail.Execution, archive, preparedCommit, requiresAirplane); err != nil {
+	if err := validateQualificationExecution(detail.Execution, archive, preparedCommit, authority, requiresAirplane); err != nil {
 		return fmt.Errorf("qualification evidence for %q: %w", archive, err)
 	}
 	return nil
 }
 
-func validateQualificationExecution(execution qualificationExecution, archive, preparedCommit string, requiresAirplane bool) error {
+func validateQualificationExecution(execution qualificationExecution, archive, preparedCommit string, authority releaseAuthorityCandidateIdentity, requiresAirplane bool) error {
+	if !regexp.MustCompile(`^sha256-[0-9a-f]{64}$`).MatchString(authority.ID) || !regexp.MustCompile(`^"sha256:[0-9a-f]{64}"$`).MatchString(authority.ETag) || !sha256Regexp.MatchString(authority.RecordSHA256) || !sha256Regexp.MatchString(authority.BundleSHA256) || !sha256Regexp.MatchString(authority.BuildSignatureSHA256) || !preparedCommitRegexp.MatchString(authority.SourceTree) {
+		return errors.New("qualification execution has an invalid release-authority candidate identity")
+	}
 	platforms := map[string][2]string{
 		"_darwin_amd64.tar.gz": {"macOS", "X64"},
 		"_darwin_arm64.tar.gz": {"macOS", "ARM64"},
@@ -1360,11 +1580,8 @@ func validateQualificationExecution(execution qualificationExecution, archive, p
 	if !slices.Equal(execution.EnvironmentReviewers, []string{"goncalossilva"}) || !execution.EnvironmentPreventSelfReview || execution.EnvironmentAdminsBypass {
 		return errors.New("qualification execution is not bound to the exact protected-environment policy")
 	}
-	if _, err := strconv.ParseUint(execution.CandidateReleaseID, 10, 64); err != nil {
-		return errors.New("qualification execution has an invalid candidate release id")
-	}
-	if execution.ReleaseAPIVersion != "2022-11-28" || !execution.CandidateDraftAssetETagCAS || execution.CandidateDraftStaleIfMatchStatus != 412 {
-		return errors.New("qualification execution lacks the required candidate draft asset-sensitive ETag CAS proof")
+	if execution.ReleaseAuthorityOrigin != releaseAuthorityOrigin || execution.ReleaseAuthorityID != authority.ID || execution.CandidateSequence != 2 || execution.CandidateETag != authority.ETag || execution.CandidateRecordSHA256 != authority.RecordSHA256 || execution.CandidateStaleIfMatchStatus != 412 {
+		return errors.New("qualification execution does not bind the exact sequence-2 release-authority candidate and empirical stale-write rejection")
 	}
 	if execution.RunnerOS == "macOS" {
 		major := strings.SplitN(execution.OSVersion, ".", 2)[0]
@@ -1584,12 +1801,115 @@ func requireMainBranchProtection(ctx context.Context, repository string) error {
 		AllowDeletions struct {
 			Enabled bool `json:"enabled"`
 		} `json:"allow_deletions"`
+		RequiredStatusChecks *struct {
+			Strict bool `json:"strict"`
+			Checks []struct {
+				Context string `json:"context"`
+				AppID   *int64 `json:"app_id"`
+			} `json:"checks"`
+		} `json:"required_status_checks"`
+		RequiredPullRequestReviews *struct {
+			DismissStaleReviews          bool `json:"dismiss_stale_reviews"`
+			RequiredApprovingReviewCount int  `json:"required_approving_review_count"`
+			RequireLastPushApproval      bool `json:"require_last_push_approval"`
+		} `json:"required_pull_request_reviews"`
+		RequiredConversationResolution struct {
+			Enabled bool `json:"enabled"`
+		} `json:"required_conversation_resolution"`
 	}
 	if err := json.Unmarshal([]byte(raw), &protection); err != nil {
 		return fmt.Errorf("decode main branch protection for %s: %w", repository, err)
 	}
 	if !protection.EnforceAdmins.Enabled || !protection.RequiredLinearHistory.Enabled || protection.AllowForcePushes.Enabled || protection.AllowDeletions.Enabled {
 		return fmt.Errorf("main branch protection for %s must enforce administrators and linear history and prohibit force pushes and deletion", repository)
+	}
+	if protection.RequiredStatusChecks == nil || !protection.RequiredStatusChecks.Strict {
+		return fmt.Errorf("main branch protection for %s must require strict status checks", repository)
+	}
+	trustedTest := false
+	for _, check := range protection.RequiredStatusChecks.Checks {
+		if check.Context == "test" && check.AppID != nil && *check.AppID == 15368 {
+			trustedTest = true
+			break
+		}
+	}
+	if !trustedTest {
+		return fmt.Errorf("main branch protection for %s must require the GitHub Actions test check", repository)
+	}
+	if protection.RequiredPullRequestReviews == nil || !protection.RequiredPullRequestReviews.DismissStaleReviews || protection.RequiredPullRequestReviews.RequiredApprovingReviewCount < 1 || !protection.RequiredPullRequestReviews.RequireLastPushApproval {
+		return fmt.Errorf("main branch protection for %s must require a fresh independent pull-request approval", repository)
+	}
+	if !protection.RequiredConversationResolution.Enabled {
+		return fmt.Errorf("main branch protection for %s must require conversation resolution", repository)
+	}
+	return nil
+}
+
+func requireImmutableReleaseTagRuleset(ctx context.Context, repository string) error {
+	if strings.TrimSpace(repository) == "" {
+		return errors.New("repository is required for release-tag ruleset preflight")
+	}
+	listRaw, err := captureOutput(ctx, "gh", "api", "repos/"+repository+"/rulesets")
+	if err != nil {
+		return fmt.Errorf("list release-tag rulesets for %s: %w", repository, err)
+	}
+	var summaries []struct {
+		ID          int64  `json:"id"`
+		Name        string `json:"name"`
+		Target      string `json:"target"`
+		SourceType  string `json:"source_type"`
+		Source      string `json:"source"`
+		Enforcement string `json:"enforcement"`
+	}
+	if err := json.Unmarshal([]byte(listRaw), &summaries); err != nil {
+		return fmt.Errorf("decode release-tag rulesets for %s: %w", repository, err)
+	}
+	var rulesetID int64
+	for _, summary := range summaries {
+		if summary.Name != "Immutable semantic release tags" {
+			continue
+		}
+		if rulesetID != 0 || summary.ID <= 0 || summary.Target != "tag" || summary.SourceType != "Repository" || summary.Source != repository || summary.Enforcement != "active" {
+			return fmt.Errorf("release-tag ruleset for %s has an ambiguous or invalid summary", repository)
+		}
+		rulesetID = summary.ID
+	}
+	if rulesetID == 0 {
+		return fmt.Errorf("release-tag ruleset for %s is missing", repository)
+	}
+	detailRaw, err := captureOutput(ctx, "gh", "api", fmt.Sprintf("repos/%s/rulesets/%d", repository, rulesetID))
+	if err != nil {
+		return fmt.Errorf("inspect release-tag ruleset for %s: %w", repository, err)
+	}
+	var detail struct {
+		ID                   int64             `json:"id"`
+		Name                 string            `json:"name"`
+		Target               string            `json:"target"`
+		SourceType           string            `json:"source_type"`
+		Source               string            `json:"source"`
+		Enforcement          string            `json:"enforcement"`
+		BypassActors         []json.RawMessage `json:"bypass_actors"`
+		CurrentUserCanBypass string            `json:"current_user_can_bypass"`
+		Conditions           struct {
+			RefName struct {
+				Include []string `json:"include"`
+				Exclude []string `json:"exclude"`
+			} `json:"ref_name"`
+		} `json:"conditions"`
+		Rules []struct {
+			Type string `json:"type"`
+		} `json:"rules"`
+	}
+	if err := json.Unmarshal([]byte(detailRaw), &detail); err != nil {
+		return fmt.Errorf("decode release-tag ruleset for %s: %w", repository, err)
+	}
+	ruleTypes := make([]string, 0, len(detail.Rules))
+	for _, rule := range detail.Rules {
+		ruleTypes = append(ruleTypes, rule.Type)
+	}
+	sort.Strings(ruleTypes)
+	if detail.ID != rulesetID || detail.Name != "Immutable semantic release tags" || detail.Target != "tag" || detail.SourceType != "Repository" || detail.Source != repository || detail.Enforcement != "active" || len(detail.BypassActors) != 0 || detail.CurrentUserCanBypass != "never" || !slices.Equal(detail.Conditions.RefName.Include, []string{"refs/tags/v*.*.*"}) || len(detail.Conditions.RefName.Exclude) != 0 || !slices.Equal(ruleTypes, []string{"deletion", "update"}) {
+		return fmt.Errorf("release-tag ruleset for %s must prohibit every semantic-tag update and deletion without bypass", repository)
 	}
 	return nil
 }
@@ -1625,48 +1945,151 @@ func stageQualificationBundle(ctx context.Context, tag string, preparedCommit st
 	if err != nil {
 		return err
 	}
-	candidateTag := candidateReleaseTag(tag, preparedCommit)
-	state, viewErr := loadCandidateRelease(ctx, candidateTag)
-	if viewErr != nil {
-		return fmt.Errorf("qualified candidate release %s must already contain create-only native qualification evidence and independent signatures: %w", candidateTag, viewErr)
-	}
-	if err := validateCandidateRelease(state, candidateTag, preparedCommit); err != nil {
-		return err
-	}
-	if _, err := requireRemoteCandidateReleaseTag(ctx, candidateTag, preparedCommit); err != nil {
-		return err
-	}
-	downloaded, err := os.MkdirTemp("", "s46-staged-release-*")
+	expected, _, err := releaseAuthorityQualifiedCandidate(version, preparedCommit, sourceTree, directory)
 	if err != nil {
-		return fmt.Errorf("create staged release verification directory: %w", err)
+		return err
 	}
-	defer os.RemoveAll(downloaded)
-	if err := run(ctx, "gh", "release", "download", candidateTag, "--dir", downloaded); err != nil {
-		return fmt.Errorf("download staged qualification bundle: %w", err)
+	if expected.Source.Tag != tag {
+		return errors.New("release authority source tag does not match the requested final tag")
+	}
+	work, err := os.MkdirTemp("", "s46-authority-candidate-*")
+	if err != nil {
+		return fmt.Errorf("create release authority verification directory: %w", err)
+	}
+	defer os.RemoveAll(work)
+	recordPath := filepath.Join(work, "candidate-record.json")
+	etagPath := filepath.Join(work, "candidate.etag")
+	if err := run(ctx, "python3", "scripts/release_authority.py", "capture", "--kind", "candidate", "--id", expected.ID, "--record-output", recordPath, "--etag-output", etagPath); err != nil {
+		return fmt.Errorf("capture exact sequence-3 release authority candidate: %w", err)
+	}
+	expectedBody, err := json.Marshal(expected)
+	if err != nil {
+		return err
+	}
+	expectedBody = append(expectedBody, '\n')
+	actualBody, err := readSmallRegularFile(recordPath, maxQualificationFileSize)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(actualBody, expectedBody) {
+		return errors.New("release authority candidate is not the exact deterministic sequence-3 record")
+	}
+	expectedETag, _, err := releaseAuthorityRecordIdentity(expected)
+	if err != nil {
+		return err
+	}
+	actualETag, err := readSmallRegularFile(etagPath, 256)
+	if err != nil {
+		return err
+	}
+	if string(actualETag) != expectedETag+"\n" {
+		return errors.New("release authority candidate ETag does not bind its exact sequence-3 record")
+	}
+	downloaded := filepath.Join(work, "qualified-release")
+	if err := os.Mkdir(downloaded, 0o700); err != nil {
+		return err
+	}
+	for _, asset := range expected.Assets {
+		if err := run(ctx, "python3", "scripts/release_authority.py", "download", "--kind", "candidate", "--id", expected.ID, "--asset", asset.Name, "--output", filepath.Join(downloaded, asset.Name)); err != nil {
+			return fmt.Errorf("download release authority candidate asset %s: %w", asset.Name, err)
+		}
 	}
 	downloadedPaths, err := validateQualificationBundle(downloaded, version, preparedCommit, sourceTree)
 	if err != nil {
-		return fmt.Errorf("validate staged qualification bundle: %w", err)
+		return fmt.Errorf("validate release authority candidate bundle: %w", err)
 	}
 	downloadedDigest, err := qualificationBundleDigest(downloadedPaths)
 	if err != nil {
-		return fmt.Errorf("hash staged qualification bundle: %w", err)
-	}
-	if downloadedDigest != expectedDigest {
-		return fmt.Errorf("staged qualification bundle does not match its release digest")
-	}
-	if err := compareBundleBytes(directory, downloaded, paths); err != nil {
 		return err
 	}
-	state, err = loadCandidateRelease(ctx, candidateTag)
+	if downloadedDigest != expectedDigest {
+		return errors.New("release authority candidate does not match its qualified bundle digest")
+	}
+	return compareBundleBytes(directory, downloaded, paths)
+}
+
+func synchronizeCandidateBuildAssets(ctx context.Context, candidateTag, preparedCommit string, sourcePaths []string) error {
+	state, err := loadCandidateRelease(ctx, candidateTag)
 	if err != nil {
-		return fmt.Errorf("recheck staged qualification bundle: %w", err)
+		return err
 	}
 	if err := validateCandidateRelease(state, candidateTag, preparedCommit); err != nil {
 		return err
 	}
-	if _, err := requireRemoteCandidateReleaseTag(ctx, candidateTag, preparedCommit); err != nil {
-		return fmt.Errorf("candidate tag changed during qualification verification: %w", err)
+	raw, err := captureOutput(ctx, "gh", "api", "repos/sovereign46/cli/releases/tags/"+candidateTag)
+	if err != nil {
+		return fmt.Errorf("inspect candidate asset ledger: %w", err)
+	}
+	var release struct {
+		ID              int64  `json:"id"`
+		Draft           bool   `json:"draft"`
+		TagName         string `json:"tag_name"`
+		TargetCommitish string `json:"target_commitish"`
+		Assets          []struct {
+			ID     int64   `json:"id"`
+			Name   string  `json:"name"`
+			State  string  `json:"state"`
+			Size   int64   `json:"size"`
+			Digest *string `json:"digest"`
+		} `json:"assets"`
+	}
+	if err := json.Unmarshal([]byte(raw), &release); err != nil {
+		return fmt.Errorf("decode candidate asset ledger: %w", err)
+	}
+	if release.ID <= 0 || !release.Draft || release.TagName != candidateTag || release.TargetCommitish != preparedCommit {
+		return errors.New("candidate asset ledger does not belong to the exact prepared draft")
+	}
+	expected := make(map[string]string, len(sourcePaths))
+	for _, path := range sourcePaths {
+		name := filepath.Base(path)
+		if expected[name] != "" {
+			return fmt.Errorf("candidate source contains duplicate asset name %q", name)
+		}
+		expected[name] = path
+	}
+	uploaded := make(map[string]bool, len(expected))
+	identifiers := make(map[int64]bool, len(release.Assets))
+	names := make(map[string]bool, len(release.Assets))
+	for _, asset := range release.Assets {
+		path, known := expected[asset.Name]
+		if !known || asset.ID <= 0 || identifiers[asset.ID] || names[asset.Name] {
+			return errors.New("candidate asset ledger contains an unexpected or duplicate asset")
+		}
+		identifiers[asset.ID] = true
+		names[asset.Name] = true
+		switch asset.State {
+		case "uploaded":
+			digest, size, err := hashRegularFile(path, 256*1024*1024)
+			if err != nil {
+				return err
+			}
+			if asset.Size != size || asset.Digest == nil || *asset.Digest != "sha256:"+digest {
+				return fmt.Errorf("existing candidate asset %q has different metadata", asset.Name)
+			}
+			uploaded[asset.Name] = true
+		case "starter":
+			if asset.Size != 0 || asset.Digest != nil {
+				return fmt.Errorf("incomplete candidate asset %q is not safely recoverable", asset.Name)
+			}
+			if err := run(ctx, "gh", "api", "--method", "DELETE", fmt.Sprintf("repos/sovereign46/cli/releases/assets/%d", asset.ID)); err != nil {
+				return fmt.Errorf("delete incomplete candidate asset %q: %w", asset.Name, err)
+			}
+		default:
+			return fmt.Errorf("candidate asset %q has invalid state %q", asset.Name, asset.State)
+		}
+	}
+	ordered := make([]string, 0, len(expected))
+	for name := range expected {
+		ordered = append(ordered, name)
+	}
+	sort.Strings(ordered)
+	for _, name := range ordered {
+		if uploaded[name] {
+			continue
+		}
+		if err := run(ctx, "gh", "release", "upload", candidateTag, expected[name]); err != nil {
+			return fmt.Errorf("upload candidate asset %q: %w", name, err)
+		}
 	}
 	return nil
 }
