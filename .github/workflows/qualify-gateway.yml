@@ -1,0 +1,217 @@
+name: qualify gateway airplane candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact unprefixed gateway release version (currently 0.2.0)
+        required: true
+        type: string
+      source_commit:
+        description: Exact full sovereign46/api source commit in the public candidate receipt
+        required: true
+        type: string
+      candidate_etag:
+        description: Exact quoted strong ETag of the public release-authority candidate
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+  deployments: read
+
+concurrency:
+  group: gateway-airplane-qualification-${{ inputs.version }}-${{ inputs.source_commit }}
+  cancel-in-progress: false
+
+jobs:
+  qualify-darwin-arm64:
+    name: protected gateway airplane / darwin-arm64
+    runs-on: [self-hosted, macOS, ARM64, s46-airplane-qualification]
+    environment: airplane-qualification
+    timeout-minutes: 45
+    permissions:
+      actions: read
+      contents: read
+      deployments: read
+    steps:
+      - name: Check out the exact protected qualification workflow
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Bind protected environment approval and policy
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QUALIFICATION_ENVIRONMENT: airplane-qualification
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = sovereign46/cli
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_WORKFLOW_REF" = sovereign46/cli/.github/workflows/qualify-gateway.yml@refs/heads/main
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)" = "$GITHUB_SHA"
+          test "$(uname -s)" = Darwin
+          test "$(uname -m)" = arm64
+          test "$(sw_vers -productVersion | cut -d. -f1)" = 26
+          test "$RUNNER_OS" = macOS
+          test "$RUNNER_ARCH" = ARM64
+          test "$RUNNER_ENVIRONMENT" = self-hosted
+
+          controls="$RUNNER_TEMP/s46-gateway-workflow-controls-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          test ! -e "$controls" && test ! -L "$controls"
+          mkdir -m 0700 "$controls"
+          approvals="$controls/approvals.json"
+          policy="$controls/policy.json"
+          approval="$controls/environment-approval.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals" > "$approvals"
+          gh api "repos/$GITHUB_REPOSITORY/environments/$QUALIFICATION_ENVIRONMENT" > "$policy"
+          /usr/bin/python3 -B - "$approvals" "$policy" "$approval" <<'PY'
+          import datetime
+          import hashlib
+          import json
+          import os
+          import re
+          import sys
+
+          approvals_path, policy_path, output_path = sys.argv[1:]
+          with open(approvals_path, encoding="utf-8") as source:
+              approvals = json.load(source)
+          with open(policy_path, encoding="utf-8") as source:
+              environment = json.load(source)
+
+          rules = environment.get("protection_rules")
+          reviewer_rules = [rule for rule in rules if isinstance(rule, dict) and rule.get("type") == "required_reviewers"] if isinstance(rules, list) else []
+          branch_rules = [rule for rule in rules if isinstance(rule, dict) and rule.get("type") == "branch_policy"] if isinstance(rules, list) else []
+          deployment_branch_policy = environment.get("deployment_branch_policy")
+          if (environment.get("name") != os.environ["QUALIFICATION_ENVIRONMENT"] or
+                  environment.get("can_admins_bypass") is not False or len(rules or []) != 2 or
+                  len(reviewer_rules) != 1 or len(branch_rules) != 1 or
+                  deployment_branch_policy != {"protected_branches": True, "custom_branch_policies": False}):
+              raise SystemExit("airplane-qualification protection and branch rules are not exact")
+          rule = reviewer_rules[0]
+          reviewers = rule.get("reviewers")
+          if rule.get("prevent_self_review") is not True or not isinstance(reviewers, list) or len(reviewers) != 1:
+              raise SystemExit("airplane-qualification must require one non-self reviewer")
+          reviewer_wrapper = reviewers[0]
+          reviewer = reviewer_wrapper.get("reviewer", {}) if isinstance(reviewer_wrapper, dict) else {}
+          reviewer_type = reviewer_wrapper.get("type") if isinstance(reviewer_wrapper, dict) else None
+          reviewer_id = reviewer.get("id")
+          if (reviewer.get("login") != "goncalossilva" or reviewer_type != "User" or
+                  not isinstance(reviewer_id, int) or isinstance(reviewer_id, bool) or reviewer_id <= 0):
+              raise SystemExit("airplane-qualification reviewer is not exactly goncalossilva")
+          if os.environ.get("GITHUB_ACTOR", "").lower() == "goncalossilva":
+              raise SystemExit("the required reviewer cannot self-review this dispatch")
+
+          approved = []
+          for review in approvals if isinstance(approvals, list) else []:
+              user = review.get("user", {}) if isinstance(review, dict) else {}
+              environments = review.get("environments", []) if isinstance(review, dict) else []
+              if (review.get("state", "").lower() == "approved" and user.get("login") == "goncalossilva" and
+                      user.get("id") == reviewer_id and any(item.get("name") == os.environ["QUALIFICATION_ENVIRONMENT"] for item in environments if isinstance(item, dict))):
+                  approved.append(review)
+          if not approved:
+              raise SystemExit("workflow run lacks Goncalo's protected-environment approval")
+          # GitHub's review-history object has no review timestamp. Bind the
+          # canonical instant at which this protected job observed its approved
+          # state, together with the digest of the complete API responses.
+          approved_at = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+          normalized_approval = {
+              "approver": "goncalossilva",
+              "approverId": str(reviewer_id),
+              "runId": os.environ["GITHUB_RUN_ID"],
+              "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "observedApprovedAt": approved_at,
+          }
+          normalized_policy = {
+              "reviewers": [{"login": "goncalossilva", "id": str(reviewer_id), "type": "User"}],
+              "requiredReviewerCount": 1,
+              "preventSelfReview": True,
+              "adminsBypass": False,
+              "deploymentBranchPolicy": {
+                  "protectedBranches": True,
+                  "customBranchPolicies": False,
+              },
+          }
+          source_response = {"approvals": approvals, "environment": environment}
+          source_raw = (json.dumps(source_response, sort_keys=True, separators=(",", ":")) + "\n").encode()
+          control = {
+              "schema": "s46.github-environment-approval.v1",
+              "runId": os.environ["GITHUB_RUN_ID"],
+              "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "environment": os.environ["QUALIFICATION_ENVIRONMENT"],
+              "approval": normalized_approval,
+              "policy": normalized_policy,
+              "sourceResponseSha256": hashlib.sha256(source_raw).hexdigest(),
+          }
+          raw = (json.dumps(control, sort_keys=True, separators=(",", ":")) + "\n").encode()
+          descriptor = os.open(output_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0), 0o400)
+          try:
+              view = memoryview(raw)
+              while view:
+                  count = os.write(descriptor, view)
+                  if count <= 0:
+                      raise SystemExit("short write creating environment approval control")
+                  view = view[count:]
+              os.fsync(descriptor)
+          finally:
+              os.close(descriptor)
+          PY
+          test "$(stat -f '%Lp' "$approval")" = 400
+          test "$(stat -f '%l' "$approval")" = 1
+          rm -f "$approvals" "$policy"
+          printf 'S46_GATEWAY_APPROVAL_FILE=%s\n' "$approval" >> "$GITHUB_ENV"
+
+      - name: Qualify the exact public candidate inside the checked-in sandbox
+        shell: bash
+        env:
+          VERSION: ${{ inputs.version }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          CANDIDATE_ETAG: ${{ inputs.candidate_etag }}
+          MODEL_GGUF: ${{ vars.S46_E2E_MODEL_GGUF }}
+          LLAMA_ARCHIVE: ${{ vars.S46_E2E_LLAMA_ARCHIVE }}
+          RUNNER_IDENTITY: ${{ vars.S46_AIRPLANE_RUNNER_IDENTITY }}
+          RUNNER_IDENTITY_SIGNATURE: ${{ vars.S46_AIRPLANE_RUNNER_IDENTITY_SIGNATURE }}
+        run: |
+          set -euo pipefail
+          test -n "$MODEL_GGUF" && test -n "$LLAMA_ARCHIVE" && test -n "$RUNNER_IDENTITY" && test -n "$RUNNER_IDENTITY_SIGNATURE"
+          evidence="$RUNNER_TEMP/qualification-darwin-arm64.execution.json"
+          test ! -e "$evidence" && test ! -L "$evidence"
+          /usr/bin/env -i \
+            PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+            LC_ALL=C \
+            RUNNER_TEMP="$RUNNER_TEMP" \
+            RUNNER_OS="$RUNNER_OS" \
+            RUNNER_ARCH="$RUNNER_ARCH" \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" \
+            RUNNER_NAME="$RUNNER_NAME" \
+            GITHUB_REPOSITORY="$GITHUB_REPOSITORY" \
+            GITHUB_REF="$GITHUB_REF" \
+            GITHUB_WORKFLOW_REF="$GITHUB_WORKFLOW_REF" \
+            GITHUB_SHA="$GITHUB_SHA" \
+            GITHUB_RUN_ID="$GITHUB_RUN_ID" \
+            GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+            /bin/bash --noprofile --norc "$GITHUB_WORKSPACE/scripts/qualify-gateway-airplane" \
+              "$VERSION" "$SOURCE_COMMIT" "$CANDIDATE_ETAG" \
+              "$MODEL_GGUF" "$LLAMA_ARCHIVE" "$RUNNER_IDENTITY" "$RUNNER_IDENTITY_SIGNATURE" \
+              "$S46_GATEWAY_APPROVAL_FILE" "$evidence"
+          test -f "$evidence" && test ! -L "$evidence"
+          test "$(stat -f '%Lp' "$evidence")" = 600
+          printf 'S46_GATEWAY_EXECUTION_EVIDENCE=%s\n' "$evidence" >> "$GITHUB_ENV"
+
+      - name: Upload immutable native execution evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: qualification-darwin-arm64-execution-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.S46_GATEWAY_EXECUTION_EVIDENCE }}
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false

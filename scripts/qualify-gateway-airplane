@@ -1,0 +1,1552 @@
+#!/bin/bash
+set -euo pipefail
+IFS=$'\n\t'
+export PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export LC_ALL=C
+unset BASH_ENV ENV CDPATH GLOBIGNORE PYTHONHOME PYTHONPATH \
+  http_proxy https_proxy all_proxy no_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY \
+  GIT_CONFIG_COUNT GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH
+
+readonly authority_origin=https://models.s46.dev/release-authority/v1
+readonly repository=sovereign46/api
+readonly execution_name=qualification-darwin-arm64.execution.json
+readonly model_name=Devstral-Small-2-24B-Instruct-2512-Q4_K_M.gguf
+readonly model_sha256=d14ba9edee1bb4c4996a726deb81e49ae81800a3216f0774634238c380aee496
+readonly model_size=14334446752
+readonly llama_archive_name=llama-b9270-bin-macos-arm64.tar.gz
+readonly llama_archive_sha256=1a41b5bb3585a79ce90535b2c61671eae60a032ddb2b4992a62eb0d221f9b2bb
+readonly llama_archive_size=8488521
+readonly llama_server_sha256=fc05cc348584b01226d1a95bc2282978193d009a02b16d739ff17f9b332b1cda
+readonly llama_server_size=8023664
+readonly llama_inventory_sha256=5188ea71039a80e56a3026fa4c7a823e6b550887a50475fe9c45001ee436c167
+readonly gateway_version=0.2.0
+readonly gateway_commit=70d4b8be3a114a226404905e5759fb2c8248977b
+readonly gateway_archive_sha256=634bfae827699d053fcd2df4c05a976ce6f6aeb04910f3aedee539eee6615779
+readonly gateway_archive_size=4614905
+readonly gateway_binary_sha256=dfe2140392f9a14c51f3e9d9c4b0908717a20dfe876e87703495cd304a4697d5
+readonly gateway_binary_size=12757074
+readonly runner_provisioner_key_id=s46-airplane-runner-provisioner-2026-10
+readonly runner_identity_namespace=s46-gateway-runner-identity-v1
+readonly runner_provisioner_public_key='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILtEgfCyJ+Zoa8makK7sIPxcqyqwSo/9SvtDYYjQCpjv'
+
+fail() {
+  printf 'qualify-gateway-airplane: %s\n' "$*" >&2
+  exit 1
+}
+
+usage() {
+  cat >&2 <<'EOF'
+usage: scripts/qualify-gateway-airplane <version> <source-commit> <candidate-etag> <model-gguf> <llama-archive> <runner-identity.json> <runner-identity.sig> <environment-approval.json> <evidence-output>
+EOF
+  exit 2
+}
+
+sha256_file() {
+  /usr/bin/shasum -a 256 "$1" | /usr/bin/awk '{print $1}'
+}
+
+clean_python() {
+  /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C PYTHONDONTWRITEBYTECODE=1 /usr/bin/python3 -B "$@"
+}
+
+# These commands exercise security primitives without creating qualification
+# evidence. They are used only by the checked-in Go tests.
+if [ "${1:-}" = __test-pinned-file ]; then
+  [ "$#" -eq 3 ] || usage
+  case "$2" in
+    model) expected_sha=$model_sha256; expected_size=$model_size ;;
+    llama) expected_sha=$llama_archive_sha256; expected_size=$llama_archive_size ;;
+    gateway-archive) expected_sha=$gateway_archive_sha256; expected_size=$gateway_archive_size ;;
+    *) usage ;;
+  esac
+  [ -f "$3" ] && [ ! -L "$3" ] || fail "$2 test input is not a regular file"
+  [ "$(/usr/bin/stat -f '%z' "$3")" = "$expected_size" ] || fail "$2 size mismatch"
+  [ "$(sha256_file "$3")" = "$expected_sha" ] || fail "$2 SHA-256 mismatch"
+  exit 0
+fi
+
+if [ "${1:-}" = __test-canonical-json ]; then
+  [ "$#" -eq 2 ] || usage
+  clean_python - "$2" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+descriptor = os.open(path, flags)
+try:
+    body = os.read(descriptor, (1 << 20) + 1)
+finally:
+    os.close(descriptor)
+if len(body) > 1 << 20:
+    raise SystemExit("JSON exceeds its size bound")
+
+
+def pairs(values):
+    result = {}
+    for key, value in values:
+        if key in result:
+            raise ValueError(f"duplicate JSON key {key!r}")
+        result[key] = value
+    return result
+
+
+try:
+    value = json.loads(
+        body.decode("utf-8", "strict"),
+        object_pairs_hook=pairs,
+        parse_constant=lambda value: (_ for _ in ()).throw(ValueError(f"invalid JSON number {value}")),
+    )
+except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as error:
+    raise SystemExit(f"invalid JSON: {error}")
+text = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"), sort_keys=True)
+text = text.replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
+text = text.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+if body != text.encode("utf-8") + b"\n":
+    raise SystemExit("JSON is not canonical")
+PY
+  exit 0
+fi
+
+[ "$#" -eq 9 ] || usage
+version=$1
+source_commit=$2
+candidate_etag=$3
+model_source=$4
+llama_source=$5
+runner_identity=$6
+runner_identity_signature=$7
+environment_approval=$8
+evidence_output=$9
+
+[ "$version" = "$gateway_version" ] || fail "only the reviewed gateway $gateway_version candidate may be qualified"
+[ "$source_commit" = "$gateway_commit" ] || fail "only the reviewed gateway source commit may be qualified"
+[[ "$candidate_etag" =~ ^\"sha256:[0-9a-f]{64}\"$ ]] || fail "candidate ETag must be one exact strong validator"
+[ "${model_source#/}" != "$model_source" ] || fail "model path must be absolute"
+[ "${llama_source#/}" != "$llama_source" ] || fail "llama.cpp archive path must be absolute"
+[ "${runner_identity#/}" != "$runner_identity" ] || fail "runner identity path must be absolute"
+[ "${runner_identity_signature#/}" != "$runner_identity_signature" ] || fail "runner identity signature path must be absolute"
+[ "${environment_approval#/}" != "$environment_approval" ] || fail "environment approval path must be absolute"
+[ "${evidence_output#/}" != "$evidence_output" ] || fail "evidence output path must be absolute"
+[ "$(/usr/bin/basename "$evidence_output")" = "$execution_name" ] || fail "evidence output must be named $execution_name"
+[ ! -e "$evidence_output" ] && [ ! -L "$evidence_output" ] || fail "evidence output already exists"
+
+[ "$(/usr/bin/uname -s)" = Darwin ] || fail "gateway qualification requires Darwin"
+[ "$(/usr/bin/uname -m)" = arm64 ] || fail "gateway qualification requires native arm64"
+os_version=$(/usr/bin/sw_vers -productVersion)
+[ "${os_version%%.*}" = 26 ] || fail "gateway qualification requires macOS 26"
+physical_memory=$(/usr/sbin/sysctl -n hw.memsize)
+[[ "$physical_memory" =~ ^[0-9]+$ ]] && [ "$physical_memory" -ge 68719476736 ] || fail "gateway qualification requires at least 64 GiB of physical memory"
+[ "${RUNNER_OS:-}" = macOS ] || fail "Actions runner OS is not macOS"
+[ "${RUNNER_ARCH:-}" = ARM64 ] || fail "Actions runner architecture is not ARM64"
+[ "${RUNNER_ENVIRONMENT:-}" = self-hosted ] || fail "gateway qualification requires a self-hosted runner"
+[ -n "${RUNNER_NAME:-}" ] && [ "${#RUNNER_NAME}" -le 256 ] || fail "runner name is missing or too long"
+[ "${GITHUB_REPOSITORY:-}" = sovereign46/cli ] || fail "qualification must execute in sovereign46/cli"
+[ "${GITHUB_REF:-}" = refs/heads/main ] || fail "qualification must execute from main"
+[ "${GITHUB_WORKFLOW_REF:-}" = sovereign46/cli/.github/workflows/qualify-gateway.yml@refs/heads/main ] || fail "qualification workflow identity is not protected main"
+[[ "${GITHUB_SHA:-}" =~ ^[0-9a-f]{40}$ ]] || fail "workflow SHA is not a full Git object ID"
+[[ "${GITHUB_RUN_ID:-}" =~ ^[1-9][0-9]*$ ]] || fail "workflow run ID is invalid"
+[[ "${GITHUB_RUN_ATTEMPT:-}" =~ ^[1-9][0-9]*$ ]] || fail "workflow run attempt is invalid"
+
+[ -x /usr/bin/sandbox-exec ] && [ ! -L /usr/bin/sandbox-exec ] || fail "/usr/bin/sandbox-exec is unavailable"
+[ -x /usr/bin/ssh-keygen ] && [ ! -L /usr/bin/ssh-keygen ] || fail "/usr/bin/ssh-keygen is unavailable"
+clean_python - /usr/bin/sandbox-exec /usr/bin/ssh-keygen <<'PY'
+import os, stat, sys
+for path in sys.argv[1:]:
+    info = os.lstat(path)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1:
+        raise SystemExit(f"{path} is not a singly linked root-owned regular file")
+    if stat.S_IMODE(info.st_mode) & 0o022 or not stat.S_IMODE(info.st_mode) & 0o111:
+        raise SystemExit(f"{path} has unsafe mode")
+PY
+
+runner_temp=${RUNNER_TEMP:-}
+[ "${runner_temp#/}" != "$runner_temp" ] || fail "RUNNER_TEMP must be absolute"
+[ -d "$runner_temp" ] && [ ! -L "$runner_temp" ] || fail "RUNNER_TEMP must be a real directory"
+clean_python - "$runner_temp" <<'PY'
+import os, re, stat, sys
+path = sys.argv[1]
+if (not re.fullmatch(r"/[A-Za-z0-9._/-]+", path) or "//" in path or
+        "/./" in path + "/" or "/../" in path + "/" or path.endswith("/")):
+    raise SystemExit("RUNNER_TEMP is not an absolute SBPL-safe path")
+if os.path.realpath(path) != path:
+    raise SystemExit("RUNNER_TEMP contains a symlink or is not canonical")
+current = "/"
+for component in [item for item in path.split("/") if item]:
+    current = os.path.join(current, component)
+    info = os.lstat(current)
+    if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or
+            info.st_uid not in (0, os.geteuid()) or stat.S_IMODE(info.st_mode) & 0o022):
+        raise SystemExit(f"RUNNER_TEMP ancestor is unsafe: {current}")
+final = os.lstat(path)
+if final.st_uid != os.geteuid():
+    raise SystemExit("RUNNER_TEMP is not owned by the runner user")
+PY
+scratch="$runner_temp/s46-gateway-qualification-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+[[ "$scratch" =~ ^/[A-Za-z0-9._/-]+$ ]] || fail "qualification scratch path is not SBPL-safe"
+[ ! -e "$scratch" ] && [ ! -L "$scratch" ] || fail "qualification scratch root already exists"
+/bin/mkdir -m 0700 "$scratch"
+[ "$(cd "$scratch" && pwd -P)" = "$scratch" ] || fail "qualification scratch root is not canonical"
+qualification_pid_llama=
+qualification_pid_gateway=
+llama_port=
+gateway_port=
+
+stop_pid() {
+  local pid=${1:-}
+  [ -n "$pid" ] || return 0
+  if /bin/kill -0 "$pid" 2>/dev/null; then
+    /bin/kill -TERM "$pid" 2>/dev/null || true
+    local attempt
+    for attempt in 1 2 3 4 5 6 7 8 9 10; do
+      /bin/kill -0 "$pid" 2>/dev/null || break
+      /bin/sleep 1
+    done
+    if /bin/kill -0 "$pid" 2>/dev/null; then
+      /bin/kill -KILL "$pid" 2>/dev/null || true
+    fi
+  fi
+  wait "$pid" 2>/dev/null || true
+}
+
+cleanup() {
+  local status=$?
+  trap - EXIT INT TERM
+  stop_pid "$qualification_pid_gateway"
+  stop_pid "$qualification_pid_llama"
+  if [ -n "$scratch" ] && [ -d "$scratch" ]; then
+    /bin/chmod -RN "$scratch" >/dev/null 2>&1 || true
+    /bin/chmod -R u+rwX "$scratch" >/dev/null 2>&1 || true
+    /bin/rm -rf "$scratch"
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+/bin/mkdir -m 0700 "$scratch/input" "$scratch/output" "$scratch/home" "$scratch/tmp" "$scratch/control"
+metadata=$scratch/control/metadata.json
+
+clean_python - "$version" "$source_commit" "$candidate_etag" "$model_source" "$llama_source" \
+  "$runner_identity" "$runner_identity_signature" "$environment_approval" "$RUNNER_NAME" \
+  "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$GITHUB_SHA" "$scratch" "$metadata" \
+  "$runner_provisioner_key_id" "$runner_identity_namespace" "$runner_provisioner_public_key" <<'PY'
+import datetime
+import gzip
+import hashlib
+import io
+import json
+import os
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tarfile
+import urllib.error
+import urllib.parse
+import urllib.request
+import zlib
+
+(version, commit, expected_etag, model_source, llama_source, identity_path,
+ identity_signature_path, approval_path, runner_name, run_id, run_attempt,
+ workflow_sha, scratch, metadata_path, provisioner_key_id, identity_namespace,
+ provisioner_public_key) = sys.argv[1:]
+authority = "https://models.s46.dev/release-authority/v1"
+repository = "sovereign46/api"
+tag = "gateway-v" + version
+release_id = "sha256-" + hashlib.sha256(
+    b"s46/release-authority-id/v1\x00" + repository.encode("ascii") + b"\x00" + tag.encode("ascii")
+).hexdigest()
+model_expected = {
+    "name": "Devstral-Small-2-24B-Instruct-2512-Q4_K_M.gguf",
+    "sha256": "d14ba9edee1bb4c4996a726deb81e49ae81800a3216f0774634238c380aee496",
+    "size": 14334446752,
+}
+llama_expected = {
+    "name": "llama-b9270-bin-macos-arm64.tar.gz",
+    "sha256": "1a41b5bb3585a79ce90535b2c61671eae60a032ddb2b4992a62eb0d221f9b2bb",
+    "size": 8488521,
+    "server_sha256": "fc05cc348584b01226d1a95bc2282978193d009a02b16d739ff17f9b332b1cda",
+    "server_size": 8023664,
+    "inventory_sha256": "5188ea71039a80e56a3026fa4c7a823e6b550887a50475fe9c45001ee436c167",
+}
+gateway_expected = {
+    "archive_name": f"s46-gateway_{version}_darwin_arm64.tar.gz",
+    "archive_sha256": "634bfae827699d053fcd2df4c05a976ce6f6aeb04910f3aedee539eee6615779",
+    "archive_size": 4614905,
+    "binary_sha256": "dfe2140392f9a14c51f3e9d9c4b0908717a20dfe876e87703495cd304a4697d5",
+    "binary_size": 12757074,
+    "receipt_sha256": "d03c39643ed23d1a0230ab60b0b4fa51ec932b0a5a79e672388c1b4b955907e0",
+    "receipt_size": 1743,
+    "image_name": f"s46-api_{version}_linux_amd64.docker.tar",
+    "image_sha256": "cd9cba5c650fce5885b8c71c36455561ef64a07bb57b29d5500cc2dd4b13dbd3",
+    "image_size": 10923520,
+    "build_run_id": "40238662906",
+}
+sha256_pattern = re.compile(r"[0-9a-f]{64}")
+flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+stable_fields = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns", "st_nlink")
+
+
+def canonical(value):
+    text = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"), sort_keys=True)
+    text = text.replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
+    text = text.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+    return text.encode("utf-8") + b"\n"
+
+
+def canonical_authority_record(value):
+    text = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+    text = text.replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
+    text = text.replace("\u2028", "\\u2028").replace("\u2029", "\\u2029")
+    return text.encode("utf-8") + b"\n"
+
+
+def authority_record_etag(value):
+    return '"sha256:' + hashlib.sha256(
+        b"s46/release-authority-record/v1\x00" + canonical_authority_record(value)
+    ).hexdigest() + '"'
+
+
+def write_all(descriptor, body):
+    view = memoryview(body)
+    while view:
+        count = os.write(descriptor, view)
+        if count <= 0:
+            raise SystemExit("short write while staging qualification input")
+        view = view[count:]
+
+
+def stable_read(path, maximum, description, exact_mode=None, immutable=False):
+    if not os.path.isabs(path) or any(character in path for character in "\r\n\t"):
+        raise SystemExit(f"{description} path is not canonical and absolute")
+    before = os.lstat(path)
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size <= 0 or before.st_size > maximum:
+        raise SystemExit(f"{description} is not one bounded singly linked regular file")
+    if before.st_uid != os.geteuid():
+        raise SystemExit(f"{description} is not owned by the runner user")
+    mode = stat.S_IMODE(before.st_mode)
+    if exact_mode is not None and mode != exact_mode:
+        raise SystemExit(f"{description} mode must be {exact_mode:04o}")
+    if exact_mode is None and mode & 0o022:
+        raise SystemExit(f"{description} is group/world writable")
+    if immutable and hasattr(stat, "UF_IMMUTABLE") and not before.st_flags & stat.UF_IMMUTABLE:
+        raise SystemExit(f"{description} lacks the user immutable flag")
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        identity = tuple(getattr(before, field) for field in stable_fields)
+        if tuple(getattr(opened, field) for field in stable_fields) != identity:
+            raise SystemExit(f"{description} changed while opening")
+        body = bytearray()
+        while True:
+            chunk = os.read(descriptor, min(1024 * 1024, maximum + 1 - len(body)))
+            if not chunk:
+                break
+            body.extend(chunk)
+            if len(body) > maximum:
+                raise SystemExit(f"{description} exceeds its size bound")
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    current = os.lstat(path)
+    if tuple(getattr(after, field) for field in stable_fields) != identity or tuple(getattr(current, field) for field in stable_fields) != identity:
+        raise SystemExit(f"{description} changed while being read")
+    if len(body) != before.st_size:
+        raise SystemExit(f"{description} changed size while being read")
+    return bytes(body), before
+
+
+def load_control(path, description, immutable=False):
+    raw, _ = stable_read(path, 1 << 20, description, exact_mode=0o400, immutable=immutable)
+    try:
+        value = json.loads(raw.decode("utf-8", "strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise SystemExit(f"invalid {description} JSON: {error}")
+    if raw != canonical(value):
+        raise SystemExit(f"{description} is not canonical JSON")
+    return value, raw
+
+
+identity, identity_raw = load_control(identity_path, "runner identity", immutable=True)
+identity_fields = {
+    "schema", "runId", "runAttempt", "name", "operatingSystem",
+    "operatingSystemMajor", "architecture", "labels", "actionsRunner",
+    "ephemeral", "destroyAfterRun", "workflowSha", "hostIsolation",
+}
+if set(identity) != identity_fields or identity.get("schema") != "https://s46.dev/schemas/gateway-qualification-runner-identity/v1":
+    raise SystemExit("runner identity schema or fields are not exact")
+labels = identity.get("labels")
+required_labels = {"self-hosted", "macOS", "ARM64", "s46-airplane-qualification"}
+name = identity.get("name")
+if (identity.get("runId") != run_id or identity.get("runAttempt") != run_attempt or
+        name != runner_name or not isinstance(name, str) or name != name.strip() or
+        identity.get("operatingSystem") != "macOS" or identity.get("operatingSystemMajor") != 26 or
+        identity.get("architecture") != "arm64" or identity.get("workflowSha") != workflow_sha or
+        not isinstance(labels, list) or not 1 <= len(labels) <= 16 or labels != sorted(labels) or
+        len(labels) != len(set(labels)) or not required_labels.issubset(labels) or
+        identity.get("ephemeral") is not True or identity.get("destroyAfterRun") is not True):
+    raise SystemExit("runner identity does not bind the protected ephemeral macOS26/arm64 workflow run")
+if not all(isinstance(label, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", label) for label in labels):
+    raise SystemExit("runner identity labels are invalid")
+actions_runner = identity.get("actionsRunner")
+if not isinstance(actions_runner, dict) or set(actions_runner) != {"version", "archiveSha256"}:
+    raise SystemExit("Actions runner identity fields are not exact")
+if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", actions_runner.get("version", "")):
+    raise SystemExit("runner identity has an invalid Actions runner version")
+if not sha256_pattern.fullmatch(actions_runner.get("archiveSha256", "")):
+    raise SystemExit("runner identity has an invalid Actions runner archive digest")
+host_isolation = identity.get("hostIsolation")
+if (not isinstance(host_isolation, dict) or set(host_isolation) != {"type", "root", "profileSha256"} or
+        host_isolation.get("type") != "sandbox-exec" or host_isolation.get("root") != scratch or
+        not re.fullmatch(r"/[A-Za-z0-9._/-]+", host_isolation.get("root", "")) or
+        not sha256_pattern.fullmatch(host_isolation.get("profileSha256", ""))):
+    raise SystemExit("runner identity does not bind the exact sandbox root and profile")
+
+signature_raw, _ = stable_read(
+    identity_signature_path, 64 << 10, "runner identity signature", exact_mode=0o400, immutable=True,
+)
+try:
+    signature_text = signature_raw.decode("ascii", "strict")
+except UnicodeDecodeError as error:
+    raise SystemExit(f"runner identity signature is not ASCII: {error}")
+signature_lines = signature_text.splitlines()
+if ("\r" in signature_text or not signature_text.endswith("\n") or
+        len(signature_lines) < 3 or signature_lines[0] != "-----BEGIN SSH SIGNATURE-----" or
+        signature_lines[-1] != "-----END SSH SIGNATURE-----"):
+    raise SystemExit("runner identity signature is not one canonical armored SSHSIG")
+
+
+def create_control_file(name, body):
+    path = os.path.join(scratch, "control", name)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0), 0o400)
+    try:
+        write_all(descriptor, body)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    return path
+
+
+allowed_signers = create_control_file(
+    "runner-identity.allowed-signers",
+    f"{provisioner_key_id} {provisioner_public_key}\n".encode("ascii"),
+)
+staged_signature = create_control_file("runner-identity.sshsig", signature_raw)
+verification = subprocess.run(
+    [
+        "/usr/bin/ssh-keygen", "-Y", "verify", "-f", allowed_signers,
+        "-I", provisioner_key_id, "-n", identity_namespace, "-s", staged_signature,
+    ],
+    input=identity_raw,
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+    check=False,
+)
+if verification.returncode != 0:
+    raise SystemExit("runner identity SSHSIG verification failed")
+identity_signature = {
+    "keyId": provisioner_key_id,
+    "namespace": identity_namespace,
+    "sha256": hashlib.sha256(signature_raw).hexdigest(),
+    "sizeBytes": len(signature_raw),
+    "signature": signature_text,
+}
+
+approval_control, approval_control_raw = load_control(approval_path, "environment approval")
+if set(approval_control) != {"schema", "runId", "runAttempt", "environment", "approval", "policy", "sourceResponseSha256"}:
+    raise SystemExit("environment approval fields are not exact")
+if (approval_control.get("schema") != "s46.github-environment-approval.v1" or
+        approval_control.get("runId") != run_id or approval_control.get("runAttempt") != run_attempt or
+        approval_control.get("environment") != "airplane-qualification" or
+        not sha256_pattern.fullmatch(approval_control.get("sourceResponseSha256", ""))):
+    raise SystemExit("environment approval does not bind this run and its GitHub API response")
+normalized_approval = approval_control.get("approval")
+if not isinstance(normalized_approval, dict) or set(normalized_approval) != {"approver", "approverId", "runId", "runAttempt", "observedApprovedAt"}:
+    raise SystemExit("normalized environment approval fields are not exact")
+if (normalized_approval.get("approver") != "goncalossilva" or
+        not re.fullmatch(r"[1-9][0-9]*", normalized_approval.get("approverId", "")) or
+        normalized_approval.get("runId") != run_id or normalized_approval.get("runAttempt") != run_attempt or
+        not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", normalized_approval.get("observedApprovedAt", ""))):
+    raise SystemExit("environment approval observation is not Goncalo's exact run-bound approval")
+normalized_policy = approval_control.get("policy")
+expected_reviewer = {"login": "goncalossilva", "id": normalized_approval["approverId"], "type": "User"}
+if normalized_policy != {
+        "reviewers": [expected_reviewer],
+        "requiredReviewerCount": 1,
+        "preventSelfReview": True,
+        "adminsBypass": False,
+        "deploymentBranchPolicy": {"protectedBranches": True, "customBranchPolicies": False},
+}:
+    raise SystemExit("environment protection and branch policy is not exact")
+
+
+def inspect_source(path, expected, executable=False):
+    if os.path.basename(path) != expected["name"]:
+        raise SystemExit(f"input filename must be {expected['name']}")
+    before = os.lstat(path)
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise SystemExit(f"{expected['name']} must be a singly linked regular file")
+    mode = stat.S_IMODE(before.st_mode)
+    if mode & 0o7022 or (executable and not mode & 0o100):
+        raise SystemExit(f"{expected['name']} has unsafe mode")
+    if before.st_size != expected["size"]:
+        raise SystemExit(f"{expected['name']} size mismatch")
+    descriptor = os.open(path, flags)
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        opened = os.fstat(descriptor)
+        identity = tuple(getattr(before, field) for field in stable_fields)
+        if tuple(getattr(opened, field) for field in stable_fields) != identity:
+            raise SystemExit(f"{expected['name']} changed while opening")
+        while chunk := os.read(descriptor, 1024 * 1024):
+            total += len(chunk)
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    current = os.lstat(path)
+    if (total != expected["size"] or digest.hexdigest() != expected["sha256"] or
+            tuple(getattr(after, field) for field in stable_fields) != identity or
+            tuple(getattr(current, field) for field in stable_fields) != identity):
+        raise SystemExit(f"{expected['name']} changed or has the wrong SHA-256")
+    return identity
+
+
+def clone_or_copy(path, destination, expected, mode):
+    identity = inspect_source(path, expected)
+    cloned = subprocess.run(
+        ["/bin/cp", "-c", path, destination], env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+    ).returncode == 0
+    if not cloned:
+        descriptor = os.open(path, flags)
+        output = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0), mode)
+        try:
+            opened = os.fstat(descriptor)
+            if tuple(getattr(opened, field) for field in stable_fields) != identity:
+                raise SystemExit(f"{expected['name']} changed before stable copy")
+            while chunk := os.read(descriptor, 1024 * 1024):
+                view = memoryview(chunk)
+                while view:
+                    count = os.write(output, view)
+                    if count <= 0:
+                        raise SystemExit(f"short write staging {expected['name']}")
+                    view = view[count:]
+            os.fsync(output)
+        finally:
+            os.close(output)
+            os.close(descriptor)
+    os.chmod(destination, mode)
+    source_now = os.lstat(path)
+    if tuple(getattr(source_now, field) for field in stable_fields) != identity:
+        raise SystemExit(f"{expected['name']} changed during staging")
+    staged = os.lstat(destination)
+    if not stat.S_ISREG(staged.st_mode) or staged.st_nlink != 1 or staged.st_size != expected["size"] or stat.S_IMODE(staged.st_mode) != mode:
+        raise SystemExit(f"staged {expected['name']} identity is invalid")
+    digest = hashlib.sha256()
+    with open(destination, "rb", buffering=0) as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    if digest.hexdigest() != expected["sha256"]:
+        raise SystemExit(f"staged {expected['name']} SHA-256 mismatch")
+
+
+input_root = os.path.join(scratch, "input")
+model_destination = os.path.join(input_root, model_expected["name"])
+llama_archive_destination = os.path.join(scratch, "control", llama_expected["name"])
+clone_or_copy(model_source, model_destination, model_expected, 0o444)
+clone_or_copy(llama_source, llama_archive_destination, {
+    "name": llama_expected["name"], "sha256": llama_expected["sha256"], "size": llama_expected["size"]
+}, 0o400)
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, message, headers, new_url):
+        return None
+
+
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+
+
+def one_header(headers, name):
+    values = headers.get_all(name) or []
+    if len(values) != 1:
+        raise SystemExit(f"authority response did not provide exactly one {name}")
+    return values[0]
+
+
+def get(path, maximum, expected_cache, expected_type=None, expected_digest=None, expected_size=None):
+    if not path.startswith("/") or any(item in path for item in ("?", "#", "%", "//")):
+        raise SystemExit("unsafe authority path")
+    request = urllib.request.Request(
+        authority + path,
+        headers={"Accept-Encoding": "identity", "User-Agent": "s46-gateway-qualifier/1"},
+        method="GET",
+    )
+    try:
+        response = opener.open(request, timeout=60)
+    except (OSError, urllib.error.URLError) as error:
+        raise SystemExit(f"release authority request failed: {error}") from error
+    with response:
+        if response.status != 200 or one_header(response.headers, "Cache-Control") != expected_cache:
+            raise SystemExit("release authority returned the wrong status or cache policy")
+        if response.headers.get("Transfer-Encoding") is not None or response.headers.get("Content-Encoding") not in (None, "identity"):
+            raise SystemExit("release authority used unsupported transfer encoding")
+        raw_length = one_header(response.headers, "Content-Length")
+        if not re.fullmatch(r"[1-9][0-9]*", raw_length):
+            raise SystemExit("release authority Content-Length is not canonical")
+        length = int(raw_length)
+        if length > maximum or (expected_size is not None and length != expected_size):
+            raise SystemExit("release authority response size is wrong")
+        if expected_type is not None and one_header(response.headers, "Content-Type") != expected_type:
+            raise SystemExit("release authority response media type is wrong")
+        if expected_digest is not None:
+            if one_header(response.headers, "ETag") != f'"sha256:{expected_digest}"':
+                raise SystemExit("release authority asset ETag is wrong")
+            if one_header(response.headers, "X-Content-Type-Options") != "nosniff":
+                raise SystemExit("release authority asset lacks nosniff")
+        body = response.read(length + 1)
+        if len(body) != length or response.read(1):
+            raise SystemExit("release authority body length is wrong")
+    if expected_digest is not None and hashlib.sha256(body).hexdigest() != expected_digest:
+        raise SystemExit("release authority asset digest is wrong")
+    return body, response.headers
+
+
+record_raw, record_headers = get(f"/candidates/{release_id}", 1 << 20, "no-store", "application/json")
+if one_header(record_headers, "ETag") != expected_etag:
+    raise SystemExit("candidate ETag changed before qualification")
+computed_etag = '"sha256:' + hashlib.sha256(b"s46/release-authority-record/v1\x00" + record_raw).hexdigest() + '"'
+if computed_etag != expected_etag:
+    raise SystemExit("candidate ETag does not authenticate the exact canonical record bytes")
+try:
+    record = json.loads(record_raw.decode("utf-8", "strict"))
+except (UnicodeDecodeError, json.JSONDecodeError) as error:
+    raise SystemExit(f"invalid candidate record JSON: {error}")
+if list(record) != ["schema", "id", "state", "sequence", "previousETag", "source", "assets", "annotations"]:
+    raise SystemExit("candidate record fields or order are not canonical")
+if (record.get("schema") != "s46.release-authority.record.v1" or record.get("id") != release_id or
+        record.get("state") != "candidate" or not isinstance(record.get("sequence"), int) or
+        isinstance(record.get("sequence"), bool) or record["sequence"] != 2):
+    raise SystemExit("candidate is not the exact reviewed sequence-2 record")
+source = record.get("source")
+if not isinstance(source, dict) or list(source) != ["repository", "tag", "commit", "tagObject", "bundleSha256"]:
+    raise SystemExit("candidate source fields are not canonical")
+if (source.get("repository") != repository or source.get("tag") != tag or source.get("commit") != commit or
+        source.get("tagObject") != "" or not sha256_pattern.fullmatch(source.get("bundleSha256", ""))):
+    raise SystemExit("candidate source does not bind the requested repository, tag, and commit")
+assets = record.get("assets")
+if not isinstance(assets, list) or not 1 <= len(assets) <= 256:
+    raise SystemExit("candidate asset ledger is invalid")
+asset_by_name = {}
+previous_name = ""
+for asset in assets:
+    if not isinstance(asset, dict) or list(asset) != ["name", "sha256", "size", "mediaType", "role"]:
+        raise SystemExit("candidate asset fields are not canonical")
+    name = asset.get("name")
+    if not isinstance(name, str) or name <= previous_name or not sha256_pattern.fullmatch(asset.get("sha256", "")):
+        raise SystemExit("candidate assets are not strictly ordered exact identities")
+    if not isinstance(asset.get("size"), int) or isinstance(asset.get("size"), bool) or asset["size"] <= 0:
+        raise SystemExit("candidate asset size is invalid")
+    if not isinstance(asset.get("mediaType"), str) or not isinstance(asset.get("role"), str):
+        raise SystemExit("candidate asset type or role is invalid")
+    asset_by_name[name] = asset
+    previous_name = name
+
+publisher_annotations = record.get("annotations")
+if (not isinstance(publisher_annotations, list) or len(publisher_annotations) != 3 or
+        publisher_annotations[0] != {"name": "build-run-id", "value": gateway_expected["build_run_id"]} or
+        publisher_annotations[1] != {"name": "cas-probe", "value": "sequence-2"} or
+        not isinstance(publisher_annotations[2], dict) or
+        publisher_annotations[2].get("name") != "publisher-commit" or
+        set(publisher_annotations[2]) != {"name", "value"} or
+        not re.fullmatch(r"[0-9a-f]{40}", publisher_annotations[2].get("value", ""))):
+    raise SystemExit("candidate annotations are not the exact sequence-2 publication profile")
+publisher_commit = publisher_annotations[2]["value"]
+expected_assets = [
+    {
+        "name": "gateway-build-receipt.json",
+        "sha256": gateway_expected["receipt_sha256"],
+        "size": gateway_expected["receipt_size"],
+        "mediaType": "application/json",
+        "role": "build-receipt",
+    },
+    {
+        "name": gateway_expected["image_name"],
+        "sha256": gateway_expected["image_sha256"],
+        "size": gateway_expected["image_size"],
+        "mediaType": "application/x-tar",
+        "role": "api-image",
+    },
+    {
+        "name": gateway_expected["archive_name"],
+        "sha256": gateway_expected["archive_sha256"],
+        "size": gateway_expected["archive_size"],
+        "mediaType": "application/gzip",
+        "role": "gateway-archive",
+    },
+]
+expected_source = {
+    "repository": repository,
+    "tag": tag,
+    "commit": commit,
+    "tagObject": "",
+    "bundleSha256": gateway_expected["receipt_sha256"],
+}
+sequence_one = {
+    "schema": "s46.release-authority.record.v1",
+    "id": release_id,
+    "state": "candidate",
+    "sequence": 1,
+    "previousETag": "",
+    "source": expected_source,
+    "assets": expected_assets,
+    "annotations": [
+        {"name": "build-run-id", "value": gateway_expected["build_run_id"]},
+        {"name": "publisher-commit", "value": publisher_commit},
+    ],
+}
+sequence_two = {
+    **sequence_one,
+    "sequence": 2,
+    "previousETag": authority_record_etag(sequence_one),
+    "annotations": [
+        {"name": "build-run-id", "value": gateway_expected["build_run_id"]},
+        {"name": "cas-probe", "value": "sequence-2"},
+        {"name": "publisher-commit", "value": publisher_commit},
+    ],
+}
+expected_record_raw = canonical_authority_record(sequence_two)
+if (assets != expected_assets or source != expected_source or record.get("previousETag") != sequence_two["previousETag"] or
+        record_raw != expected_record_raw or authority_record_etag(sequence_two) != expected_etag):
+    raise SystemExit("candidate is not the byte-exact deterministic sequence-2 authority record")
+
+receipt_asset = asset_by_name.get("gateway-build-receipt.json")
+archive_asset = asset_by_name.get(gateway_expected["archive_name"])
+if receipt_asset is None or archive_asset is None:
+    raise SystemExit("candidate lacks the build receipt or Darwin/arm64 gateway archive")
+if (receipt_asset["mediaType"] != "application/json" or receipt_asset["role"] != "build-receipt" or
+        archive_asset["mediaType"] != "application/gzip" or archive_asset["role"] != "gateway-archive"):
+    raise SystemExit("candidate receipt or gateway archive has the wrong exact media type or role")
+if (receipt_asset["sha256"] != gateway_expected["receipt_sha256"] or
+        receipt_asset["size"] != gateway_expected["receipt_size"]):
+    raise SystemExit("candidate build receipt is not the reviewed 0.2.0 identity")
+if source["bundleSha256"] != receipt_asset["sha256"]:
+    raise SystemExit("candidate bundle identity does not bind the exact build receipt")
+if (archive_asset["sha256"] != gateway_expected["archive_sha256"] or
+        archive_asset["size"] != gateway_expected["archive_size"]):
+    raise SystemExit("candidate gateway archive metadata is not the reviewed 0.2.0 identity")
+
+receipt_raw, _ = get(
+    f"/candidates/{release_id}/assets/gateway-build-receipt.json", 1 << 20, "no-store",
+    receipt_asset["mediaType"], receipt_asset["sha256"], receipt_asset["size"],
+)
+archive_raw, _ = get(
+    f"/candidates/{release_id}/assets/{gateway_expected['archive_name']}", 128 << 20, "no-store",
+    archive_asset["mediaType"], archive_asset["sha256"], archive_asset["size"],
+)
+try:
+    receipt = json.loads(receipt_raw.decode("utf-8", "strict"))
+except (UnicodeDecodeError, json.JSONDecodeError) as error:
+    raise SystemExit(f"invalid build receipt JSON: {error}")
+if receipt_raw != canonical(receipt):
+    raise SystemExit("build receipt is not canonical JSON")
+if set(receipt) != {"schema", "repository", "commit", "sourceTree", "version", "createdAt", "sourceCheck", "builder", "build", "archives", "image"}:
+    raise SystemExit("build receipt fields are not exact")
+if (receipt.get("schema") != "https://s46.dev/schemas/gateway-build-receipt/v1" or
+        receipt.get("repository") != repository or receipt.get("commit") != commit or receipt.get("version") != version):
+    raise SystemExit("build receipt does not bind the requested candidate")
+builder = receipt.get("builder")
+if not isinstance(builder, dict) or builder.get("runId") != gateway_expected["build_run_id"]:
+    raise SystemExit("build receipt does not bind build run 40238662906")
+receipt_archives = receipt.get("archives")
+expected_archive = {
+    "os": "darwin", "architecture": "arm64", "name": gateway_expected["archive_name"],
+    "sha256": gateway_expected["archive_sha256"], "sizeBytes": gateway_expected["archive_size"],
+    "binarySha256": gateway_expected["binary_sha256"], "binarySizeBytes": gateway_expected["binary_size"],
+}
+if receipt_archives != [expected_archive]:
+    raise SystemExit("build receipt does not identify the exact reviewed archive and binary")
+
+
+def extract_gateway(raw, destination):
+    if len(raw) != gateway_expected["archive_size"] or raw[:10] != b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xff":
+        raise SystemExit("gateway archive gzip boundary is not canonical")
+    inflater = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    body = inflater.decompress(raw, (128 << 20) + 1)
+    if inflater.unconsumed_tail or len(body) > 128 << 20:
+        raise SystemExit("gateway archive expands beyond its bound")
+    body += inflater.flush((128 << 20) + 1 - len(body))
+    if not inflater.eof or inflater.unused_data or inflater.unconsumed_tail:
+        raise SystemExit("gateway archive is not one exact gzip stream")
+    with tarfile.open(fileobj=io.BytesIO(body), mode="r:") as archive:
+        members = archive.getmembers()
+        if len(members) != 1:
+            raise SystemExit("gateway archive must contain exactly one member")
+        member = members[0]
+        if (member.name != "s46-gateway" or not member.isreg() or member.linkname or member.pax_headers or
+                member.mode != 0o755 or member.uid != 0 or member.gid != 0 or member.size != gateway_expected["binary_size"]):
+            raise SystemExit("gateway archive member identity is invalid")
+        source_file = archive.extractfile(member)
+        binary = source_file.read(gateway_expected["binary_size"] + 1) if source_file is not None else b""
+    if len(binary) != gateway_expected["binary_size"] or hashlib.sha256(binary).hexdigest() != gateway_expected["binary_sha256"]:
+        raise SystemExit("gateway binary identity does not match the receipt")
+    descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0), 0o555)
+    try:
+        write_all(descriptor, binary)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def extract_llama(archive_path, root):
+    os.mkdir(root, 0o700)
+    seen = set()
+    total = 0
+    with tarfile.open(archive_path, mode="r:gz") as archive:
+        members = archive.getmembers()
+        if not 1 <= len(members) <= 256:
+            raise SystemExit("llama.cpp archive member count is invalid")
+        for member in members:
+            name = member.name.rstrip("/")
+            parts = name.split("/")
+            if not parts or parts[0] != "llama-b9270" or any(part in ("", ".", "..") for part in parts):
+                raise SystemExit("llama.cpp archive contains an unsafe path")
+            relative = "/".join(parts[1:])
+            if not relative:
+                if not member.isdir():
+                    raise SystemExit("llama.cpp archive root is not a directory")
+                continue
+            if relative in seen:
+                raise SystemExit("llama.cpp archive contains a duplicate path")
+            seen.add(relative)
+            destination = os.path.join(root, *parts[1:])
+            parent = os.path.dirname(destination)
+            os.makedirs(parent, mode=0o700, exist_ok=True)
+            if member.isdir():
+                os.makedirs(destination, mode=0o700, exist_ok=False)
+            elif member.isreg():
+                if member.size <= 0 or member.size > 64 << 20:
+                    raise SystemExit("llama.cpp archive file is outside its size bound")
+                total += member.size
+                if total > 128 << 20:
+                    raise SystemExit("llama.cpp archive expands beyond its total bound")
+                source_file = archive.extractfile(member)
+                if source_file is None:
+                    raise SystemExit("llama.cpp archive file is unreadable")
+                mode = 0o555 if member.mode & 0o111 else 0o444
+                descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0), mode)
+                written = 0
+                try:
+                    while chunk := source_file.read(1024 * 1024):
+                        written += len(chunk)
+                        if written > member.size:
+                            raise SystemExit("llama.cpp archive file grew during extraction")
+                        write_all(descriptor, chunk)
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                if written != member.size:
+                    raise SystemExit("llama.cpp archive file size is inconsistent")
+            elif member.issym():
+                target = member.linkname
+                if not target or os.path.basename(target) != target or target in (".", ".."):
+                    raise SystemExit("llama.cpp archive symlink is unsafe")
+                os.symlink(target, destination)
+            else:
+                raise SystemExit("llama.cpp archive contains a link or special file")
+    for base, directories, files in os.walk(root, topdown=False, followlinks=False):
+        for name in files:
+            path = os.path.join(base, name)
+            if not os.path.islink(path):
+                current = stat.S_IMODE(os.lstat(path).st_mode)
+                os.chmod(path, 0o555 if current & 0o111 else 0o444)
+        for name in directories:
+            path = os.path.join(base, name)
+            if not os.path.islink(path):
+                os.chmod(path, 0o555)
+    os.chmod(root, 0o555)
+
+    records = []
+    count = 0
+    for base, directories, files in os.walk(root, topdown=True, followlinks=False):
+        for name in directories + files:
+            path = os.path.join(base, name)
+            relative = os.path.relpath(path, root).replace(os.sep, "/")
+            info = os.lstat(path)
+            mode = stat.S_IMODE(info.st_mode)
+            if stat.S_ISLNK(info.st_mode):
+                records.append(f"symlink\t{relative}\t{os.readlink(path)}\n")
+            elif stat.S_ISDIR(info.st_mode):
+                if mode != 0o555:
+                    raise SystemExit("llama.cpp runtime directory is writable")
+                records.append(f"dir\t{relative}\t0555\n")
+            elif stat.S_ISREG(info.st_mode):
+                if mode not in (0o444, 0o555) or info.st_nlink != 1:
+                    raise SystemExit("llama.cpp runtime file mode or links are unsafe")
+                digest = hashlib.sha256()
+                with open(path, "rb", buffering=0) as source_file:
+                    while chunk := source_file.read(1024 * 1024):
+                        digest.update(chunk)
+                records.append(f"file\t{relative}\t{mode:04o}\t{info.st_size}\t{digest.hexdigest()}\n")
+            else:
+                raise SystemExit("llama.cpp runtime contains a special file")
+            count += 1
+    inventory = hashlib.sha256("".join(sorted(records)).encode()).hexdigest()
+    if inventory != llama_expected["inventory_sha256"]:
+        raise SystemExit(f"llama.cpp runtime inventory SHA-256 mismatch: {inventory}")
+    server = os.path.join(root, "llama-server")
+    info = os.lstat(server)
+    digest = hashlib.sha256()
+    with open(server, "rb", buffering=0) as source_file:
+        while chunk := source_file.read(1024 * 1024):
+            digest.update(chunk)
+    if info.st_size != llama_expected["server_size"] or digest.hexdigest() != llama_expected["server_sha256"]:
+        raise SystemExit("llama-server identity is wrong")
+    return count
+
+
+gateway_destination = os.path.join(input_root, "s46-gateway")
+extract_gateway(archive_raw, gateway_destination)
+llama_root = os.path.join(input_root, "llama-b9270")
+inventory_entries = extract_llama(llama_archive_destination, llama_root)
+os.chmod(input_root, 0o555)
+
+metadata = {
+    "releaseId": release_id,
+    "candidateEtag": expected_etag,
+    "candidateSequence": record["sequence"],
+    "recordSha256": hashlib.sha256(record_raw).hexdigest(),
+    "bundleSha256": source["bundleSha256"],
+    "receiptSha256": hashlib.sha256(receipt_raw).hexdigest(),
+    "archive": expected_archive,
+    "modelPath": model_destination,
+    "llamaPath": os.path.join(llama_root, "llama-server"),
+    "gatewayPath": gateway_destination,
+    "llamaInventoryEntries": inventory_entries,
+    "runnerIdentity": identity,
+    "runnerIdentitySha256": hashlib.sha256(identity_raw).hexdigest(),
+    "runnerIdentitySizeBytes": len(identity_raw),
+    "runnerIdentitySignature": identity_signature,
+    "hostIsolation": host_isolation,
+    "environmentApproval": normalized_approval,
+    "environmentApprovalSha256": hashlib.sha256(canonical(normalized_approval)).hexdigest(),
+    "environmentPolicy": normalized_policy,
+    "environmentSourceResponseSha256": approval_control["sourceResponseSha256"],
+}
+raw = canonical(metadata)
+descriptor = os.open(metadata_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0), 0o400)
+try:
+    write_all(descriptor, raw)
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+PY
+
+model_path=$scratch/input/$model_name
+llama_path=$scratch/input/llama-b9270/llama-server
+gateway_path=$scratch/input/s46-gateway
+sandbox_python=$(clean_python - <<'PY'
+import os, stat, sys
+path = os.path.realpath(sys.executable)
+info = os.lstat(path)
+if not path.startswith("/Library/Developer/CommandLineTools/"):
+    raise SystemExit("system Python is outside the reviewed CommandLineTools root")
+if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) & 0o022:
+    raise SystemExit("system Python has an unsafe identity")
+print(path)
+PY
+)
+profile=$scratch/control/qualification.sb
+cat > "$profile" <<PROFILE
+(version 1)
+(deny default)
+(allow process*)
+(deny process-fork)
+(allow signal (target self))
+(allow sysctl-read)
+(allow mach-lookup
+  (global-name "MTLCompilerService")
+  (global-name "gpumemd.source")
+  (global-name "CoreServices.coreservicesd")
+  (global-name "DiskArbitration"))
+(allow iokit-open
+  (iokit-user-client-class "AGXDeviceUserClient")
+  (iokit-user-client-class "IOFramebufferSharedUserClient")
+  (iokit-user-client-class "IOSurfaceRootUserClient")
+  (iokit-user-client-class "RootDomainUserClient"))
+(allow iokit-get-properties)
+(allow ipc-posix-shm*)
+(allow file-read*
+  (literal "/")
+  (literal "/Library")
+  (literal "/private")
+  (literal "/private/var")
+  (literal "/var")
+  (literal "/etc")
+  (subpath "/System")
+  (subpath "/usr")
+  (subpath "/bin")
+  (subpath "/sbin")
+  (subpath "/Library/Apple")
+  (subpath "/Library/Developer")
+  (subpath "/private/etc")
+  (subpath "/dev")
+  (subpath "$scratch/input")
+  (subpath "$scratch/output")
+  (subpath "$scratch/home")
+  (subpath "$scratch/tmp"))
+(allow file-write-data
+  (literal "/dev/dtracehelper")
+  (literal "/dev/null")
+  (literal "/dev/tty"))
+(allow file-write*
+  (subpath "$scratch/output")
+  (subpath "$scratch/home")
+  (subpath "$scratch/tmp"))
+(allow network-inbound (local ip "localhost:*"))
+(allow network-outbound (remote ip "localhost:*"))
+PROFILE
+/bin/chmod 0400 "$profile"
+/bin/chmod -RN "$scratch"
+clean_python - "$scratch" <<'PY'
+import os, stat, sys
+root = sys.argv[1]
+expected_children = {"control", "home", "input", "output", "tmp"}
+if set(os.listdir(root)) != expected_children:
+    raise SystemExit("qualification scratch root has an unexpected topology")
+for child_name in expected_children:
+    child = os.lstat(os.path.join(root, child_name))
+    expected_mode = 0o555 if child_name == "input" else 0o700
+    if (not stat.S_ISDIR(child.st_mode) or child.st_uid != os.geteuid() or
+            stat.S_IMODE(child.st_mode) != expected_mode):
+        raise SystemExit(f"qualification scratch directory identity is unsafe: {child_name}")
+for empty_name in ("home", "output", "tmp"):
+    if os.listdir(os.path.join(root, empty_name)):
+        raise SystemExit(f"qualification {empty_name} directory was not empty before sandbox entry")
+for base, directories, files in os.walk(root, topdown=True, followlinks=False):
+    for name in directories + files:
+        path = os.path.join(base, name)
+        info = os.lstat(path)
+        if (info.st_uid != os.geteuid() or
+                (not stat.S_ISLNK(info.st_mode) and stat.S_IMODE(info.st_mode) & 0o022)):
+            raise SystemExit(f"qualification scratch entry has unsafe ownership or mode: {path}")
+        if stat.S_ISREG(info.st_mode) and info.st_nlink != 1:
+            raise SystemExit(f"qualification scratch file is multiply linked: {path}")
+        if stat.S_ISLNK(info.st_mode):
+            target = os.readlink(path)
+            if not target or os.path.basename(target) != target or target in (".", ".."):
+                raise SystemExit(f"qualification scratch symlink target is unsafe: {path}")
+        if not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)):
+            raise SystemExit(f"qualification scratch contains a special file: {path}")
+root_info = os.lstat(root)
+if (not stat.S_ISDIR(root_info.st_mode) or root_info.st_uid != os.geteuid() or
+        stat.S_IMODE(root_info.st_mode) != 0o700):
+    raise SystemExit("qualification scratch root identity is unsafe")
+PY
+profile_sha256=$(sha256_file "$profile")
+expected_profile_sha256=$(clean_python - "$metadata" <<'PY'
+import json, sys
+with open(sys.argv[1], "rb") as source:
+    metadata = json.load(source)
+print(metadata["hostIsolation"]["profileSha256"])
+PY
+)
+[ "$profile_sha256" = "$expected_profile_sha256" ] || fail "signed runner identity does not bind the exact sandbox profile"
+
+sandbox_command=(
+  /usr/bin/sandbox-exec -f "$profile"
+  /usr/bin/env -i
+  "HOME=$scratch/home"
+  "TMPDIR=$scratch/tmp"
+  PATH=/usr/bin:/bin
+  LC_ALL=C
+  LANG=C
+  PYTHONDONTWRITEBYTECODE=1
+)
+cd "$scratch/input"
+
+# Prove the profile rather than treating proxy poisoning as isolation.
+"${sandbox_command[@]}" "$sandbox_python" -I -B - "$scratch/control/forbidden-write" <<'PY'
+import errno, os, sys
+try:
+    with open(sys.argv[1], "wb") as output:
+        output.write(b"forbidden")
+except PermissionError:
+    raise SystemExit(0)
+raise SystemExit("sandbox allowed a control-file write")
+PY
+[ ! -e "$scratch/control/forbidden-write" ] || fail "sandbox filesystem denial probe wrote a control file"
+
+"${sandbox_command[@]}" "$sandbox_python" -I -B - "$runner_identity" "$runner_identity_signature" "$environment_approval" <<'PY'
+import sys
+for path in sys.argv[1:]:
+    try:
+        open(path, "rb").read(1)
+    except PermissionError:
+        continue
+    raise SystemExit("sandbox could read a workflow or runner control")
+PY
+
+"${sandbox_command[@]}" "$sandbox_python" -I -B - <<'PY'
+import errno, socket
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.settimeout(2)
+try:
+    sock.connect(("1.1.1.1", 443))
+except OSError as error:
+    if error.errno in (errno.EPERM, errno.EACCES):
+        raise SystemExit(0)
+    raise SystemExit(f"external network probe failed for a non-policy reason: {error}")
+finally:
+    sock.close()
+raise SystemExit("sandbox allowed external network access")
+PY
+
+"${sandbox_command[@]}" "$sandbox_python" -I -B - <<'PY'
+import os
+try:
+    os.fork()
+except PermissionError:
+    raise SystemExit(0)
+raise SystemExit("sandbox allowed process creation")
+PY
+
+hostile_marker=${S46_HOSTILE_ENV_MARKER:-not-present}
+"${sandbox_command[@]}" "$sandbox_python" -I -B - "$hostile_marker" "$scratch/output/environment-check.json" <<'PY'
+import json, os, sys
+hostile, output = sys.argv[1:]
+for key in os.environ:
+    lowered = key.lower()
+    if (key.startswith("GITHUB_") or key.startswith("RUNNER_") or key.startswith("ACTIONS_") or
+            "token" in lowered or "secret" in lowered or "proxy" in lowered):
+        raise SystemExit(f"sandbox inherited hostile/control environment variable {key}")
+if hostile in os.environ.values():
+    raise SystemExit("sandbox inherited hostile environment data")
+with open(output, "x", encoding="utf-8") as destination:
+    json.dump(sorted(os.environ), destination, separators=(",", ":"))
+    destination.write("\n")
+PY
+
+version_output=$scratch/output/llama-version.txt
+"${sandbox_command[@]}" "$llama_path" --version >"$version_output" 2>&1
+[ "$(/usr/bin/head -n 1 "$version_output")" = "version: 9270 (7ea23ddf7)" ] || fail "llama-server version output is not pinned b9270"
+
+if /usr/bin/pgrep -x llama-server >/dev/null 2>&1 || /usr/bin/pgrep -x s46-gateway >/dev/null 2>&1; then
+  fail "ephemeral qualification runner has pre-existing llama-server or s46-gateway processes"
+fi
+
+IFS=$'\t' read -r llama_port gateway_port < <(clean_python - <<'PY'
+import socket
+listeners = []
+try:
+    for _ in range(2):
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        listeners.append(listener)
+    print(listeners[0].getsockname()[1], listeners[1].getsockname()[1], sep="\t")
+finally:
+    for listener in listeners:
+        listener.close()
+PY
+)
+[[ "$llama_port" =~ ^[1-9][0-9]*$ ]] && [[ "$gateway_port" =~ ^[1-9][0-9]*$ ]] || fail "could not allocate isolated loopback ports"
+
+llama_log=$scratch/output/llama-server.log
+gateway_log=$scratch/output/s46-gateway.log
+(
+  ulimit -c 0
+  ulimit -f 131072
+  exec "${sandbox_command[@]}" "$llama_path" \
+    --host 127.0.0.1 \
+    --port "$llama_port" \
+    --alias devstral-small-2:24b-instruct-2512-q4_K_M \
+    -m "$model_path" \
+    --ctx-size 65536 \
+    --n-predict 4096 \
+    --parallel 1 \
+    --flash-attn on \
+    --cache-type-k q8_0 \
+    --cache-type-v q8_0 \
+    --timeout 600 \
+    --n-gpu-layers 99 \
+    --jinja
+) >"$llama_log" 2>&1 &
+qualification_pid_llama=$!
+
+clean_python - "$llama_port" "$qualification_pid_llama" "$llama_log" <<'PY'
+import http.client, json, os, sys, time
+port, pid, log = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
+deadline = time.monotonic() + 600
+while time.monotonic() < deadline:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        raise SystemExit("llama-server exited before readiness: " + open(log, errors="replace").read()[-4096:])
+    try:
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        connection.request("GET", "/v1/models")
+        response = connection.getresponse()
+        raw = response.read(1 << 20)
+        connection.close()
+        body = json.loads(raw)
+        if response.status == 200 and any(item.get("id") == "devstral-small-2:24b-instruct-2512-q4_K_M" for item in body.get("data", [])):
+            raise SystemExit(0)
+    except (OSError, ValueError):
+        pass
+    time.sleep(1)
+raise SystemExit("timed out waiting for pinned llama-server")
+PY
+
+(
+  ulimit -c 0
+  ulimit -f 131072
+  exec "${sandbox_command[@]}" \
+    S46_ADDR="127.0.0.1:$gateway_port" \
+    S46_ENV=airplane \
+    S46_LOCAL_LLAMACPP_URL="http://127.0.0.1:$llama_port" \
+    S46_LOCAL_MODEL=devstral-small-2:24b-instruct-2512-q4_K_M \
+    S46_MODEL_REGISTRY_SYNC_INTERVAL=0 \
+    S46_AIRPLANE_CONTEXT=65536 \
+    S46_AIRPLANE_MAX_TOKENS=4096 \
+    S46_AIRPLANE_KEEP_ALIVE=10m \
+    "$gateway_path"
+) >"$gateway_log" 2>&1 &
+qualification_pid_gateway=$!
+
+clean_python - "$gateway_port" "$qualification_pid_gateway" "$gateway_log" <<'PY'
+import http.client, json, os, sys, time
+port, pid, log = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
+deadline = time.monotonic() + 60
+while time.monotonic() < deadline:
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        raise SystemExit("gateway exited before readiness: " + open(log, errors="replace").read()[-4096:])
+    try:
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        connection.request("GET", "/healthz")
+        response = connection.getresponse()
+        raw = response.read(1 << 20)
+        connection.close()
+        if response.status == 200 and json.loads(raw) == {"status": "ok"}:
+            raise SystemExit(0)
+    except (OSError, ValueError):
+        pass
+    time.sleep(0.5)
+raise SystemExit("timed out waiting for exact gateway binary")
+PY
+
+checks=$scratch/output/checks.json
+clean_python - "$gateway_port" "$checks" <<'PY'
+import hashlib
+import http.client
+import json
+import os
+import sys
+
+port, output = int(sys.argv[1]), sys.argv[2]
+base_model = "s46/devstral-small-2-24b"
+backend_model = "devstral-small-2:24b-instruct-2512-q4_K_M"
+maximum = 4 << 20
+
+
+def request(method, path, body=None, timeout=600):
+    encoded = None if body is None else json.dumps(body, separators=(",", ":")).encode()
+    headers = {} if encoded is None else {"Content-Type": "application/json", "Content-Length": str(len(encoded))}
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
+    connection.request(method, path, body=encoded, headers=headers)
+    response = connection.getresponse()
+    raw = response.read(maximum + 1)
+    connection.close()
+    if len(raw) > maximum:
+        raise SystemExit(f"{path} response exceeds its bound")
+    if response.status != 200:
+        raise SystemExit(f"{path} returned {response.status}: {raw[:1024]!r}")
+    try:
+        return json.loads(raw), hashlib.sha256(raw).hexdigest()
+    except json.JSONDecodeError as error:
+        raise SystemExit(f"{path} returned invalid JSON: {error}")
+
+
+health, health_digest = request("GET", "/healthz")
+if health != {"status": "ok"}:
+    raise SystemExit("gateway health response is not exact")
+models, models_digest = request("GET", "/v1/models")
+if set(models) != {"object", "data"} or models.get("object") != "list" or not isinstance(models.get("data"), list) or len(models["data"]) != 1:
+    raise SystemExit("gateway model discovery is not the exact airplane-only list")
+model = models["data"][0]
+metadata = model.get("metadata", {})
+if (model.get("id") != base_model or model.get("object") != "model" or model.get("owned_by") != "sovereign46" or
+        metadata.get("id") != base_model or metadata.get("backendModel") != backend_model or
+        metadata.get("contextWindow") != 65536 or metadata.get("maxOutputTokens") != 4096 or
+        metadata.get("capabilities") != ["chat", "code", "streaming", "tools"]):
+    raise SystemExit("gateway model discovery does not bind the exact local model")
+
+completion_nonce = "S46-GATEWAY-COMPLETION-46A7"
+completion, completion_digest = request("POST", "/v1/chat/completions", {
+    "model": base_model,
+    "messages": [
+        {"role": "system", "content": "Follow the requested output exactly."},
+        {"role": "user", "content": f"Reply with exactly {completion_nonce} and no other text."},
+    ],
+    "max_tokens": 48,
+    "temperature": 0,
+    "stream": False,
+})
+choices = completion.get("choices")
+if not isinstance(choices, list) or len(choices) != 1:
+    raise SystemExit("completion did not return exactly one choice")
+content = choices[0].get("message", {}).get("content")
+if content != completion_nonce or choices[0].get("finish_reason") != "stop":
+    raise SystemExit("completion did not return the exact requested local-model output")
+
+argument_key = "qualification-key-9f31"
+tool_request = {
+    "model": base_model,
+    "messages": [{
+        "role": "user",
+        "content": f"Call qualification_lookup with key {argument_key}. After the tool responds, output exactly the marker returned by the tool and no other text.",
+    }],
+    "tools": [{
+        "type": "function",
+        "function": {
+            "name": "qualification_lookup",
+            "description": "Look up a server-generated qualification marker. The tool result contains the marker; after receiving it, reply with exactly that marker.",
+            "parameters": {
+                "type": "object",
+                "properties": {"key": {"type": "string"}},
+                "required": ["key"],
+                "additionalProperties": False,
+            },
+        },
+    }],
+    "tool_choice": {"type": "function", "function": {"name": "qualification_lookup"}},
+    "max_tokens": 128,
+    "temperature": 0,
+    "stream": False,
+}
+tool_response, tool_digest = request("POST", "/v1/chat/completions", tool_request)
+choices = tool_response.get("choices")
+if not isinstance(choices, list) or len(choices) != 1 or choices[0].get("finish_reason") != "tool_calls":
+    raise SystemExit("model did not finish with one tool call")
+assistant = choices[0].get("message")
+calls = assistant.get("tool_calls") if isinstance(assistant, dict) else None
+if not isinstance(calls, list) or len(calls) != 1:
+    raise SystemExit("model did not emit exactly one tool call")
+call = calls[0]
+function = call.get("function", {})
+expected_arguments = json.dumps({"key": argument_key}, separators=(",", ":"), sort_keys=True)
+try:
+    arguments = json.loads(function.get("arguments", ""))
+except json.JSONDecodeError as error:
+    raise SystemExit(f"tool arguments are invalid JSON: {error}")
+if (call.get("type") != "function" or not isinstance(call.get("id"), str) or not call["id"] or
+        function.get("name") != "qualification_lookup" or function.get("arguments") != expected_arguments or
+        arguments != {"key": argument_key}):
+    raise SystemExit("model tool call name or arguments are not exact")
+
+continuation_nonce = "S46-GATEWAY-CONTINUATION-72C1"
+continuation, continuation_digest = request("POST", "/v1/chat/completions", {
+    "model": base_model,
+    "messages": [
+        tool_request["messages"][0],
+        {"role": "assistant", "content": assistant.get("content"), "tool_calls": calls},
+        {"role": "tool", "tool_call_id": call["id"], "content": json.dumps({"marker": continuation_nonce}, separators=(",", ":"), sort_keys=True)},
+    ],
+    "tools": tool_request["tools"],
+    "tool_choice": "none",
+    "max_tokens": 64,
+    "temperature": 0,
+    "stream": False,
+})
+choices = continuation.get("choices")
+if not isinstance(choices, list) or len(choices) != 1:
+    raise SystemExit("tool continuation did not return exactly one choice")
+continued = choices[0].get("message", {}).get("content")
+if continued != continuation_nonce or choices[0].get("finish_reason") != "stop":
+    raise SystemExit("model did not return the exact requested tool-continuation output")
+
+result = {
+    "schema": "s46.gateway-qualification-checks.v1",
+    "health": {"passed": True, "responseSha256": health_digest},
+    "models": {"passed": True, "responseSha256": models_digest},
+    "completion": {"passed": True, "responseSha256": completion_digest},
+    "toolExecution": {"passed": True, "responseSha256": tool_digest},
+    "continuation": {"passed": True, "responseSha256": continuation_digest},
+}
+raw = (json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n").encode()
+descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0), 0o600)
+try:
+    view = memoryview(raw)
+    while view:
+        count = os.write(descriptor, view)
+        if count <= 0:
+            raise SystemExit("short write creating qualification checks")
+        view = view[count:]
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+PY
+
+stop_pid "$qualification_pid_gateway"
+qualification_pid_gateway=
+stop_pid "$qualification_pid_llama"
+qualification_pid_llama=
+
+if /usr/bin/pgrep -x llama-server >/dev/null 2>&1 || /usr/bin/pgrep -x s46-gateway >/dev/null 2>&1; then
+  fail "qualification left a llama-server or s46-gateway survivor"
+fi
+clean_python - "$llama_port" "$gateway_port" <<'PY'
+import socket, sys
+for raw in sys.argv[1:]:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(1)
+    try:
+        if sock.connect_ex(("127.0.0.1", int(raw))) == 0:
+            raise SystemExit(f"qualification port {raw} still accepts connections")
+    finally:
+        sock.close()
+PY
+
+[ "$(sha256_file "$scratch/input/s46-gateway")" = "$gateway_binary_sha256" ] || fail "gateway binary changed during qualification"
+[ "$(sha256_file "$scratch/input/llama-b9270/llama-server")" = "$llama_server_sha256" ] || fail "llama-server changed during qualification"
+[ "$(/usr/bin/stat -f '%z' "$scratch/input/$model_name")" = "$model_size" ] || fail "model changed size during qualification"
+[ "$(sha256_file "$scratch/input/$model_name")" = "$model_sha256" ] || fail "model changed SHA-256 during qualification"
+[ "$(/usr/bin/stat -f '%z' "$llama_log")" -le 67108864 ] || fail "llama-server log exceeded its bound"
+[ "$(/usr/bin/stat -f '%z' "$gateway_log")" -le 67108864 ] || fail "gateway log exceeded its bound"
+
+staged_evidence=$scratch/output/$execution_name
+clean_python - "$metadata" "$checks" "$profile_sha256" "$source_commit" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$RUNNER_NAME" "$staged_evidence" <<'PY'
+import json, os, re, sys
+metadata_path, checks_path, profile_sha256, source_commit, workflow_sha, run_id, run_attempt, runner_name, output = sys.argv[1:]
+with open(metadata_path, "rb") as source:
+    metadata_raw = source.read()
+with open(checks_path, "rb") as source:
+    checks_raw = source.read()
+metadata = json.loads(metadata_raw)
+checks = json.loads(checks_raw)
+canonical = lambda value: (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+if metadata_raw != canonical(metadata) or checks_raw != canonical(checks):
+    raise SystemExit("qualification intermediate evidence is not canonical")
+execution_checks = {
+    "health": {"passed": True, "responseSha256": checks.get("health", {}).get("responseSha256")},
+    "models": {"passed": True, "responseSha256": checks.get("models", {}).get("responseSha256")},
+    "completion": {"passed": True, "responseSha256": checks.get("completion", {}).get("responseSha256")},
+    "toolExecution": {"passed": True, "responseSha256": checks.get("toolExecution", {}).get("responseSha256")},
+    "continuation": {"passed": True, "responseSha256": checks.get("continuation", {}).get("responseSha256")},
+}
+if checks != {"schema": "s46.gateway-qualification-checks.v1", **execution_checks}:
+    raise SystemExit("qualification checks are incomplete")
+for item in ("health", "models", "completion", "toolExecution", "continuation"):
+    if not re.fullmatch(r"[0-9a-f]{64}", checks[item]["responseSha256"]):
+        raise SystemExit("qualification response digest is invalid")
+archive = metadata["archive"]
+evidence = {
+    "schema": "https://s46.dev/schemas/gateway-native-execution/v1",
+    "repository": "sovereign46/api",
+    "commit": source_commit,
+    "version": "0.2.0",
+    "platform": {"os": "darwin", "architecture": "arm64", "operatingSystem": "macOS", "operatingSystemMajor": 26},
+    "capabilities": ["airplane"],
+    "archive": archive,
+    "binary": {"name": "s46-gateway", "sha256": archive["binarySha256"], "sizeBytes": archive["binarySizeBytes"]},
+    "model": {
+        "id": "s46/devstral-small-2-24b",
+        "backendModel": "devstral-small-2:24b-instruct-2512-q4_K_M",
+        "name": "Devstral-Small-2-24B-Instruct-2512-Q4_K_M.gguf",
+        "sha256": "d14ba9edee1bb4c4996a726deb81e49ae81800a3216f0774634238c380aee496",
+        "sizeBytes": 14334446752,
+    },
+    "llamaCpp": {
+        "repository": "ggml-org/llama.cpp",
+        "version": "b9270",
+        "archive": {"name": "llama-b9270-bin-macos-arm64.tar.gz", "sha256": "1a41b5bb3585a79ce90535b2c61671eae60a032ddb2b4992a62eb0d221f9b2bb", "sizeBytes": 8488521},
+        "server": {"name": "llama-server", "sha256": "fc05cc348584b01226d1a95bc2282978193d009a02b16d739ff17f9b332b1cda", "sizeBytes": 8023664, "versionOutput": "version: 9270 (7ea23ddf7)"},
+        "inventory": {"schema": "s46.llamacpp-runtime-inventory.v1", "sha256": "5188ea71039a80e56a3026fa4c7a823e6b550887a50475fe9c45001ee436c167", "entries": 52},
+    },
+    "workflow": {
+        "repository": "sovereign46/cli",
+        "workflow": ".github/workflows/qualify-gateway.yml",
+        "ref": "refs/heads/main",
+        "sha": workflow_sha,
+        "runId": run_id,
+        "runAttempt": run_attempt,
+    },
+    "environment": {
+        "name": "airplane-qualification",
+        "approval": metadata["environmentApproval"],
+        "approvalSha256": metadata["environmentApprovalSha256"],
+        "policy": metadata["environmentPolicy"],
+        "sourceResponseSha256": metadata["environmentSourceResponseSha256"],
+    },
+    "runner": {
+        "identity": metadata["runnerIdentity"],
+        "identitySha256": metadata["runnerIdentitySha256"],
+        "identitySizeBytes": metadata["runnerIdentitySizeBytes"],
+        "identitySignature": metadata["runnerIdentitySignature"],
+    },
+    "isolation": {
+        "network": "deny-external-allow-loopback",
+        "filesystem": "deny-outside-isolated-root",
+        "profile": {"name": "s46-airplane-qualification", "sha256": profile_sha256},
+    },
+    "releaseAuthorityCandidate": {
+        "origin": "https://models.s46.dev/release-authority/v1",
+        "releaseId": metadata["releaseId"],
+        "etag": metadata["candidateEtag"],
+        "sequence": metadata["candidateSequence"],
+        "recordSha256": metadata["recordSha256"],
+        "bundleSha256": metadata["bundleSha256"],
+    },
+    "checks": execution_checks,
+    "result": "pass",
+}
+raw = canonical(evidence)
+descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0), 0o600)
+try:
+    view = memoryview(raw)
+    while view:
+        count = os.write(descriptor, view)
+        if count <= 0:
+            raise SystemExit("short write creating execution evidence")
+        view = view[count:]
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+PY
+
+
+# Create-only stable handoff to Actions. No authority or GitHub release mutation
+# exists in this wrapper.
+evidence_sha256=$(sha256_file "$staged_evidence")
+clean_python - "$staged_evidence" "$evidence_output" "$evidence_sha256" <<'PY'
+import hashlib, os, stat, sys
+source, destination, expected = sys.argv[1:]
+before = os.lstat(source)
+if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+    raise SystemExit("staged evidence is not a singly linked regular file")
+raw = open(source, "rb").read()
+if hashlib.sha256(raw).hexdigest() != expected:
+    raise SystemExit("staged evidence digest changed")
+descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0), 0o600)
+try:
+    view = memoryview(raw)
+    while view:
+        count = os.write(descriptor, view)
+        if count <= 0:
+            raise SystemExit("short write handing off execution evidence")
+        view = view[count:]
+    os.fsync(descriptor)
+finally:
+    os.close(descriptor)
+if open(destination, "rb").read() != raw:
+    raise SystemExit("evidence handoff changed bytes")
+PY
+
+printf 'qualified exact gateway candidate: %s\n' "$evidence_output"
