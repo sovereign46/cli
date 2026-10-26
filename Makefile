@@ -19,6 +19,7 @@ lint:
 
 test:
 	go test ./...
+	PYTHONDONTWRITEBYTECODE=1 python3 -m unittest scripts.release_authority_test scripts.cli_release_authority_test
 
 coverage:
 	mkdir -p .coverage

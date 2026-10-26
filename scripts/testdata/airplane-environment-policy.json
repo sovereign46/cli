@@ -1,0 +1,28 @@
+{
+  "can_admins_bypass": false,
+  "protection_rules": [
+    {
+      "id": 101,
+      "node_id": "TEST_REQUIRED_REVIEWERS",
+      "type": "required_reviewers",
+      "prevent_self_review": true,
+      "reviewers": [
+        {
+          "type": "User",
+          "reviewer": {
+            "login": "goncalossilva"
+          }
+        }
+      ]
+    },
+    {
+      "id": 102,
+      "node_id": "TEST_BRANCH_POLICY",
+      "type": "branch_policy"
+    }
+  ],
+  "deployment_branch_policy": {
+    "protected_branches": true,
+    "custom_branch_policies": false
+  }
+}

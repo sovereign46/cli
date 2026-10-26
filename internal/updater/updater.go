@@ -1,7 +1,10 @@
 package updater
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -22,6 +26,11 @@ import (
 const (
 	DefaultRepo                = "sovereign46/cli"
 	DefaultBrewFormula         = "s46"
+	DefaultReleaseAuthority    = "https://models.s46.dev/release-authority/v1"
+	releaseAuthoritySchema     = "s46.release-authority.record.v1"
+	releaseAuthorityIDDomain   = "s46/release-authority-id/v1\x00"
+	releaseAuthorityETagDomain = "s46/release-authority-record/v1\x00"
+	immutableCacheControl      = "public, max-age=31536000, immutable, no-transform"
 	defaultTimeout             = 10 * time.Second
 	maxReleaseResponseSize     = 1 << 20
 	maxReleaseErrorSnippetSize = 4 * 1024
@@ -66,14 +75,48 @@ type Release struct {
 }
 
 type githubRelease struct {
-	TagName string        `json:"tag_name"`
-	Name    string        `json:"name"`
-	HTMLURL string        `json:"html_url"`
-	Assets  []githubAsset `json:"assets"`
+	TagName    string `json:"tag_name"`
+	Draft      bool   `json:"draft"`
+	Prerelease bool   `json:"prerelease"`
+	Immutable  bool   `json:"immutable"`
 }
 
-type githubAsset struct {
-	Name string `json:"name"`
+type authorityReleaseCandidate struct {
+	tag        string
+	version    string
+	components [3]string
+}
+
+type authorityRecord struct {
+	Schema       string                `json:"schema"`
+	ID           string                `json:"id"`
+	State        string                `json:"state"`
+	Sequence     uint64                `json:"sequence"`
+	PreviousETag string                `json:"previousETag"`
+	Source       authoritySource       `json:"source"`
+	Assets       []authorityAsset      `json:"assets"`
+	Annotations  []authorityAnnotation `json:"annotations"`
+}
+
+type authoritySource struct {
+	Repository   string `json:"repository"`
+	Tag          string `json:"tag"`
+	Commit       string `json:"commit"`
+	TagObject    string `json:"tagObject"`
+	BundleSHA256 string `json:"bundleSha256"`
+}
+
+type authorityAsset struct {
+	Name      string `json:"name"`
+	SHA256    string `json:"sha256"`
+	Size      int64  `json:"size"`
+	MediaType string `json:"mediaType"`
+	Role      string `json:"role"`
+}
+
+type authorityAnnotation struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
 }
 
 func (u Updater) Check(ctx context.Context) (CheckResult, error) {
@@ -134,7 +177,7 @@ func (u Updater) UpdateInstruction(method InstallMethod) string {
 		formula := strs.FirstNonEmpty(strs.EnvValue(u.Env, "S46_HOMEBREW_FORMULA"), DefaultBrewFormula)
 		return fmt.Sprintf("brew upgrade %s", formula)
 	default:
-		return fmt.Sprintf("install the latest release from %s", githubReleasePageURL(strs.FirstNonEmpty(u.Repo, strs.EnvValue(u.Env, "S46_UPDATE_REPO"), DefaultRepo)))
+		return fmt.Sprintf("browse published releases at %s", githubReleasePageURL(strs.FirstNonEmpty(u.Repo, strs.EnvValue(u.Env, "S46_UPDATE_REPO"), DefaultRepo)))
 	}
 }
 
@@ -164,14 +207,10 @@ func CompareVersions(leftVersion string, rightVersion string) (int, bool) {
 	if !ok {
 		return 0, false
 	}
-	if left.major != right.major {
-		return left.major - right.major, true
-	}
-	if left.minor != right.minor {
-		return left.minor - right.minor, true
-	}
-	if left.patch != right.patch {
-		return left.patch - right.patch, true
+	for _, pair := range [][2]string{{left.major, right.major}, {left.minor, right.minor}, {left.patch, right.patch}} {
+		if comparison := compareNumericVersionComponent(pair[0], pair[1]); comparison != 0 {
+			return comparison, true
+		}
 	}
 	if left.prerelease == right.prerelease {
 		return 0, true
@@ -186,9 +225,9 @@ func CompareVersions(leftVersion string, rightVersion string) (int, bool) {
 }
 
 type parsedVersion struct {
-	major      int
-	minor      int
-	patch      int
+	major      string
+	minor      string
+	patch      string
 	prerelease string
 }
 
@@ -199,23 +238,40 @@ func parseVersion(version string) (parsedVersion, bool) {
 	if len(numbers) != 3 {
 		return parsedVersion{}, false
 	}
-	major, err := strconv.Atoi(numbers[0])
-	if err != nil {
-		return parsedVersion{}, false
+	for index, number := range numbers {
+		if number == "" {
+			return parsedVersion{}, false
+		}
+		for _, character := range number {
+			if character < '0' || character > '9' {
+				return parsedVersion{}, false
+			}
+		}
+		numbers[index] = strings.TrimLeft(number, "0")
+		if numbers[index] == "" {
+			numbers[index] = "0"
+		}
 	}
-	minor, err := strconv.Atoi(numbers[1])
-	if err != nil {
-		return parsedVersion{}, false
-	}
-	patch, err := strconv.Atoi(numbers[2])
-	if err != nil {
-		return parsedVersion{}, false
-	}
-	parsed := parsedVersion{major: major, minor: minor, patch: patch}
+	parsed := parsedVersion{major: numbers[0], minor: numbers[1], patch: numbers[2]}
 	if len(parts) == 2 {
 		parsed.prerelease = parts[1]
 	}
 	return parsed, true
+}
+
+func compareNumericVersionComponent(left, right string) int {
+	leftNumber, leftErr := strconv.Atoi(left)
+	rightNumber, rightErr := strconv.Atoi(right)
+	if leftErr == nil && rightErr == nil {
+		return leftNumber - rightNumber
+	}
+	if len(left) < len(right) {
+		return -1
+	}
+	if len(left) > len(right) {
+		return 1
+	}
+	return strings.Compare(left, right)
 }
 
 func normalizeVersion(version string) string {
@@ -232,10 +288,10 @@ func (u Updater) latestRelease(ctx context.Context) (Release, error) {
 	ctx, cancel := contextx.WithMaxTimeout(ctx, timeout)
 	defer cancel()
 
-	latestURL := u.latestReleaseURL()
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, latestURL, nil)
+	discoveryURL := u.latestReleaseURL()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, discoveryURL, nil)
 	if err != nil {
-		return Release{}, fmt.Errorf("build GitHub GET %s request: %w", latestURL, err)
+		return Release{}, fmt.Errorf("build GitHub GET %s request: %w", discoveryURL, err)
 	}
 	request.Header.Set("Accept", "application/vnd.github+json")
 	request.Header.Set("User-Agent", "s46/"+u.currentVersion())
@@ -248,7 +304,7 @@ func (u Updater) latestRelease(ctx context.Context) (Release, error) {
 		if ctxErr := contextx.Done(request.Context(), err); ctxErr != nil {
 			return Release{}, ctxErr
 		}
-		return Release{}, fmt.Errorf("GitHub GET %s: %w", latestURL, err)
+		return Release{}, fmt.Errorf("GitHub GET %s: %w", discoveryURL, err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusNotFound {
@@ -257,24 +313,312 @@ func (u Updater) latestRelease(ctx context.Context) (Release, error) {
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		detail, err := readReleaseSnippet(response.Body)
 		if err != nil {
-			return Release{}, fmt.Errorf("read GitHub GET %s error response: %w", latestURL, err)
+			return Release{}, fmt.Errorf("read GitHub GET %s error response: %w", discoveryURL, err)
 		}
 		if detail != "" {
-			return Release{}, fmt.Errorf("GitHub release check failed: %s: %s", response.Status, detail)
+			return Release{}, fmt.Errorf("GitHub release discovery failed: %s: %s", response.Status, detail)
 		}
-		return Release{}, fmt.Errorf("GitHub release check failed: %s", response.Status)
+		return Release{}, fmt.Errorf("GitHub release discovery failed: %s", response.Status)
 	}
 
-	var github githubRelease
-	if err := json.NewDecoder(io.LimitReader(response.Body, maxReleaseResponseSize)).Decode(&github); err != nil {
-		return Release{}, fmt.Errorf("decode GitHub GET %s response: %w", latestURL, err)
+	raw, err := io.ReadAll(io.LimitReader(response.Body, maxReleaseResponseSize+1))
+	if err != nil {
+		return Release{}, fmt.Errorf("read GitHub GET %s response: %w", discoveryURL, err)
 	}
-	version := normalizeVersion(strs.FirstNonEmpty(github.TagName, github.Name))
-	if version == "" {
-		return Release{}, fmt.Errorf("GitHub latest release did not include a version")
+	if len(raw) > maxReleaseResponseSize {
+		return Release{}, fmt.Errorf("GitHub GET %s response exceeds the size limit", discoveryURL)
 	}
-	assetName := selectReleaseAsset(github.Assets, version)
-	return Release{Version: version, TagName: github.TagName, URL: github.HTMLURL, AssetName: assetName}, nil
+	var releases []githubRelease
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	if err := decoder.Decode(&releases); err != nil {
+		return Release{}, fmt.Errorf("decode GitHub GET %s response: %w", discoveryURL, err)
+	}
+	if err := requireJSONEOF(decoder); err != nil {
+		return Release{}, fmt.Errorf("decode GitHub GET %s response: %w", discoveryURL, err)
+	}
+	candidates := authorityReleaseCandidates(releases)
+	if len(candidates) == 0 {
+		return Release{}, ErrNoRelease
+	}
+	repository := strs.FirstNonEmpty(u.Repo, strs.EnvValue(u.Env, "S46_UPDATE_REPO"), DefaultRepo)
+	for _, candidate := range candidates {
+		release, err := u.verifyAuthorityRelease(ctx, httpClient, repository, candidate.tag, candidate.version)
+		if err == nil {
+			return release, nil
+		}
+		if !errors.Is(err, ErrNoRelease) {
+			return Release{}, err
+		}
+	}
+	return Release{}, ErrNoRelease
+}
+
+func authorityReleaseCandidates(releases []githubRelease) []authorityReleaseCandidate {
+	candidates := make([]authorityReleaseCandidate, 0, len(releases))
+	seen := make(map[string]struct{}, len(releases))
+	for _, release := range releases {
+		if release.Draft || release.Prerelease || !release.Immutable {
+			continue
+		}
+		candidate, ok := parseAuthorityReleaseTag(release.TagName)
+		if !ok {
+			continue
+		}
+		if _, duplicate := seen[candidate.tag]; duplicate {
+			continue
+		}
+		seen[candidate.tag] = struct{}{}
+		candidates = append(candidates, candidate)
+	}
+	sort.Slice(candidates, func(left, right int) bool {
+		return compareAuthorityVersions(candidates[left], candidates[right]) > 0
+	})
+	return candidates
+}
+
+func parseAuthorityReleaseTag(tag string) (authorityReleaseCandidate, bool) {
+	if len(tag) < 2 || tag[0] != 'v' {
+		return authorityReleaseCandidate{}, false
+	}
+	parts := strings.Split(tag[1:], ".")
+	if len(parts) != 3 {
+		return authorityReleaseCandidate{}, false
+	}
+	var components [3]string
+	for index, part := range parts {
+		if part == "" || (len(part) > 1 && part[0] == '0') {
+			return authorityReleaseCandidate{}, false
+		}
+		for _, character := range part {
+			if character < '0' || character > '9' {
+				return authorityReleaseCandidate{}, false
+			}
+		}
+		components[index] = part
+	}
+	return authorityReleaseCandidate{tag: tag, version: tag[1:], components: components}, true
+}
+
+func compareAuthorityVersions(left, right authorityReleaseCandidate) int {
+	for index := range left.components {
+		if len(left.components[index]) < len(right.components[index]) {
+			return -1
+		}
+		if len(left.components[index]) > len(right.components[index]) {
+			return 1
+		}
+		if comparison := strings.Compare(left.components[index], right.components[index]); comparison != 0 {
+			return comparison
+		}
+	}
+	return 0
+}
+
+func (u Updater) verifyAuthorityRelease(ctx context.Context, client *http.Client, repository, tag, version string) (Release, error) {
+	identifier := authorityReleaseID(repository, tag)
+	base, err := u.authorityBaseURL()
+	if err != nil {
+		return Release{}, err
+	}
+	recordURL := base + "/releases/" + identifier
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, recordURL, nil)
+	if err != nil {
+		return Release{}, fmt.Errorf("build release authority GET %s request: %w", recordURL, err)
+	}
+	request.Header.Set("Accept-Encoding", "identity")
+	request.Header.Set("User-Agent", "s46/"+u.currentVersion())
+	authorityClient := *client
+	authorityClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	response, err := authorityClient.Do(request)
+	if err != nil {
+		if ctxErr := contextx.Done(request.Context(), err); ctxErr != nil {
+			return Release{}, ctxErr
+		}
+		return Release{}, fmt.Errorf("release authority GET %s: %w", recordURL, err)
+	}
+	defer response.Body.Close()
+	if response.Request == nil || response.Request.URL == nil || response.Request.URL.String() != recordURL {
+		return Release{}, errors.New("release authority returned a response from an unexpected final URL")
+	}
+	if response.StatusCode == http.StatusNotFound {
+		return Release{}, ErrNoRelease
+	}
+	if response.StatusCode != http.StatusOK {
+		return Release{}, fmt.Errorf("release authority check failed: %s", response.Status)
+	}
+	if !hasExactHeader(response.Header, "Content-Type", "application/json") ||
+		!hasExactHeader(response.Header, "Cache-Control", immutableCacheControl) ||
+		!hasExactHeader(response.Header, "Content-Length", strconv.FormatInt(response.ContentLength, 10)) ||
+		!hasExactHeader(response.Header, "X-Content-Type-Options", "nosniff") ||
+		!headerIsAbsent(response.Header, "Content-Encoding") ||
+		!hasOneHeader(response.Header, "ETag") || len(response.TransferEncoding) != 0 {
+		return Release{}, errors.New("release authority returned a noncanonical record response")
+	}
+	length, err := strconv.ParseInt(response.Header.Values("Content-Length")[0], 10, 64)
+	if err != nil || length <= 0 || length > maxReleaseResponseSize {
+		return Release{}, errors.New("release authority returned an invalid Content-Length")
+	}
+	raw, err := io.ReadAll(io.LimitReader(response.Body, maxReleaseResponseSize+1))
+	if err != nil || int64(len(raw)) != length {
+		return Release{}, errors.New("release authority record length changed while reading")
+	}
+	var record authorityRecord
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&record); err != nil {
+		return Release{}, fmt.Errorf("decode release authority record: %w", err)
+	}
+	if err := requireJSONEOF(decoder); err != nil {
+		return Release{}, fmt.Errorf("decode release authority record: %w", err)
+	}
+	if err := validateAuthorityRecord(record, repository, tag, version, identifier); err != nil {
+		return Release{}, err
+	}
+	canonical, err := json.Marshal(record)
+	if err != nil {
+		return Release{}, err
+	}
+	canonical = append(canonical, '\n')
+	if !bytes.Equal(raw, canonical) {
+		return Release{}, errors.New("release authority record is not canonical JSON")
+	}
+	etagDigest := sha256.Sum256(append([]byte(releaseAuthorityETagDomain), canonical...))
+	if response.Header.Values("ETag")[0] != `"sha256:`+hex.EncodeToString(etagDigest[:])+`"` {
+		return Release{}, errors.New("release authority record has the wrong exact strong ETag")
+	}
+	assetName := fmt.Sprintf("s46_%s_%s_%s.tar.gz", version, runtime.GOOS, runtime.GOARCH)
+	if _, ok := authorityAssetByName(record.Assets, assetName); !ok {
+		assetName = ""
+	}
+	return Release{Version: version, TagName: tag, URL: recordURL, AssetName: assetName}, nil
+}
+
+func validateAuthorityRecord(record authorityRecord, repository, tag, version, identifier string) error {
+	if record.Schema != releaseAuthoritySchema || record.ID != identifier || record.State != "published" || record.Sequence != 5 || record.Source.Repository != repository || record.Source.Tag != tag || record.Source.Commit == "" || record.Source.TagObject == "" || !isLowerHex(record.Source.BundleSHA256, 64) || !isStrongAuthorityETag(record.PreviousETag) {
+		return errors.New("release authority record has the wrong published source identity")
+	}
+	if !(isLowerHex(record.Source.Commit, 40) || isLowerHex(record.Source.Commit, 64)) || !(isLowerHex(record.Source.TagObject, 40) || isLowerHex(record.Source.TagObject, 64)) {
+		return errors.New("release authority record has an invalid Git source identity")
+	}
+	profiles := map[string][2]string{
+		"checksums.txt":          {"text/plain", "archive-checksums"},
+		"release-build.json":     {"application/json", "build-receipt"},
+		"release-build.json.sig": {"text/plain", "build-receipt-signature"},
+	}
+	for _, platform := range []string{"darwin_amd64", "darwin_arm64", "linux_amd64", "linux_arm64"} {
+		archive := fmt.Sprintf("s46_%s_%s.tar.gz", version, platform)
+		profiles[archive] = [2]string{"application/gzip", "cli-archive"}
+		profiles[archive+".qualification.json"] = [2]string{"application/json", "qualification"}
+		profiles[archive+".qualification.json.sig"] = [2]string{"text/plain", "qualification-signature"}
+	}
+	if len(record.Assets) != len(profiles) {
+		return errors.New("release authority record does not contain the exact 15-file release cohort")
+	}
+	names := make([]string, 0, len(record.Assets))
+	for _, asset := range record.Assets {
+		profile, ok := profiles[asset.Name]
+		if !ok || asset.MediaType != profile[0] || asset.Role != profile[1] || !isLowerHex(asset.SHA256, 64) || asset.Size <= 0 {
+			return fmt.Errorf("release authority asset profile is invalid for %q", asset.Name)
+		}
+		names = append(names, asset.Name)
+	}
+	if !sort.StringsAreSorted(names) {
+		return errors.New("release authority assets are not canonically sorted")
+	}
+	for index := 1; index < len(names); index++ {
+		if names[index-1] == names[index] {
+			return errors.New("release authority record has duplicate assets")
+		}
+	}
+	annotations := map[string]string{}
+	annotationNames := make([]string, 0, len(record.Annotations))
+	for _, annotation := range record.Annotations {
+		if annotation.Name == "" || annotation.Value == "" || annotations[annotation.Name] != "" {
+			return errors.New("release authority annotations are invalid")
+		}
+		annotations[annotation.Name] = annotation.Value
+		annotationNames = append(annotationNames, annotation.Name)
+	}
+	buildReceipt, receiptOK := authorityAssetByName(record.Assets, "release-build.json")
+	buildSignature, signatureOK := authorityAssetByName(record.Assets, "release-build.json.sig")
+	if len(annotations) != 4 || !sort.StringsAreSorted(annotationNames) || annotations["cas-probe"] != "sequence-2" ||
+		!(isLowerHex(annotations["source-tree"], 40) || isLowerHex(annotations["source-tree"], 64)) ||
+		!receiptOK || record.Source.BundleSHA256 != buildReceipt.SHA256 || annotations["build-receipt-sha256"] != buildReceipt.SHA256 ||
+		!signatureOK || annotations["build-signature-sha256"] != buildSignature.SHA256 {
+		return errors.New("release authority annotations do not bind the CLI lifecycle")
+	}
+	return nil
+}
+
+func authorityAssetByName(assets []authorityAsset, name string) (authorityAsset, bool) {
+	for _, asset := range assets {
+		if asset.Name == name {
+			return asset, true
+		}
+	}
+	return authorityAsset{}, false
+}
+
+func authorityReleaseID(repository, tag string) string {
+	digest := sha256.Sum256([]byte(releaseAuthorityIDDomain + repository + "\x00" + tag))
+	return "sha256-" + hex.EncodeToString(digest[:])
+}
+
+func hasExactHeader(header http.Header, name, value string) bool {
+	values := header.Values(name)
+	return len(values) == 1 && values[0] == value
+}
+
+func hasOneHeader(header http.Header, name string) bool {
+	return len(header.Values(name)) == 1
+}
+
+func headerIsAbsent(header http.Header, name string) bool {
+	return len(header.Values(name)) == 0
+}
+
+func isStrongAuthorityETag(value string) bool {
+	return len(value) == len(`"sha256:`)+64+1 && strings.HasPrefix(value, `"sha256:`) && strings.HasSuffix(value, `"`) && isLowerHex(value[len(`"sha256:`):len(value)-1], 64)
+}
+
+func isLowerHex(value string, length int) bool {
+	if len(value) != length {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			if character < 'a' || character > 'f' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func (u Updater) authorityBaseURL() (string, error) {
+	value := strs.FirstNonEmpty(strs.EnvValue(u.Env, "S46_RELEASE_AUTHORITY_URL"), DefaultReleaseAuthority)
+	if value == DefaultReleaseAuthority {
+		return value, nil
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "http" || (parsed.Hostname() != "127.0.0.1" && parsed.Hostname() != "::1") || parsed.Port() == "" || parsed.Path != "/release-authority/v1" || parsed.RawQuery != "" || parsed.Fragment != "" || strings.HasSuffix(value, "/") {
+		return "", errors.New("release authority URL must be production HTTPS or an explicit loopback test origin")
+	}
+	return value, nil
+}
+
+func requireJSONEOF(decoder *json.Decoder) error {
+	var extra json.RawMessage
+	err := decoder.Decode(&extra)
+	if errors.Is(err, io.EOF) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return errors.New("unexpected trailing JSON value")
 }
 
 func readReleaseSnippet(body io.Reader) (string, error) {
@@ -290,38 +634,21 @@ func isGitHubHost(host string) bool {
 	return host == "github.com" || strings.HasSuffix(host, ".github.com")
 }
 
-func selectReleaseAsset(assets []githubAsset, version string) string {
-	exact := fmt.Sprintf("s46_%s_%s_%s.tar.gz", version, runtime.GOOS, runtime.GOARCH)
-	for _, asset := range assets {
-		if asset.Name == exact {
-			return asset.Name
-		}
-	}
-	osArch := fmt.Sprintf("_%s_%s", runtime.GOOS, runtime.GOARCH)
-	versionPart := "_" + version + "_"
-	for _, asset := range assets {
-		if strings.HasPrefix(asset.Name, "s46_") && strings.Contains(asset.Name, versionPart) && strings.Contains(asset.Name, osArch) && strings.HasSuffix(asset.Name, ".tar.gz") {
-			return asset.Name
-		}
-	}
-	return ""
-}
-
 func (u Updater) latestReleaseURL() string {
 	if value := strs.EnvValue(u.Env, "S46_UPDATE_LATEST_URL"); value != "" {
 		return value
 	}
 	repo := strs.FirstNonEmpty(u.Repo, strs.EnvValue(u.Env, "S46_UPDATE_REPO"), DefaultRepo)
-	return githubLatestReleaseURL(repo)
+	return githubReleaseDiscoveryURL(repo)
 }
 
-func githubLatestReleaseURL(repo string) string {
+func githubReleaseDiscoveryURL(repo string) string {
 	parts := escapedRepoPath(repo)
-	return "https://api.github.com/repos/" + parts + "/releases/latest"
+	return "https://api.github.com/repos/" + parts + "/releases?per_page=100"
 }
 
 func githubReleasePageURL(repo string) string {
-	return "https://github.com/" + escapedRepoPath(repo) + "/releases/latest"
+	return "https://github.com/" + escapedRepoPath(repo) + "/releases"
 }
 
 func escapedRepoPath(repo string) string {

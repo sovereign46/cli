@@ -1605,7 +1605,12 @@ evidence = {
         "size": identity["binarySize"],
         "sourceMode": identity["binarySourceMode"],
     },
-    "build": identity["build"],
+    "build": {
+        **identity["build"],
+        "sourceTree": os.environ["S46_E2E_SOURCE_TREE"],
+        "buildReceiptSha256": os.environ["S46_E2E_BUILD_RECEIPT_SHA256"],
+        "buildSignatureSha256": os.environ["S46_E2E_BUILD_SIGNATURE_SHA256"],
+    },
     "qualification": {
         "expectedVersion": qualification["expectedVersion"],
         "expectedCommit": qualification["expectedCommit"],
@@ -1628,10 +1633,12 @@ evidence = {
             "environmentReviewers": os.environ["S46_E2E_ENVIRONMENT_REVIEWERS"].split(","),
             "environmentPreventSelfReview": os.environ["S46_E2E_ENVIRONMENT_PREVENT_SELF_REVIEW"] == "true",
             "environmentAdminsBypass": os.environ["S46_E2E_ENVIRONMENT_ADMINS_BYPASS"] == "true",
-            "releaseApiVersion": os.environ["S46_E2E_RELEASE_API_VERSION"],
-            "candidateReleaseId": os.environ["S46_E2E_CANDIDATE_RELEASE_ID"],
-            "candidateDraftAssetEtagCas": os.environ["S46_E2E_CANDIDATE_DRAFT_ASSET_ETAG_CAS"] == "true",
-            "candidateDraftStaleIfMatchStatus": int(os.environ["S46_E2E_CANDIDATE_DRAFT_STALE_IF_MATCH_STATUS"]),
+            "releaseAuthorityOrigin": os.environ["S46_E2E_RELEASE_AUTHORITY_ORIGIN"],
+            "releaseAuthorityId": os.environ["S46_E2E_RELEASE_AUTHORITY_ID"],
+            "candidateSequence": int(os.environ["S46_E2E_CANDIDATE_SEQUENCE"]),
+            "candidateEtag": os.environ["S46_E2E_CANDIDATE_ETAG"],
+            "candidateRecordSha256": os.environ["S46_E2E_CANDIDATE_RECORD_SHA256"],
+            "candidateStaleIfMatchStatus": int(os.environ["S46_E2E_CANDIDATE_STALE_IF_MATCH_STATUS"]),
             "environmentApprovalSha256": os.environ["S46_E2E_ENVIRONMENT_APPROVAL_SHA256"],
             "runnerIdentitySha256": os.environ["S46_E2E_RUNNER_IDENTITY_SHA256"],
             "isolationProfileSha256": os.environ["S46_E2E_ISOLATION_PROFILE_SHA256"],
@@ -2201,10 +2208,15 @@ qualification_environment_approver="${S46_E2E_ENVIRONMENT_APPROVER:-}"
 qualification_environment_reviewers="${S46_E2E_ENVIRONMENT_REVIEWERS:-}"
 qualification_environment_prevent_self_review="${S46_E2E_ENVIRONMENT_PREVENT_SELF_REVIEW:-}"
 qualification_environment_admins_bypass="${S46_E2E_ENVIRONMENT_ADMINS_BYPASS:-}"
-qualification_release_api_version="${S46_E2E_RELEASE_API_VERSION:-}"
-qualification_candidate_release_id="${S46_E2E_CANDIDATE_RELEASE_ID:-}"
-qualification_candidate_draft_asset_etag_cas="${S46_E2E_CANDIDATE_DRAFT_ASSET_ETAG_CAS:-}"
-qualification_candidate_draft_stale_if_match_status="${S46_E2E_CANDIDATE_DRAFT_STALE_IF_MATCH_STATUS:-}"
+qualification_source_tree="${S46_E2E_SOURCE_TREE:-}"
+qualification_build_receipt_sha256="${S46_E2E_BUILD_RECEIPT_SHA256:-}"
+qualification_build_signature_sha256="${S46_E2E_BUILD_SIGNATURE_SHA256:-}"
+qualification_release_authority_origin="${S46_E2E_RELEASE_AUTHORITY_ORIGIN:-}"
+qualification_release_authority_id="${S46_E2E_RELEASE_AUTHORITY_ID:-}"
+qualification_candidate_sequence="${S46_E2E_CANDIDATE_SEQUENCE:-}"
+qualification_candidate_etag="${S46_E2E_CANDIDATE_ETAG:-}"
+qualification_candidate_record_sha256="${S46_E2E_CANDIDATE_RECORD_SHA256:-}"
+qualification_candidate_stale_if_match_status="${S46_E2E_CANDIDATE_STALE_IF_MATCH_STATUS:-}"
 qualification_environment_approval_sha256="${S46_E2E_ENVIRONMENT_APPROVAL_SHA256:-}"
 qualification_runner_identity_sha256="${S46_E2E_RUNNER_IDENTITY_SHA256:-}"
 qualification_isolation_profile_sha256="${S46_E2E_ISOLATION_PROFILE_SHA256:-}"
@@ -2252,25 +2264,27 @@ if [ "$qualification" = "1" ]; then
   [ -n "$expected_version" ] || fail "S46_E2E_QUALIFICATION=1 requires S46_E2E_EXPECTED_VERSION"
   [ -n "$expected_commit" ] || fail "S46_E2E_QUALIFICATION=1 requires S46_E2E_EXPECTED_COMMIT"
   [ -n "$qualification_evidence" ] || fail "S46_E2E_QUALIFICATION=1 requires S46_E2E_QUALIFICATION_EVIDENCE"
-  for value in "$qualification_runner_os" "$qualification_runner_arch" "$qualification_os_version" "$qualification_runner_environment" "$qualification_runner_name" "$qualification_workflow_ref" "$qualification_workflow_sha" "$qualification_run_id" "$qualification_run_attempt" "$qualification_environment" "$qualification_environment_approver" "$qualification_environment_reviewers" "$qualification_environment_prevent_self_review" "$qualification_environment_admins_bypass" "$qualification_release_api_version" "$qualification_candidate_release_id" "$qualification_candidate_draft_asset_etag_cas" "$qualification_candidate_draft_stale_if_match_status"; do
-    [ -n "$value" ] || fail "qualification requires complete runner, OS, workflow, run, and environment identity"
+  for value in "$qualification_runner_os" "$qualification_runner_arch" "$qualification_os_version" "$qualification_runner_environment" "$qualification_runner_name" "$qualification_workflow_ref" "$qualification_workflow_sha" "$qualification_run_id" "$qualification_run_attempt" "$qualification_environment" "$qualification_environment_approver" "$qualification_environment_reviewers" "$qualification_environment_prevent_self_review" "$qualification_environment_admins_bypass" "$qualification_source_tree" "$qualification_build_receipt_sha256" "$qualification_build_signature_sha256" "$qualification_release_authority_origin" "$qualification_release_authority_id" "$qualification_candidate_sequence" "$qualification_candidate_etag" "$qualification_candidate_record_sha256" "$qualification_candidate_stale_if_match_status"; do
+    [ -n "$value" ] || fail "qualification requires complete runner, OS, workflow, run, environment, and authority identity"
   done
   [ "$qualification_environment_reviewers" = "goncalossilva" ] || fail "qualification requires the exact protected-environment reviewer set"
   [ "$qualification_environment_prevent_self_review" = "true" ] || fail "qualification environment must prevent self-review"
   [ "$qualification_environment_admins_bypass" = "false" ] || fail "qualification environment must prevent administrator bypass"
-  [ "$qualification_release_api_version" = "2022-11-28" ] || fail "qualification requires the approved GitHub release API version"
-  case "$qualification_candidate_release_id" in *[!0-9]*|"") fail "qualification requires the exact numeric candidate release id" ;; esac
-  [ "$qualification_candidate_draft_asset_etag_cas" = "true" ] || fail "qualification requires successful candidate draft asset-sensitive ETag CAS proof"
-  [ "$qualification_candidate_draft_stale_if_match_status" = "412" ] || fail "qualification requires stale candidate draft If-Match rejection"
+  [ "$qualification_release_authority_origin" = "https://models.s46.dev/release-authority/v1" ] || fail "qualification requires the exact production release authority"
+  [[ "$qualification_release_authority_id" =~ ^sha256-[0-9a-f]{64}$ ]] || fail "qualification requires the derived release authority id"
+  [ "$qualification_candidate_sequence" = "2" ] || fail "qualification requires the exact sequence-2 candidate"
+  [[ "$qualification_candidate_etag" =~ ^\"sha256:[0-9a-f]{64}\"$ ]] || fail "qualification requires the exact strong sequence-2 ETag"
+  [ "$qualification_candidate_stale_if_match_status" = "412" ] || fail "qualification requires empirical stale authority write rejection"
   case "$qualification_run_id:$qualification_run_attempt" in
     *[!0-9:]*|*:|:*) fail "qualification workflow run identity must be numeric" ;;
   esac
-  case "$qualification_environment_approval_sha256:$qualification_runner_identity_sha256:$qualification_isolation_profile_sha256" in
-    [0-9a-f][0-9a-f][0-9a-f][0-9a-f]*:[0-9a-f][0-9a-f][0-9a-f][0-9a-f]*:[0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
-    *) fail "qualification requires environment approval, runner identity, and isolation profile SHA-256 identities" ;;
+  case "$qualification_environment_approval_sha256:$qualification_runner_identity_sha256:$qualification_isolation_profile_sha256:$qualification_source_tree:$qualification_build_receipt_sha256:$qualification_build_signature_sha256:$qualification_candidate_record_sha256" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f]*:[0-9a-f][0-9a-f][0-9a-f][0-9a-f]*:[0-9a-f][0-9a-f][0-9a-f][0-9a-f]*:[0-9a-f][0-9a-f][0-9a-f][0-9a-f]*:[0-9a-f][0-9a-f][0-9a-f][0-9a-f]*:[0-9a-f][0-9a-f][0-9a-f][0-9a-f]*:[0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
+    *) fail "qualification requires source, build, authority, approval, runner, and isolation SHA-256 identities" ;;
   esac
-  case "$qualification_environment_approval_sha256$qualification_runner_identity_sha256$qualification_isolation_profile_sha256" in *[!0-9a-f]*) fail "qualification execution digests must be lowercase hexadecimal" ;; esac
-  [ "${#qualification_environment_approval_sha256}" -eq 64 ] && [ "${#qualification_runner_identity_sha256}" -eq 64 ] && [ "${#qualification_isolation_profile_sha256}" -eq 64 ] || fail "qualification execution digests must be SHA-256"
+  case "$qualification_environment_approval_sha256$qualification_runner_identity_sha256$qualification_isolation_profile_sha256$qualification_source_tree$qualification_build_receipt_sha256$qualification_build_signature_sha256$qualification_candidate_record_sha256" in *[!0-9a-f]*) fail "qualification execution digests must be lowercase hexadecimal" ;; esac
+  [ "${#qualification_environment_approval_sha256}" -eq 64 ] && [ "${#qualification_runner_identity_sha256}" -eq 64 ] && [ "${#qualification_isolation_profile_sha256}" -eq 64 ] && [ "${#qualification_build_receipt_sha256}" -eq 64 ] && [ "${#qualification_build_signature_sha256}" -eq 64 ] && [ "${#qualification_candidate_record_sha256}" -eq 64 ] || fail "qualification execution digests must be SHA-256"
+  case "${#qualification_source_tree}" in 40|64) ;; *) fail "qualification source tree must be a full object id" ;; esac
 fi
 if [ "$qualification" = "1" ] && [ "$qualification_scope" = "airplane" ]; then
   [ "$verify_candidate_only" = "0" ] || fail "airplane qualification cannot be combined with S46_E2E_VERIFY_CANDIDATE_ONLY=1"

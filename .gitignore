@@ -1,6 +1,8 @@
 # Build outputs
 /s46
 /dist/
+__pycache__/
+*.py[cod]
 
 # Local editor/system files
 .DS_Store
