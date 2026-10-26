@@ -537,7 +537,7 @@ func validateGatewayAuthorityResponse(response *http.Response, expectedURL strin
 		return errors.New("release authority response uses content encoding")
 	}
 	expected := map[string]string{
-		"Cache-Control":          "public, max-age=31536000, immutable",
+		"Cache-Control":          "public, max-age=31536000, immutable, no-transform",
 		"Content-Length":         fmt.Sprintf("%d", pin.ArchiveSize),
 		"Content-Type":           "application/gzip",
 		"ETag":                   `"sha256:` + pin.ArchiveSHA256 + `"`,

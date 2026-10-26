@@ -210,7 +210,7 @@ func TestLoadGatewayArchiveRequiresExactFinalAuthorityResponse(t *testing.T) {
 			StatusCode: http.StatusOK,
 			Status:     "200 OK",
 			Header: http.Header{
-				"Cache-Control":          {"public, max-age=31536000, immutable"},
+				"Cache-Control":          {"public, max-age=31536000, immutable, no-transform"},
 				"Content-Length":         {fmt.Sprintf("%d", length)},
 				"Content-Type":           {"application/gzip"},
 				"Etag":                   {`"sha256:` + pin.ArchiveSHA256 + `"`},
