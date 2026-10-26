@@ -27,11 +27,13 @@ import (
 )
 
 const (
-	llamaCppInventorySchema = "s46.llamacpp-runtime-inventory.v1"
-	gatewayReleaseSchema    = "s46.airplane-release.v1"
-	gatewayArchiveMaxBytes  = 256 * 1024 * 1024
-	gatewayBinaryMaxBytes   = 256 * 1024 * 1024
-	gatewayErrorSnippetSize = 4 * 1024
+	llamaCppInventorySchema          = "s46.llamacpp-runtime-inventory.v1"
+	gatewayReleaseSchema             = "s46.airplane-release.v2"
+	gatewayReleaseAuthorityOrigin    = "https://models.s46.dev/release-authority/v1"
+	gatewayReleaseIDDomainSeparation = "s46/release-authority-id/v1"
+	gatewayArchiveMaxBytes           = 256 * 1024 * 1024
+	gatewayBinaryMaxBytes            = 256 * 1024 * 1024
+	gatewayErrorSnippetSize          = 4 * 1024
 )
 
 var (
@@ -58,9 +60,11 @@ type airplaneModelPin struct {
 }
 
 type gatewayReleasePins struct {
-	Repository string                        `json:"repository"`
-	Version    string                        `json:"version"`
-	Platforms  map[string]gatewayPlatformPin `json:"platforms"`
+	AuthorityOrigin string                        `json:"authorityOrigin"`
+	Repository      string                        `json:"repository"`
+	Version         string                        `json:"version"`
+	ReleaseID       string                        `json:"releaseId"`
+	Platforms       map[string]gatewayPlatformPin `json:"platforms"`
 }
 
 type llamaCppReleasePins struct {
@@ -81,6 +85,7 @@ type llamaCppPlatformPin struct {
 }
 
 type gatewayPlatformPin struct {
+	ArchiveName   string `json:"archiveName"`
 	ArchiveSHA256 string `json:"archiveSha256"`
 	ArchiveSize   int64  `json:"archiveSize"`
 	BinarySHA256  string `json:"binarySha256"`
@@ -88,12 +93,13 @@ type gatewayPlatformPin struct {
 }
 
 type gatewayResolvedPin struct {
-	Repository string
-	Version    string
-	GOOS       string
-	GOARCH     string
-	AssetName  string
-	URL        string
+	AuthorityOrigin string
+	Repository      string
+	Version         string
+	Tag             string
+	ReleaseID       string
+	GOOS            string
+	GOARCH          string
 	gatewayPlatformPin
 }
 
@@ -151,12 +157,6 @@ func decodeGatewayReleasePin(raw []byte, goos, goarch string) (gatewayResolvedPi
 		return gatewayResolvedPin{}, fmt.Errorf("embedded llama.cpp pin for %s is invalid: %w", platform, err)
 	}
 	document := manifest.Gateway
-	if document.Repository != DefaultGatewayRepo {
-		return gatewayResolvedPin{}, errors.New("embedded gateway release repository is not approved")
-	}
-	if !gatewaySemver.MatchString(document.Version) {
-		return gatewayResolvedPin{}, errors.New("embedded gateway release version is not approved")
-	}
 	pin, ok := document.Platforms[platform]
 	if !ok {
 		return gatewayResolvedPin{}, fmt.Errorf("embedded gateway release has no approved pin for %s", platform)
@@ -164,19 +164,23 @@ func decodeGatewayReleasePin(raw []byte, goos, goarch string) (gatewayResolvedPi
 	if err := validateGatewayPlatformPin(pin); err != nil {
 		return gatewayResolvedPin{}, fmt.Errorf("embedded gateway release pin for %s is invalid: %w", platform, err)
 	}
+	resolved := gatewayResolvedPin{
+		AuthorityOrigin:    document.AuthorityOrigin,
+		Repository:         document.Repository,
+		Version:            document.Version,
+		Tag:                "gateway-v" + document.Version,
+		ReleaseID:          document.ReleaseID,
+		GOOS:               goos,
+		GOARCH:             goarch,
+		gatewayPlatformPin: pin,
+	}
+	if _, err := gatewayDownloadURL(resolved); err != nil {
+		return gatewayResolvedPin{}, fmt.Errorf("embedded gateway release pin for %s has an invalid asset URL: %w", platform, err)
+	}
 	if !manifest.Qualified {
 		return gatewayResolvedPin{}, errors.New("embedded airplane release closure is a candidate and has not passed qualification")
 	}
-	asset := fmt.Sprintf("%s_%s_%s_%s.tar.gz", GatewayBinaryName, document.Version, goos, goarch)
-	return gatewayResolvedPin{
-		Repository:         document.Repository,
-		Version:            document.Version,
-		GOOS:               goos,
-		GOARCH:             goarch,
-		AssetName:          asset,
-		URL:                "https://github.com/" + document.Repository + "/releases/download/v" + document.Version + "/" + asset,
-		gatewayPlatformPin: pin,
-	}, nil
+	return resolved, nil
 }
 
 func decodeAirplaneReleaseManifest(raw []byte) (airplaneReleaseManifest, error) {
@@ -248,6 +252,51 @@ func validLowerSHA256(value string) bool {
 	return err == nil
 }
 
+func gatewayReleaseID(repository, tag string) string {
+	digest := sha256.Sum256([]byte(gatewayReleaseIDDomainSeparation + "\x00" + repository + "\x00" + tag))
+	return "sha256-" + hex.EncodeToString(digest[:])
+}
+
+func validGatewayArchiveName(name string) bool {
+	return name != "" && name != "." && name != ".." && filepath.Base(name) == name &&
+		!strings.ContainsAny(name, `/\\`) && url.PathEscape(name) != ""
+}
+
+func gatewayDownloadURL(pin gatewayResolvedPin) (string, error) {
+	if pin.AuthorityOrigin != gatewayReleaseAuthorityOrigin || pin.Repository != DefaultGatewayRepo {
+		return "", errors.New("gateway release authority or repository is not approved")
+	}
+	if !gatewaySemver.MatchString(pin.Version) || pin.Tag != "gateway-v"+pin.Version {
+		return "", errors.New("gateway release tag is not canonical")
+	}
+	if pin.ReleaseID != gatewayReleaseID(pin.Repository, pin.Tag) {
+		return "", errors.New("gateway release ID does not match its repository and tag")
+	}
+	expectedName := fmt.Sprintf("%s_%s_%s_%s.tar.gz", GatewayBinaryName, pin.Version, pin.GOOS, pin.GOARCH)
+	if pin.ArchiveName != expectedName || !validGatewayArchiveName(pin.ArchiveName) {
+		return "", errors.New("gateway archive name is not canonical")
+	}
+	return gatewayAssetURL(pin.ReleaseID, pin.ArchiveName)
+}
+
+func gatewayAssetURL(releaseID, archiveName string) (string, error) {
+	if !strings.HasPrefix(releaseID, "sha256-") || !validLowerSHA256(strings.TrimPrefix(releaseID, "sha256-")) {
+		return "", errors.New("releaseId must be sha256- followed by exactly 64 lowercase hexadecimal characters")
+	}
+	if !validGatewayArchiveName(archiveName) {
+		return "", errors.New("archiveName must be a base filename")
+	}
+	value := gatewayReleaseAuthorityOrigin + "/releases/" + releaseID + "/assets/" + url.PathEscape(archiveName)
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return "", err
+	}
+	if err := validatePinnedGatewayURL(parsed, releaseID, archiveName); err != nil {
+		return "", err
+	}
+	return value, nil
+}
+
 func ensureGatewayJSONEOF(decoder *json.Decoder) error {
 	var extra any
 	if err := decoder.Decode(&extra); errors.Is(err, io.EOF) {
@@ -268,16 +317,17 @@ func (s Service) loadGatewayArchive(ctx context.Context, pin gatewayResolvedPin)
 	if strs.Truthy(strs.EnvValue(s.Env, "S46_OFFLINE")) {
 		return nil, fmt.Errorf("approved gateway archive is not cached at %s and network access is disabled", cachePath)
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, pin.URL, nil)
+	downloadURL, err := gatewayDownloadURL(pin)
+	if err != nil {
+		return nil, fmt.Errorf("pinned gateway release identity is invalid: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build gateway release request: %w", err)
 	}
-	request.Header.Set("Accept", "application/octet-stream")
+	request.Header.Set("Accept", "application/gzip")
 	request.Header.Set("Accept-Encoding", "identity")
 	request.Header.Set("User-Agent", "s46-airplane")
-	if token := strings.TrimSpace(strs.EnvValue(s.Env, "GITHUB_TOKEN")); token != "" {
-		request.Header.Set("Authorization", "Bearer "+token)
-	}
 	response, err := gatewayHTTPClient(s.httpClient()).Do(request)
 	if err != nil {
 		if ctxErr := contextx.Done(request.Context(), err); ctxErr != nil {
@@ -286,8 +336,11 @@ func (s Service) loadGatewayArchive(ctx context.Context, pin gatewayResolvedPin)
 		return nil, fmt.Errorf("download pinned gateway archive: %w", err)
 	}
 	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
+	if response.StatusCode != http.StatusOK {
 		return nil, gatewayStatusError("download pinned gateway archive", request, response)
+	}
+	if err := validateGatewayAuthorityResponse(response, downloadURL, pin); err != nil {
+		return nil, fmt.Errorf("download pinned gateway archive: %w", err)
 	}
 	archive, err := readAndVerifyGatewayBytes(response.Body, pin.ArchiveSHA256, pin.ArchiveSize, gatewayArchiveMaxBytes, "gateway archive")
 	if err != nil {
@@ -470,6 +523,35 @@ func (s Service) gatewayInstallDir() string {
 	return filepath.Join(dataDir(s.Env), "s46", "gateway", GatewayBinaryName)
 }
 
+func validateGatewayAuthorityResponse(response *http.Response, expectedURL string, pin gatewayResolvedPin) error {
+	if response.Request == nil || response.Request.URL == nil || response.Request.URL.String() != expectedURL {
+		return errors.New("release authority response URL is not the exact requested final asset")
+	}
+	if response.ContentLength != pin.ArchiveSize {
+		return fmt.Errorf("release authority Content-Length is %d, want %d", response.ContentLength, pin.ArchiveSize)
+	}
+	if len(response.TransferEncoding) != 0 || len(response.Trailer) != 0 {
+		return errors.New("release authority response uses unsupported transfer encoding or trailers")
+	}
+	if values := response.Header.Values("Content-Encoding"); len(values) != 0 {
+		return errors.New("release authority response uses content encoding")
+	}
+	expected := map[string]string{
+		"Cache-Control":          "public, max-age=31536000, immutable",
+		"Content-Length":         fmt.Sprintf("%d", pin.ArchiveSize),
+		"Content-Type":           "application/gzip",
+		"ETag":                   `"sha256:` + pin.ArchiveSHA256 + `"`,
+		"X-Content-Type-Options": "nosniff",
+	}
+	for name, want := range expected {
+		values := response.Header.Values(name)
+		if len(values) != 1 || values[0] != want {
+			return fmt.Errorf("release authority response must provide exactly one %s header equal to %q", name, want)
+		}
+	}
+	return nil
+}
+
 func gatewayStatusError(operation string, request *http.Request, response *http.Response) error {
 	raw, err := io.ReadAll(io.LimitReader(response.Body, gatewayErrorSnippetSize))
 	if err != nil {
@@ -484,24 +566,30 @@ func gatewayStatusError(operation string, request *http.Request, response *http.
 
 func gatewayHTTPClient(client *http.Client) *http.Client {
 	configured := *contextx.WithoutHTTPTimeout(client)
-	configured.CheckRedirect = func(request *http.Request, via []*http.Request) error {
-		if len(via) >= 10 {
-			return errors.New("stopped after 10 redirects")
-		}
-		return validatePinnedGatewayURL(request.URL)
+	configured.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return errors.New("gateway release redirects are not allowed")
 	}
 	return &configured
 }
 
-func validatePinnedGatewayURL(value *url.URL) error {
-	if value == nil || value.User != nil || value.Scheme != "https" {
-		return errors.New("gateway release URL must use https without user info")
+func validatePinnedGatewayURL(value *url.URL, releaseID, archiveName string) error {
+	if value == nil || value.User != nil || value.Scheme != "https" || value.Host != "models.s46.dev" {
+		return errors.New("gateway release URL must use the exact production authority without user info")
 	}
-	host := strings.ToLower(value.Hostname())
-	if host == "github.com" || host == "objects.githubusercontent.com" || host == "release-assets.githubusercontent.com" || strings.HasSuffix(host, ".githubusercontent.com") {
-		return nil
+	if value.Opaque != "" || value.RawQuery != "" || value.ForceQuery || value.Fragment != "" {
+		return errors.New("gateway release URL must not contain opaque data, a query, or a fragment")
 	}
-	return fmt.Errorf("gateway release redirected to untrusted host %q", host)
+	if !strings.HasPrefix(releaseID, "sha256-") || !validLowerSHA256(strings.TrimPrefix(releaseID, "sha256-")) {
+		return errors.New("gateway release URL release ID is not canonical")
+	}
+	if !validGatewayArchiveName(archiveName) {
+		return errors.New("gateway release URL archive name is not a base filename")
+	}
+	expected := gatewayReleaseAuthorityOrigin + "/releases/" + releaseID + "/assets/" + url.PathEscape(archiveName)
+	if value.String() != expected {
+		return errors.New("gateway release URL is not the exact canonical asset URL")
+	}
+	return nil
 }
 
 func executableFile(path string) bool {
