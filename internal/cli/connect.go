@@ -325,6 +325,12 @@ func applyAtomicConfigAndHarness(ctx context.Context, app *app, before, after co
 }
 
 func applyAtomicConfigAndHarnessValidated(ctx context.Context, app *app, before, after config.Config, adapter harness.Adapter, plan harness.Plan, op string, validate func() error) (harness.AppliedPlan, error) {
+	return applyAtomicConfigValidated(app, before, after, op, validate, func() (harness.AppliedPlan, error) {
+		return adapter.Apply(ctx, plan)
+	})
+}
+
+func applyAtomicConfigValidated(app *app, before, after config.Config, op string, validate func() error, apply func() (harness.AppliedPlan, error)) (harness.AppliedPlan, error) {
 	if validate != nil {
 		if err := validate(); err != nil {
 			return harness.AppliedPlan{}, err
@@ -339,7 +345,7 @@ func applyAtomicConfigAndHarnessValidated(ctx context.Context, app *app, before,
 			return harness.AppliedPlan{}, joinAtomicErrors(op, err, nil, saveErr)
 		}
 	}
-	applied, err := adapter.Apply(ctx, plan)
+	applied, err := apply()
 	if err == nil && validate != nil {
 		err = validate()
 	}

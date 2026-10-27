@@ -300,18 +300,20 @@ func TestApplyAtomicConfigAndHarnessRollsBackWhenPostApplyValidationFails(t *tes
 	target := filepath.Join(dir, "models.json")
 	plan := harness.Plan{Files: []harness.FilePlan{{Path: target, Content: []byte("MUST NOT APPLY"), Mode: 0o600}}}
 	app := &app{config: store, options: &options{}}
-	validations := 0
 	validate := func() error {
-		validations++
-		if validations == 3 {
+		content, err := os.ReadFile(target)
+		if err == nil && string(content) == "MUST NOT APPLY" {
 			return errors.New("release expired after harness apply")
+		}
+		if err != nil && !os.IsNotExist(err) {
+			return err
 		}
 		return nil
 	}
 
 	_, err := applyAtomicConfigAndHarnessValidated(context.Background(), app, before, after, &successfulAdapter{}, plan, "connect", validate)
 	if err == nil || !strings.Contains(err.Error(), "release expired after harness apply") {
-		t.Fatalf("late validation failure was accepted: validations=%d err=%v", validations, err)
+		t.Fatalf("late validation failure was accepted: err=%v", err)
 	}
 	got, err := store.LoadConfig()
 	if err != nil {

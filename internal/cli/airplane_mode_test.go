@@ -967,10 +967,12 @@ func TestApplyAtomicConfigAndSnapshotRollsBackWhenPostApplyValidationFails(t *te
 	}
 	snapshot := config.HarnessSnapshot{Files: []config.HarnessFileSnapshot{{Path: target, Existed: true, Content: "CLOUD", Mode: 0o600}}}
 	app := &app{config: store, runtime: Runtime{Env: env}, options: &options{}}
-	validations := 0
 	validate := func() error {
-		validations++
-		if validations == 3 {
+		content, err := os.ReadFile(target)
+		if err != nil {
+			return err
+		}
+		if string(content) == "CLOUD" {
 			return errors.New("release expired after snapshot apply")
 		}
 		return nil
@@ -978,7 +980,7 @@ func TestApplyAtomicConfigAndSnapshotRollsBackWhenPostApplyValidationFails(t *te
 
 	err := applyAtomicConfigAndSnapshotValidated(app, before, after, snapshot, "airplane mode off", validate)
 	if err == nil || !strings.Contains(err.Error(), "release expired after snapshot apply") {
-		t.Fatalf("late restore validation failure was accepted: validations=%d err=%v", validations, err)
+		t.Fatalf("late restore validation failure was accepted: err=%v", err)
 	}
 	got, err := store.LoadConfig()
 	if err != nil {

@@ -442,30 +442,10 @@ func applyAtomicConfigAndSnapshot(app *app, before, after config.Config, snapsho
 }
 
 func applyAtomicConfigAndSnapshotValidated(app *app, before, after config.Config, snapshot config.HarnessSnapshot, op string, validate func() error) error {
-	if validate != nil {
-		if err := validate(); err != nil {
-			return err
-		}
-	}
-	if err := app.config.SaveConfig(after); err != nil {
-		return fmt.Errorf("%s: %w", op, err)
-	}
-	if validate != nil {
-		if err := validate(); err != nil {
-			saveErr := app.config.SaveConfig(before)
-			return joinAtomicErrors(op, err, nil, saveErr)
-		}
-	}
-	applied, err := harness.ApplySnapshot(app.runtime.Env, snapshot)
-	if err == nil && validate != nil {
-		err = validate()
-	}
-	if err == nil {
-		return nil
-	}
-	rollbackErr := harness.RollbackPlan(applied)
-	saveErr := app.config.SaveConfig(before)
-	return joinAtomicErrors(op, err, rollbackErr, saveErr)
+	_, err := applyAtomicConfigValidated(app, before, after, op, validate, func() (harness.AppliedPlan, error) {
+		return harness.ApplySnapshot(app.runtime.Env, snapshot)
+	})
+	return err
 }
 
 func activeTeamConfig(app *app) (config.Config, string, config.TeamConfig, error) {
@@ -577,14 +557,8 @@ func planHarnessConfig(ctx context.Context, app *app, teamName string, teamConfi
 	return adapter, plan, nil
 }
 
-func hasTeamReleaseMetadata(team api.Team) bool {
-	return team.ReleaseChannel != "" || team.ProductionCertified != nil ||
-		team.ProductionAPIPath != nil || team.PolicySHA256 != "" ||
-		team.PolicyExpiresAt != "" || team.UpstreamCredentialExpiresAt != ""
-}
-
 func isProtectedCloudTeam(team api.Team) bool {
-	return hasTeamReleaseMetadata(team) || api.TeamRequiresPrelaunchMetadata(team)
+	return team.HasReleaseMetadata() || api.TeamRequiresPrelaunchMetadata(team)
 }
 
 func hasCloudEndpoint(endpoint string) bool {
