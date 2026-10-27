@@ -3,7 +3,7 @@ module github.com/sovereign46/cli
 go 1.26.9
 
 require (
-	github.com/sovereign46/attest v0.0.0-20261027003529-2654f0889259
+	github.com/sovereign46/attest v0.0.0-20261027105335-04812831a663
 	github.com/spf13/cobra v1.8.1
 	github.com/spf13/pflag v1.0.5
 	golang.org/x/sync v0.23.0
