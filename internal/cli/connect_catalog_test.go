@@ -320,10 +320,12 @@ func TestDeepSeekHarnessPolicyLeavesAirplaneProvenanceAndOrdinaryCloudUnchanged(
 func TestPrelaunchConnectPersistsChannelAndConfiguresDeepSeekReasoning(t *testing.T) {
 	env := testEnv(t)
 	requireOK(t, run(t, env, "login", "--email", "dscape@s46.dev"))
+	policySHA256 := "sha256:78f328e3dbf8fcda1162ab9c93880cf738204b7944eb8f11f848dee6d7dc54e2"
 	policyExpiresAt := time.Now().UTC().Add(48 * time.Hour).Truncate(time.Second).Format(time.RFC3339)
 	credentialExpiresAt := time.Now().UTC().Add(24 * time.Hour).Truncate(time.Second).Format(time.RFC3339)
 	prelaunchFalse := false
 	reasoning := true
+	var refreshCalls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/teams/" + api.DefaultTeam:
@@ -337,7 +339,7 @@ func TestPrelaunchConnectPersistsChannelAndConfiguresDeepSeekReasoning(t *testin
 				ReleaseChannel:              api.PrelaunchReleaseChannel,
 				ProductionCertified:         &prelaunchFalse,
 				ProductionAPIPath:           &prelaunchFalse,
-				PolicySHA256:                "sha256:78f328e3dbf8fcda1162ab9c93880cf738204b7944eb8f11f848dee6d7dc54e2",
+				PolicySHA256:                policySHA256,
 				PolicyExpiresAt:             policyExpiresAt,
 				UpstreamCredentialExpiresAt: credentialExpiresAt,
 				ModelMetadata: map[string]api.ModelRuntime{api.DeepSeekModelID: {
@@ -345,6 +347,13 @@ func TestPrelaunchConnectPersistsChannelAndConfiguresDeepSeekReasoning(t *testin
 					ClosureSHA256: testRuntimeClosureSHA256, ClosureSizeBytes: 4096,
 					ContextWindow: 262144, MaxTokens: 32768,
 				}},
+			})
+		case "/v1/auth/token/refresh":
+			refreshCalls.Add(1)
+			_ = json.NewEncoder(w).Encode(api.TokenSet{
+				Account: "dscape@s46.dev", DeviceID: "test-device",
+				AccessToken: "refreshed-access", RefreshToken: "refreshed-refresh",
+				ExpiresAt: time.Now().UTC().Add(time.Hour),
 			})
 		case "/readyz":
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
@@ -361,6 +370,7 @@ func TestPrelaunchConnectPersistsChannelAndConfiguresDeepSeekReasoning(t *testin
 
 	output := requireOK(t, run(t, env, "connect", api.DefaultTeam, "--harness=pi", "--mode=cloud"))
 	if !strings.Contains(output, "release: prelaunch · not production-certified · not the production API path") ||
+		!strings.Contains(output, "policy:  "+policySHA256+" · expires "+policyExpiresAt) ||
 		!strings.Contains(output, "credential: expires "+credentialExpiresAt) ||
 		strings.Contains(output, "airplane harness configuration only") ||
 		!strings.Contains(output, "next: in Pi, choose provider s46") {
@@ -371,7 +381,8 @@ func TestPrelaunchConnectPersistsChannelAndConfiguresDeepSeekReasoning(t *testin
 	if err := json.Unmarshal([]byte(structuredConnect), &connectPayload); err != nil {
 		t.Fatal(err)
 	}
-	if connectPayload["releaseChannel"] != api.PrelaunchReleaseChannel || connectPayload["productionCertified"] != false || connectPayload["productionAPIPath"] != false {
+	if connectPayload["releaseChannel"] != api.PrelaunchReleaseChannel || connectPayload["productionCertified"] != false || connectPayload["productionAPIPath"] != false ||
+		connectPayload["policySha256"] != policySHA256 || connectPayload["policyExpiresAt"] != policyExpiresAt || connectPayload["upstreamCredentialExpiresAt"] != credentialExpiresAt {
 		t.Fatalf("structured connect did not retain the non-production channel: %#v", connectPayload)
 	}
 	cfg, err := config.NewStore(env, "").LoadConfig()
@@ -390,6 +401,68 @@ func TestPrelaunchConnectPersistsChannelAndConfiguresDeepSeekReasoning(t *testin
 	if thinking["off"] != "none" {
 		t.Fatalf("Pi prelaunch config omitted explicit reasoning disable: %#v", deepSeek)
 	}
+	if result := run(t, env, "token", "--refresh"); result.err != nil {
+		t.Fatalf("valid protected Pi token helper failed: %v", result.err)
+	}
+	refreshesAfterValidHelper := refreshCalls.Load()
+	divergentConfig := cfg.Clone()
+	divergentTeam := divergentConfig.Teams[api.DefaultTeam]
+	divergentTeam.Endpoint = "https://hostile.example"
+	divergentConfig.Teams[api.DefaultTeam] = divergentTeam
+	store := config.NewStore(env, "")
+	if err := config.WriteJSONAtomic(store.ConfigPath, divergentConfig, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if result := run(t, env, "token", "--refresh"); result.err == nil || !strings.Contains(result.err.Error(), "cloud endpoint differs") {
+		t.Fatalf("divergent classified endpoint received a token: err=%v output=%s", result.err, result.stdout)
+	}
+	if refreshCalls.Load() != refreshesAfterValidHelper {
+		t.Fatal("divergent classified endpoint refreshed a token before refusal")
+	}
+	if err := store.SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	provider["futureBehaviorOverride"] = true
+	hostileModels, err := json.MarshalIndent(models, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(env["HOME"], ".pi", "agent", "models.json"), append(hostileModels, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if result := run(t, env, "token", "--refresh"); result.err == nil || !strings.Contains(result.err.Error(), "refusing token helper") {
+		t.Fatalf("hostile Pi configuration received a token: err=%v output=%s", result.err, result.stdout)
+	}
+	if refreshCalls.Load() != refreshesAfterValidHelper {
+		t.Fatal("hostile Pi configuration refreshed a token before refusal")
+	}
+	delete(provider, "futureBehaviorOverride")
+	restoredModels, err := json.MarshalIndent(models, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(env["HOME"], ".pi", "agent", "models.json"), append(restoredModels, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	expiredConfig := cfg.Clone()
+	expiredTeam := expiredConfig.Teams[api.DefaultTeam]
+	expiredTeam.PolicyExpiresAt = "2000-01-02T00:00:00Z"
+	expiredTeam.UpstreamCredentialExpiresAt = "2000-01-01T00:00:00Z"
+	expiredTeam.APISnapshot.PolicyExpiresAt = expiredTeam.PolicyExpiresAt
+	expiredTeam.APISnapshot.UpstreamCredentialExpiresAt = expiredTeam.UpstreamCredentialExpiresAt
+	expiredConfig.Teams[api.DefaultTeam] = expiredTeam
+	if err := store.SaveConfig(expiredConfig); err != nil {
+		t.Fatal(err)
+	}
+	if result := run(t, env, "token", "--refresh"); result.err == nil || !strings.Contains(result.err.Error(), "policy has expired") {
+		t.Fatalf("expired protected route received a token: err=%v output=%s", result.err, result.stdout)
+	}
+	if refreshCalls.Load() != refreshesAfterValidHelper {
+		t.Fatal("expired protected route refreshed a token before refusal")
+	}
+	if err := store.SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
 
 	delete(env, "S46_API_BASE_URL")
 	status := run(t, env, "status", "--json")
@@ -400,11 +473,13 @@ func TestPrelaunchConnectPersistsChannelAndConfiguresDeepSeekReasoning(t *testin
 	if err := json.Unmarshal([]byte(status.stdout), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload.ReleaseChannel != api.PrelaunchReleaseChannel || payload.ProductionCertified == nil || *payload.ProductionCertified || payload.ProductionAPIPath == nil || *payload.ProductionAPIPath || !statusCheckOK(payload.Checks, "release-channel") {
+	if payload.ReleaseChannel != api.PrelaunchReleaseChannel || payload.ProductionCertified == nil || *payload.ProductionCertified || payload.ProductionAPIPath == nil || *payload.ProductionAPIPath ||
+		payload.PolicySHA256 != policySHA256 || payload.PolicyExpiresAt != policyExpiresAt || payload.UpstreamCredentialExpiresAt != credentialExpiresAt || !statusCheckOK(payload.Checks, "release-channel") {
 		t.Fatalf("status did not retain the non-production channel: %#v", payload)
 	}
 	humanStatus := requireOK(t, run(t, env, "status"))
 	if !strings.Contains(humanStatus, "release: prelaunch · not production-certified · not the production API path") ||
+		!strings.Contains(humanStatus, "policy:  "+policySHA256+" · expires "+policyExpiresAt) ||
 		!strings.Contains(humanStatus, "credential: expires "+credentialExpiresAt) {
 		t.Fatalf("human status did not identify the non-production channel and credential expiry:\n%s", humanStatus)
 	}

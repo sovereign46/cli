@@ -66,7 +66,7 @@ func statusCommand(runtime Runtime, opts *options) *cobra.Command {
 				lines = append(lines, fmt.Sprintf("[s46] team:    %s · %s · %s", result.Team, team.Region, result.Mode))
 				lines = append(lines, fmt.Sprintf("[s46] harness: %s · %s", team.DefaultHarness, team.DefaultModel))
 			}
-			if result.ReleaseChannel == api.PrelaunchReleaseChannel {
+			if validPrelaunchStatusBanner(result) {
 				lines = append(lines,
 					"[s46] release: prelaunch · not production-certified · not the production API path",
 					fmt.Sprintf("[s46] policy:  %s · expires %s", result.PolicySHA256, result.PolicyExpiresAt),
@@ -89,6 +89,24 @@ func statusCommand(runtime Runtime, opts *options) *cobra.Command {
 			return nil
 		},
 	}
+}
+
+func validPrelaunchStatusBanner(result statusResult) bool {
+	if result.ReleaseChannel != api.PrelaunchReleaseChannel ||
+		result.ProductionCertified == nil || *result.ProductionCertified ||
+		result.ProductionAPIPath == nil || *result.ProductionAPIPath {
+		return false
+	}
+	return statusCheckOKByName(result.Checks, "release-channel")
+}
+
+func statusCheckOKByName(checks []harness.StatusCheck, name string) bool {
+	for _, check := range checks {
+		if check.Name == name {
+			return check.OK
+		}
+	}
+	return false
 }
 
 func collectStatus(ctx context.Context, app *app, cfg config.Config, state config.State) statusResult {
@@ -160,7 +178,13 @@ func collectCloudStatus(ctx context.Context, app *app, state config.State, teamN
 		team = teamCfg.API(teamName)
 		releaseCheck, releasePresent = releaseChannelStatusCheck(team, app.nowUTC())
 		validateRelease = func() error {
-			return api.ValidateTeamReleaseMetadata(team, app.nowUTC())
+			if err := api.ValidateTeamReleaseMetadata(team, app.nowUTC()); err != nil {
+				return err
+			}
+			if isProtectedCloudTeam(team) || isProtectedCloudTeam(teamCfg.APISnapshot) {
+				return validateProtectedTokenHelper(ctx, app)
+			}
+			return nil
 		}
 	}
 	if releasePresent && !releaseCheck.OK {
@@ -197,7 +221,7 @@ func blockedCloudStatusChecks(err error, releaseCheck harness.StatusCheck) []har
 		releaseCheck,
 		{Name: "auth", OK: false, Message: message},
 	}
-	return appendGatewayProbeChecks(checks, blockedGatewayStatusChecks(message))
+	return appendGatewayProbeChecks(checks, failedGatewayStatusChecks(message))
 }
 
 func failedReleaseStatusCheck(err error) harness.StatusCheck {
@@ -212,14 +236,6 @@ func releaseChannelStatusCheck(team api.Team, now time.Time) (harness.StatusChec
 		return harness.StatusCheck{}, false
 	}
 	return harness.StatusCheck{Name: "release-channel", OK: true, Message: "prelaunch; not production-certified; not the production API path"}, true
-}
-
-func blockedGatewayStatusChecks(message string) []harness.StatusCheck {
-	return []harness.StatusCheck{
-		{Name: "readiness", OK: false, Message: message},
-		{Name: "model", OK: false, Message: message},
-		{Name: "inference", OK: false, Message: message},
-	}
 }
 
 func cloudAuthCheck(ctx context.Context, app *app, state config.State, token string, tokenErr error) harness.StatusCheck {

@@ -17,9 +17,10 @@ func statusProbeOverride(env map[string]string, model string) ([]harness.StatusC
 	if model == "" {
 		model = "test-model"
 	}
-	return []harness.StatusCheck{
-		{Name: "readiness", OK: true, Message: "test gateway is ready"},
-		{Name: "model", OK: true, Message: model + " is advertised"},
-		{Name: "inference", OK: true, Message: "live inference completed"},
-	}, true
+	messages := []string{"test gateway is ready", model + " is advertised", "live inference completed"}
+	checks := make([]harness.StatusCheck, len(gatewayStatusSteps))
+	for index, step := range gatewayStatusSteps {
+		checks[index] = harness.StatusCheck{Name: step.name, OK: true, Message: messages[index]}
+	}
+	return checks, true
 }

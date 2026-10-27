@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -149,6 +150,7 @@ func TestStatusRejectsExpiredPrelaunchBeforeAnyNetworkProbe(t *testing.T) {
 
 func TestStatusStopsEffectsWhenPrelaunchExpiresMidSequence(t *testing.T) {
 	var paths []string
+	var readinessObserved atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		paths = append(paths, r.Method+" "+r.URL.Path)
 		switch r.URL.Path {
@@ -156,6 +158,7 @@ func TestStatusStopsEffectsWhenPrelaunchExpiresMidSequence(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(api.User{Email: "dscape@s46.dev", Team: api.DefaultTeam})
 		case "/readyz":
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+			readinessObserved.Store(true)
 		case "/v1/models", "/v1/chat/completions":
 			t.Errorf("request occurred after release expiry: %s %s", r.Method, r.URL.Path)
 			http.Error(w, "expired", http.StatusForbidden)
@@ -170,7 +173,7 @@ func TestStatusStopsEffectsWhenPrelaunchExpiresMidSequence(t *testing.T) {
 	requireOK(t, run(t, env, "login", "--email", "dscape@s46.dev"))
 	denied, reasoning := false, true
 	team := config.TeamConfig{
-		Endpoint: server.URL, Region: "EU-OPO", DefaultHarness: "standard",
+		Endpoint: server.URL, Region: "EU-OPO", DefaultHarness: "pi",
 		DefaultModel: api.DeepSeekModelID, Models: []string{api.DeepSeekModelID},
 		ReleaseChannel: api.PrelaunchReleaseChannel, ProductionCertified: &denied, ProductionAPIPath: &denied,
 		PolicySHA256:    "sha256:78f328e3dbf8fcda1162ab9c93880cf738204b7944eb8f11f848dee6d7dc54e2",
@@ -193,18 +196,17 @@ func TestStatusStopsEffectsWhenPrelaunchExpiresMidSequence(t *testing.T) {
 	if err := store.SaveConfig(cfg); err != nil {
 		t.Fatal(err)
 	}
+	writeSavedPiConfiguration(t, env, team.API(api.DefaultTeam), config.ModeCloud)
 	env["S46_API_BASE_URL"] = server.URL
 	application, err := newApp(Runtime{Env: env}, &options{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	calls := 0
 	application.now = func() time.Time {
-		calls++
-		if calls < 5 {
-			return time.Date(2029, 1, 1, 0, 0, 0, 0, time.UTC)
+		if readinessObserved.Load() {
+			return time.Date(2031, 1, 1, 0, 0, 0, 0, time.UTC)
 		}
-		return time.Date(2031, 1, 1, 0, 0, 0, 0, time.UTC)
+		return time.Date(2029, 1, 1, 0, 0, 0, 0, time.UTC)
 	}
 	state, err := store.LoadState()
 	if err != nil {
@@ -220,6 +222,46 @@ func TestStatusStopsEffectsWhenPrelaunchExpiresMidSequence(t *testing.T) {
 	joined := strings.Join(paths, ",")
 	if !strings.Contains(joined, "GET /v1/me") || !strings.Contains(joined, "GET /readyz") || strings.Contains(joined, "/v1/models") || strings.Contains(joined, "/v1/chat/completions") {
 		t.Fatalf("unexpected effect sequence after expiry: %s", joined)
+	}
+}
+
+func TestStatusDoesNotRenderValidatedPrelaunchBannerForInvalidClaims(t *testing.T) {
+	env := testEnv(t)
+	certified, productionPath, reasoning := true, true, true
+	team := config.TeamConfig{
+		Endpoint: api.DefaultGatewayURL, Region: "EU-OPO", DefaultHarness: "standard",
+		DefaultModel: api.DeepSeekModelID, Models: []string{api.DeepSeekModelID},
+		ReleaseChannel: api.PrelaunchReleaseChannel, ProductionCertified: &certified, ProductionAPIPath: &productionPath,
+		PolicySHA256:    "sha256:78f328e3dbf8fcda1162ab9c93880cf738204b7944eb8f11f848dee6d7dc54e2",
+		PolicyExpiresAt: "2099-01-02T00:00:00Z", UpstreamCredentialExpiresAt: "2099-01-01T00:00:00Z",
+	}
+	team.APISnapshot = api.Team{
+		Name: api.DefaultTeam, Endpoint: team.Endpoint, Region: team.Region,
+		DefaultModel: team.DefaultModel, Models: team.Models,
+		ModelMetadata: map[string]api.ModelRuntime{api.DeepSeekModelID: {
+			Engine: "vllm", Version: "0.31.0", Reasoning: &reasoning,
+			ClosureSHA256: testRuntimeClosureSHA256, ClosureSizeBytes: 4096,
+			ContextWindow: 262144, MaxTokens: 32768,
+		}},
+		ReleaseChannel: team.ReleaseChannel, ProductionCertified: &certified, ProductionAPIPath: &productionPath,
+		PolicySHA256: team.PolicySHA256, PolicyExpiresAt: team.PolicyExpiresAt,
+		UpstreamCredentialExpiresAt: team.UpstreamCredentialExpiresAt,
+	}
+	store := config.NewStore(env, "")
+	cfg := config.Config{ActiveTeam: api.DefaultTeam, Mode: config.ModeCloud, Teams: map[string]config.TeamConfig{api.DefaultTeam: team}}
+	if err := store.SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	result := run(t, env, "status")
+	if result.err == nil {
+		t.Fatalf("invalid production claims passed status: %s", result.stdout)
+	}
+	if strings.Contains(result.stdout, "not production-certified") || strings.Contains(result.stdout, "not the production API path") {
+		t.Fatalf("status contradicted invalid stored production claims:\n%s", result.stdout)
+	}
+	if !strings.Contains(result.stdout, "[fail] release-channel") {
+		t.Fatalf("status omitted the failed release check:\n%s", result.stdout)
 	}
 }
 

@@ -18,6 +18,15 @@ import (
 
 const statusResponseLimit = 1 << 20
 
+var gatewayStatusSteps = []struct {
+	name string
+	run  func(gatewayStatusProbe, context.Context) harness.StatusCheck
+}{
+	{name: "readiness", run: gatewayStatusProbe.readiness},
+	{name: "model", run: gatewayStatusProbe.model},
+	{name: "inference", run: gatewayStatusProbe.inference},
+}
+
 type gatewayStatusProbe struct {
 	Env      map[string]string
 	Endpoint string
@@ -37,40 +46,26 @@ func (p gatewayStatusProbe) ChecksValidated(ctx context.Context, validate func()
 	}
 	if strings.TrimSpace(p.Endpoint) == "" {
 		message := "no active gateway endpoint; run `s46 connect @org/team --harness <name>`"
-		return []harness.StatusCheck{
-			{Name: "readiness", OK: false, Message: message},
-			{Name: "model", OK: false, Message: message},
-			{Name: "inference", OK: false, Message: message},
-		}, nil
+		return failedGatewayStatusChecks(message), nil
 	}
 	if _, err := url.ParseRequestURI(p.Endpoint); err != nil {
 		message := "invalid configured gateway endpoint: " + err.Error()
-		return []harness.StatusCheck{
-			{Name: "readiness", OK: false, Message: message},
-			{Name: "model", OK: false, Message: message},
-			{Name: "inference", OK: false, Message: message},
-		}, nil
+		return failedGatewayStatusChecks(message), nil
 	}
-	steps := []struct {
-		name string
-		run  func() harness.StatusCheck
-	}{
-		{name: "readiness", run: func() harness.StatusCheck { return p.readiness(ctx) }},
-		{name: "model", run: func() harness.StatusCheck { return p.model(ctx) }},
-		{name: "inference", run: func() harness.StatusCheck { return p.inference(ctx) }},
-	}
-	checks := make([]harness.StatusCheck, 0, len(steps))
-	for index, step := range steps {
+	checks := make([]harness.StatusCheck, 0, len(gatewayStatusSteps))
+	for index, step := range gatewayStatusSteps {
 		if validate != nil {
 			if err := validate(); err != nil {
 				message := blockedReleaseStatusMessage(err)
-				for _, remaining := range steps[index:] {
+				for _, remaining := range gatewayStatusSteps[index:] {
 					checks = append(checks, harness.StatusCheck{Name: remaining.name, OK: false, Message: message})
 				}
 				return checks, err
 			}
 		}
-		checks = append(checks, step.run())
+		check := step.run(p, ctx)
+		check.Name = step.name
+		checks = append(checks, check)
 	}
 	return checks, nil
 }
@@ -94,6 +89,14 @@ func runValidatedStatusChecks(source []harness.StatusCheck, validate func() erro
 
 func blockedReleaseStatusMessage(err error) string {
 	return "skipped because release metadata is invalid: " + err.Error()
+}
+
+func failedGatewayStatusChecks(message string) []harness.StatusCheck {
+	checks := make([]harness.StatusCheck, 0, len(gatewayStatusSteps))
+	for _, step := range gatewayStatusSteps {
+		checks = append(checks, harness.StatusCheck{Name: step.name, OK: false, Message: message})
+	}
+	return checks
 }
 
 func (p gatewayStatusProbe) readiness(ctx context.Context) harness.StatusCheck {

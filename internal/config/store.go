@@ -285,7 +285,7 @@ func validateReleaseMetadataCopies(cfg Config) error {
 			UpstreamCredentialExpiresAt: team.UpstreamCredentialExpiresAt,
 		}
 		snapshot := team.APISnapshot
-		if !hasReleaseMetadata(current) && !hasReleaseMetadata(snapshot) {
+		if !current.HasReleaseMetadata() && !snapshot.HasReleaseMetadata() {
 			continue
 		}
 		if snapshot.Endpoint == "" {
@@ -294,14 +294,11 @@ func validateReleaseMetadataCopies(cfg Config) error {
 		if !sameReleaseMetadata(current, snapshot) {
 			return fmt.Errorf("team %s release metadata differs from its API snapshot; reconnect the team", name)
 		}
+		if cfg.ActiveMode() == ModeCloud && team.Endpoint != snapshot.Endpoint {
+			return fmt.Errorf("team %s cloud endpoint differs from its classified API snapshot; reconnect the team", name)
+		}
 	}
 	return nil
-}
-
-func hasReleaseMetadata(team api.Team) bool {
-	return team.ReleaseChannel != "" || team.ProductionCertified != nil ||
-		team.ProductionAPIPath != nil || team.PolicySHA256 != "" ||
-		team.PolicyExpiresAt != "" || team.UpstreamCredentialExpiresAt != ""
 }
 
 func sameReleaseMetadata(left, right api.Team) bool {

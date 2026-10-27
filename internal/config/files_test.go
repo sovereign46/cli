@@ -290,7 +290,7 @@ func TestStoreCrossChecksSavedCloudMetadataForLocalAirplaneTeam(t *testing.T) {
 	if err := store.SaveConfig(cfg); err != nil {
 		t.Fatalf("matching saved cloud metadata was rejected: %v", err)
 	}
-	if active := team.APIForMode("@s46/engineering", ModeAirplane); hasReleaseMetadata(active) {
+	if active := team.APIForMode("@s46/engineering", ModeAirplane); active.HasReleaseMetadata() {
 		t.Fatalf("saved cloud metadata classified the active local route: %#v", active)
 	}
 	team.APISnapshot.ReleaseChannel = ""
@@ -302,6 +302,38 @@ func TestStoreCrossChecksSavedCloudMetadataForLocalAirplaneTeam(t *testing.T) {
 	cfg.Teams["@s46/engineering"] = team
 	if err := store.SaveConfig(cfg); err == nil || !strings.Contains(err.Error(), "differs from its API snapshot") {
 		t.Fatalf("stripped saved cloud classification was accepted: %v", err)
+	}
+}
+
+func TestStoreRejectsClassifiedCloudEndpointDivergence(t *testing.T) {
+	denied := false
+	team := TeamConfig{
+		Endpoint: "https://hostile.example", ReleaseChannel: api.PrelaunchReleaseChannel,
+		ProductionCertified: &denied, ProductionAPIPath: &denied,
+		PolicySHA256:    "sha256:78f328e3dbf8fcda1162ab9c93880cf738204b7944eb8f11f848dee6d7dc54e2",
+		PolicyExpiresAt: "2099-10-27T12:00:00Z", UpstreamCredentialExpiresAt: "2099-10-27T11:00:00Z",
+		APISnapshot: api.Team{
+			Endpoint: "https://gateway.s46.dev", ReleaseChannel: api.PrelaunchReleaseChannel,
+			ProductionCertified: &denied, ProductionAPIPath: &denied,
+			PolicySHA256:    "sha256:78f328e3dbf8fcda1162ab9c93880cf738204b7944eb8f11f848dee6d7dc54e2",
+			PolicyExpiresAt: "2099-10-27T12:00:00Z", UpstreamCredentialExpiresAt: "2099-10-27T11:00:00Z",
+		},
+	}
+	store := NewStore(nil, filepath.Join(t.TempDir(), "config.json"))
+	cloud := Config{Mode: ModeCloud, Teams: map[string]TeamConfig{"@s46/engineering": team}}
+	if err := WriteJSONAtomic(store.ConfigPath, cloud, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.LoadConfig(); err == nil || !strings.Contains(err.Error(), "cloud endpoint differs") {
+		t.Fatalf("classified cloud endpoint divergence was accepted: %v", err)
+	}
+	if err := store.SaveConfig(cloud); err == nil || !strings.Contains(err.Error(), "cloud endpoint differs") {
+		t.Fatalf("classified cloud endpoint divergence was saved: %v", err)
+	}
+
+	cloud.Mode = ModeAirplane
+	if err := store.SaveConfig(cloud); err != nil {
+		t.Fatalf("airplane endpoint divergence was rejected: %v", err)
 	}
 }
 
