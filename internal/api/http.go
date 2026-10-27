@@ -434,7 +434,8 @@ func validateSingleJSONValue(raw []byte, target any) error {
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
-	if err := consumeJSONValue(decoder, 0, reflect.TypeOf(target)); err != nil {
+	fieldCache := make(map[reflect.Type]*responseJSONFieldSet)
+	if err := consumeJSONValue(decoder, 0, reflect.TypeOf(target), fieldCache); err != nil {
 		return err
 	}
 	if _, err := decoder.Token(); err == nil {
@@ -445,7 +446,7 @@ func validateSingleJSONValue(raw []byte, target any) error {
 	return nil
 }
 
-func consumeJSONValue(decoder *json.Decoder, depth int, expected reflect.Type) error {
+func consumeJSONValue(decoder *json.Decoder, depth int, expected reflect.Type, fieldCache map[reflect.Type]*responseJSONFieldSet) error {
 	if depth > maxResponseJSONDepth {
 		return fmt.Errorf("response JSON nesting exceeds %d", maxResponseJSONDepth)
 	}
@@ -460,9 +461,8 @@ func consumeJSONValue(decoder *json.Decoder, depth int, expected reflect.Type) e
 	expected = dereferenceJSONType(expected)
 	switch delimiter {
 	case '{':
-		seen := map[string]bool{}
 		seenFolded := map[string]string{}
-		fields := responseJSONFields(expected)
+		fields := responseJSONFields(expected, fieldCache)
 		var mapValue reflect.Type
 		if expected != nil && expected.Kind() == reflect.Map && expected.Key().Kind() == reflect.String {
 			mapValue = expected.Elem()
@@ -476,24 +476,23 @@ func consumeJSONValue(decoder *json.Decoder, depth int, expected reflect.Type) e
 			if !ok {
 				return errors.New("JSON object key is not a string")
 			}
-			if seen[key] {
-				return fmt.Errorf("response contains duplicate JSON object key %q", key)
-			}
-			seen[key] = true
 			folded := strings.ToLower(key)
-			if prior, exists := seenFolded[folded]; exists && prior != key {
+			if prior, exists := seenFolded[folded]; exists {
+				if prior == key {
+					return fmt.Errorf("response contains duplicate JSON object key %q", key)
+				}
 				return fmt.Errorf("response contains case-aliased JSON object keys %q and %q", prior, key)
 			}
 			seenFolded[folded] = key
 			childType := mapValue
 			if fields != nil {
-				if fieldType, exists := fields[key]; exists {
+				if fieldType, exists := fields.exact[key]; exists {
 					childType = fieldType
-				} else if canonical := caseFoldedResponseField(fields, key); canonical != "" {
+				} else if canonical := caseFoldedResponseField(fields.exact, key); canonical != "" {
 					return fmt.Errorf("response JSON field %q must use exact spelling %q", key, canonical)
 				}
 			}
-			if err := consumeJSONValue(decoder, depth+1, childType); err != nil {
+			if err := consumeJSONValue(decoder, depth+1, childType, fieldCache); err != nil {
 				return err
 			}
 		}
@@ -510,7 +509,7 @@ func consumeJSONValue(decoder *json.Decoder, depth int, expected reflect.Type) e
 			elementType = expected.Elem()
 		}
 		for decoder.More() {
-			if err := consumeJSONValue(decoder, depth+1, elementType); err != nil {
+			if err := consumeJSONValue(decoder, depth+1, elementType, fieldCache); err != nil {
 				return err
 			}
 		}
@@ -534,11 +533,18 @@ func dereferenceJSONType(value reflect.Type) reflect.Type {
 	return value
 }
 
-func responseJSONFields(value reflect.Type) map[string]reflect.Type {
+type responseJSONFieldSet struct {
+	exact map[string]reflect.Type
+}
+
+func responseJSONFields(value reflect.Type, cache map[reflect.Type]*responseJSONFieldSet) *responseJSONFieldSet {
 	if value == nil || value.Kind() != reflect.Struct || value == reflect.TypeOf(time.Time{}) {
 		return nil
 	}
-	fields := make(map[string]reflect.Type, value.NumField())
+	if fields, ok := cache[value]; ok {
+		return fields
+	}
+	fields := &responseJSONFieldSet{exact: make(map[string]reflect.Type, value.NumField())}
 	for index := 0; index < value.NumField(); index++ {
 		field := value.Field(index)
 		if !field.IsExported() {
@@ -551,8 +557,9 @@ func responseJSONFields(value reflect.Type) map[string]reflect.Type {
 		if name == "" {
 			name = field.Name
 		}
-		fields[name] = field.Type
+		fields.exact[name] = field.Type
 	}
+	cache[value] = fields
 	return fields
 }
 

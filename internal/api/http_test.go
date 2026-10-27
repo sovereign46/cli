@@ -238,6 +238,7 @@ func TestHTTPClientRejectsAmbiguousPrelaunchJSON(t *testing.T) {
 		{"duplicate nested reasoning", strings.Replace(exactPrelaunchTeamResponse, `"reasoning":true`, `"reasoning":true,"reasoning":false`, 1), "duplicate JSON object key \"reasoning\""},
 		{"case-aliased release channel", strings.Replace(exactPrelaunchTeamResponse, `"releaseChannel":"prelaunch"`, `"ReleaseChannel":"prelaunch"`, 1), "must use exact spelling \"releaseChannel\""},
 		{"conflicting case-aliased production claim", strings.Replace(exactPrelaunchTeamResponse, `"productionCertified":false`, `"productionCertified":true,"ProductionCertified":false`, 1), "case-aliased JSON object keys"},
+		{"Unicode case-aliased release channel", strings.Replace(exactPrelaunchTeamResponse, `"releaseChannel":"prelaunch"`, `"releaſeChannel":"prelaunch"`, 1), "must use exact spelling \"releaseChannel\""},
 		{"case-aliased nested reasoning", strings.Replace(exactPrelaunchTeamResponse, `"reasoning":true`, `"Reasoning":true`, 1), "must use exact spelling \"reasoning\""},
 		{"trailing document", exactPrelaunchTeamResponse + ` {}`, "trailing JSON data"},
 		{"excessive nesting", tooDeep, "JSON nesting exceeds"},
