@@ -2,6 +2,8 @@
 
 This candidate prepares the CLI and its published Go dependencies for testing. It is **not** a certified model release, an API/gateway deployment, or evidence of a successful production tool loop. The CLI's independent bundled-policy loading mechanism is implemented, but its asset is intentionally empty: no complete production policy has been approved, so model installation and cached activation fail closed. See [model activation policy](model-activation-policy.md). API policy loading, initial cloud-serving gates, and production provisioning must be independently verified; this CLI change does not establish their readiness. Keep the existing installed CLI and harness configuration until you choose to test the candidate.
 
+> **Publication status:** Repository workflows mentioned below are retained candidate/source tooling, not current publication authority. The canonical forward publication path is `sovereign46/release-broker`, but its CLI 0.3 profiles and protected completion-stage, tag, publish, and mirror services are not implemented. Consequently, no 0.3 release or qualified airplane authority exists.
+
 ## Check the candidate without connecting
 
 Use the archive for your operating system and architecture, together with its supplied SHA-256 checksums and source/build manifest. Verify the archive before extracting it into a separate directory; do not overwrite a Homebrew-managed installation.
