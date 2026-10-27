@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -8,6 +9,8 @@ import (
 
 	"github.com/sovereign46/cli/internal/api"
 	"github.com/sovereign46/cli/internal/auth"
+	"github.com/sovereign46/cli/internal/config"
+	"github.com/sovereign46/cli/internal/harness"
 )
 
 func loginCommand(runtime Runtime, opts *options) *cobra.Command {
@@ -155,9 +158,15 @@ func tokenCommand(runtime Runtime, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if err := validateProtectedTokenHelper(cmd.Context(), app); err != nil {
+				return err
+			}
 			service := app.authService()
 			token, err := service.Token(cmd.Context(), refresh)
 			if err != nil {
+				return err
+			}
+			if err := validateProtectedTokenHelper(cmd.Context(), app); err != nil {
 				return err
 			}
 			if ok, err := app.writeStructured(map[string]any{"token": token}); ok {
@@ -169,4 +178,41 @@ func tokenCommand(runtime Runtime, opts *options) *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&refresh, "refresh", false, "refresh before printing")
 	return cmd
+}
+
+func validateProtectedTokenHelper(ctx context.Context, app *app) error {
+	cfg, err := app.config.LoadConfig()
+	if err != nil {
+		return err
+	}
+	if cfg.ActiveMode() != config.ModeCloud || strings.TrimSpace(cfg.ActiveTeam) == "" {
+		return nil
+	}
+	teamConfig, ok := cfg.Teams[cfg.ActiveTeam]
+	if !ok {
+		return nil
+	}
+	team := teamConfig.API(cfg.ActiveTeam)
+	if !isProtectedCloudTeam(team) && !isProtectedCloudTeam(teamConfig.APISnapshot) {
+		return nil
+	}
+	if err := api.ValidateTeamReleaseMetadata(team, app.nowUTC()); err != nil {
+		return fmt.Errorf("refusing token helper: active team release metadata is invalid: %w", err)
+	}
+	if err := validateCloudDeepSeekHarness(config.ModeCloud, teamConfig.DefaultHarness, "token helper", team, teamConfig.APISnapshot); err != nil {
+		return fmt.Errorf("refusing token helper: %w", err)
+	}
+	adapter, err := app.harness.Get(teamConfig.DefaultHarness)
+	if err != nil {
+		return fmt.Errorf("refusing token helper: %w", err)
+	}
+	validator, ok := adapter.(harness.LaunchConfigValidator)
+	if !ok {
+		return fmt.Errorf("refusing token helper: harness %s cannot validate its live configuration", adapter.Name())
+	}
+	request := harness.LaunchConfigRequest{Env: app.runtime.Env, Team: team, Mode: config.ModeCloud, Model: teamConfig.DefaultModel}
+	if err := validator.ValidateLaunchConfig(ctx, request); err != nil {
+		return fmt.Errorf("refusing token helper: %w", err)
+	}
+	return nil
 }

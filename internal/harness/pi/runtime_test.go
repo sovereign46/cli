@@ -14,8 +14,10 @@ import (
 
 const testRuntimeClosure = "3e54fbb5d4a570b9888196ef8f3c8b5045490c29580e39415fa067bdd4d257a1"
 
+func reasoningPointer(enabled bool) *bool { return &enabled }
+
 func cloudTeam() api.Team {
-	return api.Team{Name: "@s46/engineering", Endpoint: api.DefaultGatewayURL, Models: []string{api.DeepSeekModelID}, DefaultModel: api.DeepSeekModelID, ModelMetadata: map[string]api.ModelRuntime{api.DeepSeekModelID: {Engine: "vllm", Version: "0.31.0", ClosureSHA256: testRuntimeClosure, ClosureSizeBytes: 4096, ContextWindow: 262144, MaxTokens: 32768, Reasoning: true}}}
+	return api.Team{Name: "@s46/engineering", Endpoint: api.DefaultGatewayURL, Models: []string{api.DeepSeekModelID}, DefaultModel: api.DeepSeekModelID, ModelMetadata: map[string]api.ModelRuntime{api.DeepSeekModelID: {Engine: "vllm", Version: "0.31.0", ClosureSHA256: testRuntimeClosure, ClosureSizeBytes: 4096, ContextWindow: 262144, MaxTokens: 32768, Reasoning: reasoningPointer(true)}}}
 }
 
 func TestPiModelsUseAuthoritativeMetadata(t *testing.T) {
@@ -28,7 +30,7 @@ func TestPiModelsUseAuthoritativeMetadata(t *testing.T) {
 		t.Fatalf("unexpected runtime: %#v", models)
 	}
 	// A reasoning-looking name must not override the API metadata.
-	team.ModelMetadata[api.DeepSeekModelID] = api.ModelRuntime{ClosureSHA256: testRuntimeClosure, ClosureSizeBytes: 4096, ContextWindow: 8192, MaxTokens: 1024, Reasoning: false}
+	team.ModelMetadata[api.DeepSeekModelID] = api.ModelRuntime{ClosureSHA256: testRuntimeClosure, ClosureSizeBytes: 4096, ContextWindow: 8192, MaxTokens: 1024, Reasoning: reasoningPointer(false)}
 	models, err = piModels(team, "cloud", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -68,7 +70,7 @@ func TestPiModelsRequireDeepSeekRuntimeClosure(t *testing.T) {
 		}},
 		{"missing size", func(runtime *api.ModelRuntime) { runtime.ClosureSizeBytes = 0 }},
 		{"negative size", func(runtime *api.ModelRuntime) { runtime.ClosureSizeBytes = -1 }},
-		{"oversized closure", func(runtime *api.ModelRuntime) { runtime.ClosureSizeBytes = maxRuntimeClosureSize + 1 }},
+		{"oversized closure", func(runtime *api.ModelRuntime) { runtime.ClosureSizeBytes = api.MaxRuntimeClosureSizeBytes + 1 }},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -84,7 +86,7 @@ func TestPiModelsRequireDeepSeekRuntimeClosure(t *testing.T) {
 }
 
 func TestPiModelsAcceptRuntimeClosureSizeBoundaries(t *testing.T) {
-	for _, size := range []int64{1, maxRuntimeClosureSize} {
+	for _, size := range []int64{1, api.MaxRuntimeClosureSizeBytes} {
 		t.Run(fmt.Sprintf("%d", size), func(t *testing.T) {
 			team := cloudTeam()
 			runtime := team.ModelMetadata[api.DeepSeekModelID]
@@ -395,7 +397,7 @@ func TestPiThinkingOffMappingIsRuntimeSpecific(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			team := api.Team{Models: []string{tc.model}, ModelMetadata: map[string]api.ModelRuntime{
-				tc.model: {Engine: tc.engine, Version: tc.version, ClosureSHA256: testRuntimeClosure, ClosureSizeBytes: 4096, ContextWindow: 262144, MaxTokens: 32768, Reasoning: tc.reasoning},
+				tc.model: {Engine: tc.engine, Version: tc.version, ClosureSHA256: testRuntimeClosure, ClosureSizeBytes: 4096, ContextWindow: 262144, MaxTokens: 32768, Reasoning: reasoningPointer(tc.reasoning)},
 			}}
 			models, err := piModels(team, tc.mode, nil)
 			if err != nil {

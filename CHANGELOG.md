@@ -8,6 +8,7 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Added fail-closed prelaunch team metadata handling: connect and status retain and display the release channel, explicit non-production claims, policy identity, and expiries instead of representing the route as ordinary production cloud.
 - Added live status probes for cloud authentication and airplane gateway readiness, model listing, minimal inference, and harness configuration; failed JSON status now exits nonzero.
 - Added real harness launching to `s46 run`, passing the exact task/model and recording only a uniquely correlated real transcript whose nonempty task and model exactly match after a successful harness exit.
 
@@ -30,6 +31,8 @@ This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Security
 
+- Reject duplicate or case-aliased JSON keys, invalid UTF-8/surrogates, excessive nesting, trailing documents, and over-limit API and live-status responses before decoding, while retaining forward-compatible unknown-field handling and never deriving auth sentinels from malformed error bodies.
+- Refuse expired or divergent persisted prelaunch metadata before every status token/network/inference effect, harness launch, connect application, or airplane restoration; require Pi for classified DeepSeek connects and launches without restricting ordinary cloud teams or valid airplane routes; reject airplane launches unless the active route uses the exact built-in local gateway and sole local model while retaining durable cloud provenance; revalidate the exact generated Pi provider and model configuration before launch, including rejection of extra provider behavior overrides; and require every prelaunch runtime to state its canonical engine, version, and reasoning behavior explicitly.
 - **Breaking:** Model installation and cached verification require an independently approved complete policy bundled with the CLI, signed advisory evidence, and current activation checks. No production policy is approved yet, so both paths fail closed; registry and receipt roots cannot authorize activation.
 - Require API-derived runtime-closure metadata before configuring or restoring DeepSeek V4 Flash-0731 in Pi, including saved team and aliased snapshot state.
 - Recheck signed audits and advisories after artifact verification, and invalidate matching cached receipts after an authenticated policy refusal.

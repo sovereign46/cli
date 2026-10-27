@@ -87,10 +87,6 @@ func runConnect(ctx context.Context, app *app, req connectRequest) error {
 	if err := validateConnectRequest(req); err != nil {
 		return err
 	}
-	harnessName, adapter, err := selectConnectHarness(ctx, app, req)
-	if err != nil {
-		return err
-	}
 	cfg, err := app.config.LoadConfig()
 	if err != nil {
 		return err
@@ -105,9 +101,30 @@ func runConnect(ctx context.Context, app *app, req connectRequest) error {
 	}
 	existing := cfg.Teams[req.TeamName]
 	targetMode := resolveConnectMode(cfg, existing, req)
+	if err := validateConnectHarnessBeforeCloudEffects(existing, req, targetMode, req.Harness); err != nil {
+		return err
+	}
+	harnessName, adapter, err := selectConnectHarness(ctx, app, req)
+	if err != nil {
+		return err
+	}
+	if err := validateConnectHarnessBeforeCloudEffects(existing, req, targetMode, harnessName); err != nil {
+		return err
+	}
 	team, err := connectTeam(ctx, app, targetMode, existing, req)
 	if err != nil {
 		return err
+	}
+	if targetMode == config.ModeCloud {
+		if err := validateCloudDeepSeekHarness(targetMode, harnessName, "connect", team); err != nil {
+			return err
+		}
+		if err := api.ValidateTeamReleaseMetadata(team, app.nowUTC()); err != nil {
+			return fmt.Errorf("team release metadata is invalid: %w", err)
+		}
+		if err := validateConnectReleaseTransition(existing, team); err != nil {
+			return err
+		}
 	}
 	selectedModel := strs.FirstNonEmpty(req.Model, team.DefaultModel)
 	if selectedModel == "" {
@@ -120,14 +137,26 @@ func runConnect(ctx context.Context, app *app, req connectRequest) error {
 	if err != nil {
 		return err
 	}
-	result := connectResult(team, harnessName, selectedModel, targetMode, plan)
+	result, err := connectResult(team, harnessName, selectedModel, targetMode, plan)
+	if err != nil {
+		return err
+	}
 	cfgBefore, cfgAfter := buildConnectConfigs(cfg, team, harnessName, selectedModel, targetMode, existing, plan)
-	applied, err := applyAtomicConfigAndHarness(ctx, app, cfgBefore, cfgAfter, adapter, plan, "connect")
+	var validate func() error
+	if targetMode == config.ModeCloud {
+		validate = func() error {
+			if err := api.ValidateTeamReleaseMetadata(team, app.nowUTC()); err != nil {
+				return fmt.Errorf("team release metadata is no longer valid before applying connect: %w", err)
+			}
+			return validateConnectReleaseTransition(existing, team)
+		}
+	}
+	applied, err := applyAtomicConfigAndHarnessValidated(ctx, app, cfgBefore, cfgAfter, adapter, plan, "connect", validate)
 	if err != nil {
 		return err
 	}
 	result["files"] = applied.Files
-	return renderConnectApplied(app, team, plan, applied, result)
+	return renderConnectApplied(app, team, targetMode, plan, applied, result)
 }
 
 func (a *app) requireCloudAuthBeforeConnectPrompt(ctx context.Context, req connectRequest) error {
@@ -139,7 +168,19 @@ func (a *app) requireCloudAuthBeforeConnectPrompt(ctx context.Context, req conne
 	if teamName == "" {
 		teamName = cfg.ActiveTeam
 	}
-	if resolveConnectMode(cfg, cfg.Teams[teamName], req) == config.ModeAirplane {
+	if teamName == "" {
+		state, err := a.config.LoadState()
+		if err != nil {
+			return err
+		}
+		teamName = state.CurrentTeam
+	}
+	existing := cfg.Teams[teamName]
+	targetMode := resolveConnectMode(cfg, existing, req)
+	if err := validateConnectHarnessBeforeCloudEffects(existing, req, targetMode, req.Harness); err != nil {
+		return err
+	}
+	if targetMode == config.ModeAirplane {
 		return nil
 	}
 	_, err = a.requireAccessToken(ctx)
@@ -192,8 +233,41 @@ func fillMissingTeamForConnect(cfg config.Config, state config.State, req connec
 	return req, nil
 }
 
-func connectResult(team api.Team, harnessName, model, mode string, plan harness.Plan) map[string]any {
-	return map[string]any{
+func validateConnectHarnessBeforeCloudEffects(existing config.TeamConfig, req connectRequest, mode, harnessName string) error {
+	if mode != config.ModeCloud {
+		return nil
+	}
+	requested := api.Team{DefaultModel: req.Model}
+	return validateCloudDeepSeekHarness(mode, harnessName, "connect", requested, existing.API(req.TeamName), existing.APISnapshot)
+}
+
+func validateCloudDeepSeekHarness(mode, harnessName, operation string, teams ...api.Team) error {
+	if mode != config.ModeCloud || harnessName == "pi" {
+		return nil
+	}
+	for _, team := range teams {
+		if !api.TeamRequiresPrelaunchMetadata(team) {
+			continue
+		}
+		if harnessName == "" {
+			return fmt.Errorf("%s for %s requires an explicit --harness=pi", operation, api.DeepSeekModelID)
+		}
+		return fmt.Errorf("%s for %s requires the Pi harness; got %q", operation, api.DeepSeekModelID, harnessName)
+	}
+	return nil
+}
+
+func validateConnectReleaseTransition(existing config.TeamConfig, next api.Team) error {
+	previous := existing.APISnapshot
+	previousProtected := isProtectedCloudTeam(previous) || isProtectedCloudTeam(existing.API(previous.Name))
+	if !previousProtected || isProtectedCloudTeam(next) {
+		return nil
+	}
+	return fmt.Errorf("team release metadata was removed from an existing classified route; disconnect it explicitly before connecting an unclassified route")
+}
+
+func connectResult(team api.Team, harnessName, model, mode string, plan harness.Plan) (map[string]any, error) {
+	result := map[string]any{
 		"team":       team.Name,
 		"region":     team.Region,
 		"mode":       mode,
@@ -203,6 +277,18 @@ func connectResult(team api.Team, harnessName, model, mode string, plan harness.
 		"operations": plan.Operations,
 		"files":      plan.Files,
 	}
+	if team.ReleaseChannel != "" {
+		if team.ProductionCertified == nil || team.ProductionAPIPath == nil {
+			return nil, fmt.Errorf("release metadata lacks explicit production claims")
+		}
+		result["releaseChannel"] = team.ReleaseChannel
+		result["productionCertified"] = *team.ProductionCertified
+		result["productionAPIPath"] = *team.ProductionAPIPath
+		result["policySha256"] = team.PolicySHA256
+		result["policyExpiresAt"] = team.PolicyExpiresAt
+		result["upstreamCredentialExpiresAt"] = team.UpstreamCredentialExpiresAt
+	}
+	return result, nil
 }
 
 func buildConnectConfigs(cfg config.Config, team api.Team, harnessName, model, mode string, existing config.TeamConfig, plan harness.Plan) (config.Config, config.Config) {
@@ -212,8 +298,15 @@ func buildConnectConfigs(cfg config.Config, team api.Team, harnessName, model, m
 	after.Mode = mode
 	teamConfig := config.TeamConfigFromAPI(team, harnessName, model, mode)
 	if mode == config.ModeAirplane {
-		if existing.APISnapshot.Endpoint != "" && !isLocalEndpoint(existing.APISnapshot.Endpoint) {
+		if existing.APISnapshot.Endpoint != "" &&
+			(!isLocalEndpoint(existing.APISnapshot.Endpoint) || isProtectedCloudTeam(existing.APISnapshot)) {
 			teamConfig.APISnapshot = existing.APISnapshot
+			teamConfig.ReleaseChannel = existing.APISnapshot.ReleaseChannel
+			teamConfig.ProductionCertified = existing.APISnapshot.ProductionCertified
+			teamConfig.ProductionAPIPath = existing.APISnapshot.ProductionAPIPath
+			teamConfig.PolicySHA256 = existing.APISnapshot.PolicySHA256
+			teamConfig.PolicyExpiresAt = existing.APISnapshot.PolicyExpiresAt
+			teamConfig.UpstreamCredentialExpiresAt = existing.APISnapshot.UpstreamCredentialExpiresAt
 		}
 		teamConfig.HarnessSnapshot = mergeAirplaneHarnessSnapshot(existing.HarnessSnapshot, harness.SnapshotPlan(plan))
 	}
@@ -228,10 +321,34 @@ func buildConnectConfigs(cfg config.Config, team api.Team, harnessName, model, m
 // error) are joined into a single error so the user sees the original
 // cause plus any cleanup failures that may need manual reconciliation.
 func applyAtomicConfigAndHarness(ctx context.Context, app *app, before, after config.Config, adapter harness.Adapter, plan harness.Plan, op string) (harness.AppliedPlan, error) {
+	return applyAtomicConfigAndHarnessValidated(ctx, app, before, after, adapter, plan, op, nil)
+}
+
+func applyAtomicConfigAndHarnessValidated(ctx context.Context, app *app, before, after config.Config, adapter harness.Adapter, plan harness.Plan, op string, validate func() error) (harness.AppliedPlan, error) {
+	return applyAtomicConfigValidated(app, before, after, op, validate, func() (harness.AppliedPlan, error) {
+		return adapter.Apply(ctx, plan)
+	})
+}
+
+func applyAtomicConfigValidated(app *app, before, after config.Config, op string, validate func() error, apply func() (harness.AppliedPlan, error)) (harness.AppliedPlan, error) {
+	if validate != nil {
+		if err := validate(); err != nil {
+			return harness.AppliedPlan{}, err
+		}
+	}
 	if err := app.config.SaveConfig(after); err != nil {
 		return harness.AppliedPlan{}, fmt.Errorf("%s: %w", op, err)
 	}
-	applied, err := adapter.Apply(ctx, plan)
+	if validate != nil {
+		if err := validate(); err != nil {
+			saveErr := app.config.SaveConfig(before)
+			return harness.AppliedPlan{}, joinAtomicErrors(op, err, nil, saveErr)
+		}
+	}
+	applied, err := apply()
+	if err == nil && validate != nil {
+		err = validate()
+	}
 	if err == nil {
 		return applied, nil
 	}
@@ -292,7 +409,7 @@ func isCanonicalCloudTeam(name string) bool {
 	return parts[0] != "" && parts[1] != ""
 }
 
-func renderConnectApplied(app *app, team api.Team, plan harness.Plan, applied harness.AppliedPlan, result map[string]any) error {
+func renderConnectApplied(app *app, team api.Team, mode string, plan harness.Plan, applied harness.AppliedPlan, result map[string]any) error {
 	if ok, err := app.writeStructured(result); ok {
 		return err
 	}
@@ -306,7 +423,14 @@ func renderConnectApplied(app *app, team api.Team, plan harness.Plan, applied ha
 			lines = append(lines, fmt.Sprintf("[s46] backup: %s", file.BackupPath))
 		}
 	}
-	if isLocalEndpoint(team.Endpoint) {
+	if team.ReleaseChannel == api.PrelaunchReleaseChannel {
+		lines = append(lines,
+			"[s46] release: prelaunch · not production-certified · not the production API path",
+			fmt.Sprintf("[s46] policy:  %s · expires %s", team.PolicySHA256, team.PolicyExpiresAt),
+			fmt.Sprintf("[s46] credential: expires %s", team.UpstreamCredentialExpiresAt),
+		)
+	}
+	if mode == config.ModeAirplane {
 		lines = append(lines, "[s46] airplane harness configuration only; local runtime setup and readiness were not verified")
 		lines = append(lines, "[s46] next: run `s46 airplane setup`, then `s46 status`")
 	} else {

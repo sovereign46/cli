@@ -90,6 +90,8 @@ go run ./cmd/s46 share @dscape/auth-redirect-fix
 
 ## Releases
 
+> **Publication status:** This procedure documents retained candidate/source tooling; it is not current publication authority. The canonical forward publication path is `sovereign46/release-broker`, but its CLI 0.3 profiles and protected completion-stage, tag, publish, and mirror services are not implemented. No 0.3 release or qualified airplane authority exists, so do not use the procedure below to claim or perform an authorized publication.
+
 Release preparation and publication are deliberately separate. Preparation requires a clean tree and `[Unreleased]` bullets; it updates `VERSION`, `internal/version/version.go`, and the changelog and runs tests, but never commits, tags, or pushes.
 
 ```sh

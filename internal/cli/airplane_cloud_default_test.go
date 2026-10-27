@@ -168,12 +168,12 @@ func TestCloudTeamSnapshotRequiresSavedDefault(t *testing.T) {
 	}
 }
 
-func TestCloudTeamSnapshotClassifiesByEndpointNotModelID(t *testing.T) {
+func TestCloudTeamSnapshotClassifiesByEndpointOrProtectedModelContract(t *testing.T) {
 	for _, model := range []string{api.DevstralModelID, api.DeepSeekModelID} {
 		for _, endpoint := range []string{airplane.LocalGatewayURL, api.DefaultGatewayURL} {
 			t.Run(model+endpoint, func(t *testing.T) {
 				snapshot, ok := cloudTeamSnapshot(api.DefaultTeam, config.TeamConfig{Endpoint: endpoint, DefaultModel: model, Models: []string{model}})
-				if want := endpoint == api.DefaultGatewayURL; ok != want {
+				if want := endpoint == api.DefaultGatewayURL || model == api.DeepSeekModelID; ok != want {
 					t.Fatalf("cloud snapshot = %v for %s with %s", ok, endpoint, model)
 				}
 				if ok && snapshot.DefaultModel != model {

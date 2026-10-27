@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 
 	"github.com/sovereign46/cli/internal/airplane"
@@ -15,10 +16,9 @@ import (
 )
 
 const (
-	piDirName             = ".pi"
-	piAgentDir            = "agent"
-	deepSeekModelID       = api.DeepSeekModelID
-	maxRuntimeClosureSize = 64 << 20
+	piDirName       = ".pi"
+	piAgentDir      = "agent"
+	deepSeekModelID = api.DeepSeekModelID
 )
 
 func modelsPath(env map[string]string) string {
@@ -61,6 +61,20 @@ func (a Adapter) Launch(ctx context.Context, req harness.LaunchRequest) error {
 	return harness.LaunchExecutable(ctx, "pi", args, req)
 }
 
+func (a Adapter) ValidateLaunchConfig(_ context.Context, req harness.LaunchConfigRequest) error {
+	if req.Model == "" || !slices.Contains(req.Team.Models, req.Model) {
+		return fmt.Errorf("Pi launch model %q is not present in the saved team catalog", req.Model)
+	}
+	configuration, _, err := readLiveConfiguration(req.Env)
+	if err != nil {
+		return err
+	}
+	if err := validateLiveConfiguration(configuration, req.Team, req.Mode, req.Env); err != nil {
+		return fmt.Errorf("Pi configuration does not exactly match the saved team: %w", err)
+	}
+	return nil
+}
+
 func (a Adapter) PlanConnect(ctx context.Context, req harness.ConnectRequest) (harness.Plan, error) {
 	path := modelsPath(req.Env)
 	oldContent, err := os.ReadFile(path)
@@ -77,17 +91,11 @@ func (a Adapter) PlanConnect(ctx context.Context, req harness.ConnectRequest) (h
 	if providers == nil {
 		providers = map[string]any{}
 	}
-	models, err := piModels(req.Team, req.Mode, req.Env)
+	provider, err := piProvider(req.Team, req.Mode, req.Env)
 	if err != nil {
 		return harness.Plan{}, err
 	}
-	providers["s46"] = map[string]any{
-		"baseUrl":    req.Team.Endpoint + "/v1",
-		"api":        "openai-completions",
-		"apiKey":     "!s46 token --refresh",
-		"authHeader": true,
-		"models":     models,
-	}
+	providers["s46"] = provider
 	existing["providers"] = providers
 	content, err := json.MarshalIndent(existing, "", "  ")
 	if err != nil {
@@ -201,27 +209,77 @@ func (a Adapter) Apply(ctx context.Context, plan harness.Plan) (harness.AppliedP
 	return harness.ApplyPlan(nil, plan)
 }
 
-func (a Adapter) Status(ctx context.Context, req harness.StatusRequest) []harness.StatusCheck {
-	path := modelsPath(req.Env)
-	raw, err := os.ReadFile(path)
+func (a Adapter) Status(_ context.Context, req harness.StatusRequest) []harness.StatusCheck {
+	configuration, path, err := readLiveConfiguration(req.Env)
 	if os.IsNotExist(err) {
 		return []harness.StatusCheck{{Name: "pi-config", OK: false, Message: fmt.Sprintf("not configured; run `s46 connect %s --harness=pi`", req.TeamName)}}
 	}
 	if err != nil {
 		return []harness.StatusCheck{{Name: "pi-config", OK: false, Message: err.Error()}}
 	}
-	models := map[string]any{}
-	if err := json.Unmarshal(raw, &models); err != nil {
-		return []harness.StatusCheck{{Name: "pi-config", OK: false, Message: err.Error()}}
-	}
-	providers, _ := models["providers"].(map[string]any)
+	providers, _ := configuration["providers"].(map[string]any)
 	s46, _ := providers["s46"].(map[string]any)
+	preflightErr := validateLiveConfiguration(configuration, req.Team, req.Mode, req.Env)
+	preflightMessage := "configuration exactly matches the saved team"
+	if preflightErr != nil {
+		preflightMessage = preflightErr.Error()
+	}
 	return []harness.StatusCheck{
 		{Name: "pi-provider", OK: s46 != nil, Message: path},
-		{Name: "pi-base-url", OK: s46["baseUrl"] == req.Endpoint+"/v1", Message: fmt.Sprint(s46["baseUrl"])},
+		{Name: "pi-base-url", OK: s46["baseUrl"] == req.Team.Endpoint+"/v1", Message: fmt.Sprint(s46["baseUrl"])},
+		{Name: "pi-api", OK: s46["api"] == "openai-completions", Message: fmt.Sprint(s46["api"])},
 		{Name: "pi-token-helper", OK: s46["apiKey"] == "!s46 token --refresh", Message: fmt.Sprint(s46["apiKey"])},
 		{Name: "pi-auth-header", OK: s46["authHeader"] == true, Message: fmt.Sprint(s46["authHeader"])},
+		{Name: "pi-model-runtime", OK: preflightErr == nil, Message: preflightMessage},
 	}
+}
+
+func readLiveConfiguration(env map[string]string) (map[string]any, string, error) {
+	path := modelsPath(env)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, path, err
+	}
+	configuration := map[string]any{}
+	if err := api.UnmarshalStrictJSON(raw, &configuration); err != nil {
+		return nil, path, fmt.Errorf("parse %s: %w", path, err)
+	}
+	return configuration, path, nil
+}
+
+func validateLiveConfiguration(configuration map[string]any, team api.Team, mode string, env map[string]string) error {
+	providers, ok := configuration["providers"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("providers must be an object")
+	}
+	provider, ok := providers["s46"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("providers.s46 must be an object")
+	}
+	expected, err := normalizedExpectedProvider(team, mode, env)
+	if err != nil {
+		return err
+	}
+	if !reflect.DeepEqual(provider, expected) {
+		return fmt.Errorf("providers.s46 does not exactly match the generated saved-team provider configuration")
+	}
+	return nil
+}
+
+func normalizedExpectedProvider(team api.Team, mode string, env map[string]string) (map[string]any, error) {
+	expected, err := piProvider(team, mode, env)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := json.Marshal(expected)
+	if err != nil {
+		return nil, err
+	}
+	var normalized map[string]any
+	if err := api.UnmarshalStrictJSON(raw, &normalized); err != nil {
+		return nil, err
+	}
+	return normalized, nil
 }
 
 type snapshotFileKind string
@@ -275,21 +333,36 @@ func ValidateSnapshotRestore(team api.Team, snapshot config.HarnessSnapshot, env
 	return nil
 }
 
+func piProvider(team api.Team, mode string, env map[string]string) (map[string]any, error) {
+	models, err := piModels(team, mode, env)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"baseUrl":    team.Endpoint + "/v1",
+		"api":        "openai-completions",
+		"apiKey":     "!s46 token --refresh",
+		"authHeader": true,
+		"models":     models,
+	}, nil
+}
+
 func piModels(team api.Team, mode string, env map[string]string) ([]map[string]any, error) {
 	models := make([]map[string]any, 0, len(team.Models))
 	for _, id := range team.Models {
 		metadata, ok := team.ModelMetadata[id]
 		if mode == airplane.ModeAirplane && id == airplane.LocalModelID {
 			metadata = api.ModelRuntime{ContextWindow: airplane.ContextWindow(env), MaxTokens: airplane.MaxTokens(env)}
-		} else if !ok || !validRuntimeMetadata(metadata) {
+		} else if !ok || !metadata.HasValidTokenLimits() {
 			return nil, fmt.Errorf("team returned no valid runtime metadata for %s; refresh the model catalog from the team API", id)
-		} else if id == deepSeekModelID && !validRuntimeClosure(metadata) {
+		} else if id == deepSeekModelID && !api.ValidRuntimeClosureBinding(metadata) {
 			return nil, fmt.Errorf("team returned no syntactically usable API closure binding for %s; refresh the model catalog from the team API", id)
 		}
+		reasoning := metadata.ReasoningEnabled()
 		model := map[string]any{
 			"id":            id,
 			"name":          modelName(id),
-			"reasoning":     metadata.Reasoning,
+			"reasoning":     reasoning,
 			"input":         []string{"text"},
 			"contextWindow": metadata.ContextWindow,
 			"maxTokens":     metadata.MaxTokens,
@@ -300,7 +373,7 @@ func piModels(team api.Team, mode string, env map[string]string) ([]map[string]a
 				"cacheWrite": 0,
 			},
 		}
-		if mode != airplane.ModeAirplane && id == deepSeekModelID && metadata.Engine == "vllm" && metadata.Version == "0.31.0" && metadata.Reasoning {
+		if mode != airplane.ModeAirplane && id == deepSeekModelID && metadata.Engine == "vllm" && metadata.Version == "0.31.0" && reasoning {
 			// This runtime defaults to thinking when reasoning_effort is omitted.
 			model["thinkingLevelMap"] = map[string]string{"off": "none"}
 		}
@@ -512,48 +585,13 @@ func validateDeepSeekRuntime(team api.Team) error {
 		return fmt.Errorf("no current saved team authorization")
 	}
 	metadata, ok := team.ModelMetadata[deepSeekModelID]
-	if !ok || !validRuntimeMetadata(metadata) {
+	if !ok || !metadata.HasValidTokenLimits() {
 		return fmt.Errorf("no valid runtime metadata derived from the team API")
 	}
-	if !validRuntimeClosure(metadata) {
+	if !api.ValidRuntimeClosureBinding(metadata) {
 		return fmt.Errorf("no syntactically usable closure binding metadata derived from the team API")
 	}
 	return nil
-}
-
-func validRuntimeMetadata(runtime api.ModelRuntime) bool {
-	return runtime.ContextWindow > 0 && runtime.MaxTokens > 0 && runtime.MaxTokens <= runtime.ContextWindow
-}
-
-func validRuntimeClosure(runtime api.ModelRuntime) bool {
-	if len(runtime.ClosureSHA256) != 64 || runtime.ClosureSizeBytes <= 0 || runtime.ClosureSizeBytes > maxRuntimeClosureSize {
-		return false
-	}
-	for _, value := range []byte(runtime.ClosureSHA256) {
-		if !('0' <= value && value <= '9' || 'a' <= value && value <= 'f') {
-			return false
-		}
-	}
-	return !periodicHexDigest(runtime.ClosureSHA256)
-}
-
-func periodicHexDigest(digest string) bool {
-	for period := 1; period < len(digest); period++ {
-		if len(digest)%period != 0 {
-			continue
-		}
-		periodic := true
-		for i := period; i < len(digest); i++ {
-			if digest[i] != digest[i%period] {
-				periodic = false
-				break
-			}
-		}
-		if periodic {
-			return true
-		}
-	}
-	return false
 }
 
 func modelName(id string) string {

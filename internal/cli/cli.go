@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -142,6 +143,7 @@ func newApp(runtime Runtime, opts *options) (*app, error) {
 	}
 	app := &app{
 		runtime:    runtime,
+		now:        time.Now,
 		options:    opts,
 		config:     store,
 		configData: cfg,

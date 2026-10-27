@@ -115,7 +115,7 @@ func TestStatusReportsConfiguredAndDriftedSettings(t *testing.T) {
 	if err := os.WriteFile(settingsPath, []byte(good), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	checks := New().Status(context.Background(), harness.StatusRequest{Env: env, TeamName: "@s46/engineering", Endpoint: "https://gateway.s46.dev", DefaultModel: "s46/kimi-k2.6"})
+	checks := New().Status(context.Background(), harness.StatusRequest{Env: env, TeamName: "@s46/engineering", Team: api.Team{Endpoint: "https://gateway.s46.dev", DefaultModel: "s46/kimi-k2.6"}})
 	if len(checks) != 3 {
 		t.Fatalf("expected 3 checks, got %d", len(checks))
 	}
@@ -126,7 +126,7 @@ func TestStatusReportsConfiguredAndDriftedSettings(t *testing.T) {
 	}
 
 	// Now flip the endpoint and re-check: claude-base-url should fail.
-	checks = New().Status(context.Background(), harness.StatusRequest{Env: env, TeamName: "@s46/engineering", Endpoint: "https://other.s46.dev", DefaultModel: "s46/kimi-k2.6"})
+	checks = New().Status(context.Background(), harness.StatusRequest{Env: env, TeamName: "@s46/engineering", Team: api.Team{Endpoint: "https://other.s46.dev", DefaultModel: "s46/kimi-k2.6"}})
 	if okOf(checks, "claude-base-url") {
 		t.Errorf("expected claude-base-url to fail on mismatched endpoint: %#v", checks)
 	}

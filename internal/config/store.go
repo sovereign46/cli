@@ -24,13 +24,19 @@ type Config struct {
 }
 
 type TeamConfig struct {
-	Endpoint       string   `json:"endpoint"`
-	Region         string   `json:"region"`
-	DefaultHarness string   `json:"defaultHarness"`
-	DefaultModel   string   `json:"defaultModel"`
-	WorkerHosts    []string `json:"workerHosts,omitempty"`
-	Models         []string `json:"models,omitempty"`
-	APISnapshot    api.Team `json:"apiSnapshot"`
+	Endpoint                    string   `json:"endpoint"`
+	Region                      string   `json:"region"`
+	DefaultHarness              string   `json:"defaultHarness"`
+	DefaultModel                string   `json:"defaultModel"`
+	WorkerHosts                 []string `json:"workerHosts,omitempty"`
+	Models                      []string `json:"models,omitempty"`
+	ReleaseChannel              string   `json:"releaseChannel,omitempty"`
+	ProductionCertified         *bool    `json:"productionCertified,omitempty"`
+	ProductionAPIPath           *bool    `json:"productionAPIPath,omitempty"`
+	PolicySHA256                string   `json:"policySha256,omitempty"`
+	PolicyExpiresAt             string   `json:"policyExpiresAt,omitempty"`
+	UpstreamCredentialExpiresAt string   `json:"upstreamCredentialExpiresAt,omitempty"`
+	APISnapshot                 api.Team `json:"apiSnapshot"`
 	// HarnessSnapshot records the harness files as they were before
 	// airplane mode rewrote them, so `airplane mode off` can restore.
 	HarnessSnapshot *HarnessSnapshot `json:"harnessSnapshot,omitempty"`
@@ -107,6 +113,8 @@ func (tc TeamConfig) Clone() TeamConfig {
 	clone := tc
 	clone.WorkerHosts = append([]string(nil), tc.WorkerHosts...)
 	clone.Models = append([]string(nil), tc.Models...)
+	clone.ProductionCertified = cloneBool(tc.ProductionCertified)
+	clone.ProductionAPIPath = cloneBool(tc.ProductionAPIPath)
 	clone.APISnapshot = cloneAPITeam(tc.APISnapshot)
 	if tc.HarnessSnapshot != nil {
 		snapshot := *tc.HarnessSnapshot
@@ -119,14 +127,25 @@ func (tc TeamConfig) Clone() TeamConfig {
 func cloneAPITeam(team api.Team) api.Team {
 	team.WorkerHosts = append([]string(nil), team.WorkerHosts...)
 	team.Models = append([]string(nil), team.Models...)
+	team.ProductionCertified = cloneBool(team.ProductionCertified)
+	team.ProductionAPIPath = cloneBool(team.ProductionAPIPath)
 	if team.ModelMetadata != nil {
 		metadata := make(map[string]api.ModelRuntime, len(team.ModelMetadata))
 		for id, runtime := range team.ModelMetadata {
+			runtime.Reasoning = cloneBool(runtime.Reasoning)
 			metadata[id] = runtime
 		}
 		team.ModelMetadata = metadata
 	}
 	return team
+}
+
+func cloneBool(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	clone := *value
+	return &clone
 }
 
 // ActiveMode returns the workspace mode. Mode is a workspace-level
@@ -150,12 +169,18 @@ func (s *Store) LoadConfig() (Config, error) {
 	if cfg.Teams == nil {
 		cfg.Teams = map[string]TeamConfig{}
 	}
+	if err := validateReleaseMetadataCopies(cfg); err != nil {
+		return Config{}, fmt.Errorf("load config: %w", err)
+	}
 	return cfg, nil
 }
 
 func (s *Store) SaveConfig(cfg Config) error {
 	if cfg.Teams == nil {
 		cfg.Teams = map[string]TeamConfig{}
+	}
+	if err := validateReleaseMetadataCopies(cfg); err != nil {
+		return fmt.Errorf("save config: %w", err)
 	}
 	if err := WriteJSONAtomic(s.ConfigPath, cfg, 0o600); err != nil {
 		return fmt.Errorf("save config: %w", err)
@@ -198,25 +223,93 @@ func TeamConfigFromAPI(team api.Team, harness string, model string, _ string) Te
 	if model == "" {
 		model = team.DefaultModel
 	}
+	team = cloneAPITeam(team)
 	return TeamConfig{
-		Endpoint:       team.Endpoint,
-		Region:         team.Region,
-		DefaultHarness: harness,
-		DefaultModel:   model,
-		WorkerHosts:    team.WorkerHosts,
-		Models:         team.Models,
-		APISnapshot:    team,
+		Endpoint:                    team.Endpoint,
+		Region:                      team.Region,
+		DefaultHarness:              harness,
+		DefaultModel:                model,
+		WorkerHosts:                 team.WorkerHosts,
+		Models:                      team.Models,
+		ReleaseChannel:              team.ReleaseChannel,
+		ProductionCertified:         cloneBool(team.ProductionCertified),
+		ProductionAPIPath:           cloneBool(team.ProductionAPIPath),
+		PolicySHA256:                team.PolicySHA256,
+		PolicyExpiresAt:             team.PolicyExpiresAt,
+		UpstreamCredentialExpiresAt: team.UpstreamCredentialExpiresAt,
+		APISnapshot:                 team,
 	}
 }
 
 func (tc TeamConfig) API(name string) api.Team {
+	snapshot := cloneAPITeam(tc.APISnapshot)
 	return api.Team{
-		Name:          name,
-		Endpoint:      tc.Endpoint,
-		Region:        tc.Region,
-		WorkerHosts:   tc.WorkerHosts,
-		DefaultModel:  tc.DefaultModel,
-		Models:        tc.Models,
-		ModelMetadata: cloneAPITeam(tc.APISnapshot).ModelMetadata,
+		Name:                        name,
+		Endpoint:                    tc.Endpoint,
+		Region:                      tc.Region,
+		WorkerHosts:                 tc.WorkerHosts,
+		DefaultModel:                tc.DefaultModel,
+		Models:                      tc.Models,
+		ModelMetadata:               snapshot.ModelMetadata,
+		ReleaseChannel:              tc.ReleaseChannel,
+		ProductionCertified:         cloneBool(tc.ProductionCertified),
+		ProductionAPIPath:           cloneBool(tc.ProductionAPIPath),
+		PolicySHA256:                tc.PolicySHA256,
+		PolicyExpiresAt:             tc.PolicyExpiresAt,
+		UpstreamCredentialExpiresAt: tc.UpstreamCredentialExpiresAt,
 	}
+}
+
+// APIForMode separates saved cloud-route classification from the active local
+// airplane route. API remains the complete cloud snapshot projection used for
+// restoration and consistency checks.
+func (tc TeamConfig) APIForMode(name, mode string) api.Team {
+	team := tc.API(name)
+	if mode == ModeAirplane {
+		team.ReleaseChannel = ""
+		team.ProductionCertified = nil
+		team.ProductionAPIPath = nil
+		team.PolicySHA256 = ""
+		team.PolicyExpiresAt = ""
+		team.UpstreamCredentialExpiresAt = ""
+	}
+	return team
+}
+
+func validateReleaseMetadataCopies(cfg Config) error {
+	for name, team := range cfg.Teams {
+		current := api.Team{
+			ReleaseChannel: team.ReleaseChannel, ProductionCertified: team.ProductionCertified,
+			ProductionAPIPath: team.ProductionAPIPath, PolicySHA256: team.PolicySHA256,
+			PolicyExpiresAt:             team.PolicyExpiresAt,
+			UpstreamCredentialExpiresAt: team.UpstreamCredentialExpiresAt,
+		}
+		snapshot := team.APISnapshot
+		if !current.HasReleaseMetadata() && !snapshot.HasReleaseMetadata() {
+			continue
+		}
+		if snapshot.Endpoint == "" {
+			return fmt.Errorf("team %s release metadata has no matching API snapshot; reconnect the team", name)
+		}
+		if !sameReleaseMetadata(current, snapshot) {
+			return fmt.Errorf("team %s release metadata differs from its API snapshot; reconnect the team", name)
+		}
+		if cfg.ActiveMode() == ModeCloud && team.Endpoint != snapshot.Endpoint {
+			return fmt.Errorf("team %s cloud endpoint differs from its classified API snapshot; reconnect the team", name)
+		}
+	}
+	return nil
+}
+
+func sameReleaseMetadata(left, right api.Team) bool {
+	return left.ReleaseChannel == right.ReleaseChannel &&
+		sameBool(left.ProductionCertified, right.ProductionCertified) &&
+		sameBool(left.ProductionAPIPath, right.ProductionAPIPath) &&
+		left.PolicySHA256 == right.PolicySHA256 &&
+		left.PolicyExpiresAt == right.PolicyExpiresAt &&
+		left.UpstreamCredentialExpiresAt == right.UpstreamCredentialExpiresAt
+}
+
+func sameBool(left, right *bool) bool {
+	return left == nil && right == nil || left != nil && right != nil && *left == *right
 }

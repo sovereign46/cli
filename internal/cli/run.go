@@ -10,6 +10,9 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/sovereign46/cli/internal/airplane"
+	"github.com/sovereign46/cli/internal/api"
+	"github.com/sovereign46/cli/internal/config"
 	"github.com/sovereign46/cli/internal/harness"
 	sessioncmd "github.com/sovereign46/cli/internal/session"
 )
@@ -63,6 +66,26 @@ func launchConnectedHarness(ctx context.Context, app *app, runtime Runtime, task
 	if !ok || strings.TrimSpace(cfg.ActiveTeam) == "" {
 		return sessioncmd.RunResult{}, "", fmt.Errorf("no active team; run `s46 connect <team> --harness <name>` first")
 	}
+	mode := cfg.ActiveMode()
+	activeTeam := team.APIForMode(cfg.ActiveTeam, mode)
+	if err := validateActiveHarnessRoute(mode, activeTeam); err != nil {
+		return sessioncmd.RunResult{}, "", err
+	}
+	if err := validateCloudDeepSeekHarness(mode, team.DefaultHarness, "launch", activeTeam, team.APISnapshot); err != nil {
+		return sessioncmd.RunResult{}, "", err
+	}
+	validateReleaseMetadata := func() error {
+		if mode != config.ModeCloud {
+			return nil
+		}
+		if err := api.ValidateTeamReleaseMetadata(activeTeam, app.nowUTC()); err != nil {
+			return fmt.Errorf("active team release metadata is invalid: %w", err)
+		}
+		return nil
+	}
+	if err := validateReleaseMetadata(); err != nil {
+		return sessioncmd.RunResult{}, "", err
+	}
 	adapter, err := app.harness.Get(team.DefaultHarness)
 	if err != nil {
 		return sessioncmd.RunResult{}, "", err
@@ -108,6 +131,15 @@ func launchConnectedHarness(ctx context.Context, app *app, runtime Runtime, task
 		launchStdout = runtime.Stderr
 	}
 	request := harness.LaunchRequest{Env: runtime.Env, Stdin: runtime.Stdin, Stdout: launchStdout, Stderr: runtime.Stderr, Task: task, Model: effectiveModel, SessionID: launchSessionID}
+	if validator, ok := adapter.(harness.LaunchConfigValidator); ok {
+		validationRequest := harness.LaunchConfigRequest{Env: runtime.Env, Team: activeTeam, Mode: mode, Model: effectiveModel}
+		if err := validator.ValidateLaunchConfig(ctx, validationRequest); err != nil {
+			return sessioncmd.RunResult{}, "", fmt.Errorf("refusing harness launch: %w", err)
+		}
+	}
+	if err := validateReleaseMetadata(); err != nil {
+		return sessioncmd.RunResult{}, "", fmt.Errorf("refusing harness launch: %w", err)
+	}
 	if err := adapter.Launch(ctx, request); err != nil {
 		return sessioncmd.RunResult{}, "", err
 	}
@@ -127,6 +159,22 @@ func launchConnectedHarness(ctx context.Context, app *app, runtime Runtime, task
 		return sessioncmd.RunResult{}, "", err
 	}
 	return result, adapter.Name(), nil
+}
+
+func validateActiveHarnessRoute(mode string, team api.Team) error {
+	switch mode {
+	case config.ModeCloud:
+		return nil
+	case config.ModeAirplane:
+		if team.Endpoint != airplane.LocalGatewayURL ||
+			team.DefaultModel != airplane.LocalModelID ||
+			!slices.Equal(team.Models, []string{airplane.LocalModelID}) {
+			return fmt.Errorf("airplane mode requires the exact local endpoint %q and sole model %q; run `s46 airplane mode on` to repair the active route", airplane.LocalGatewayURL, airplane.LocalModelID)
+		}
+		return nil
+	default:
+		return fmt.Errorf("active team has invalid mode %q; reconnect before launching a harness", mode)
+	}
 }
 
 func validateDiscoveredHarnessSession(discovered harness.LocalSession, harnessName, model, task string) error {

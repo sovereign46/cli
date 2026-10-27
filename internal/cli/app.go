@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/sovereign46/cli/internal/api"
 	"github.com/sovereign46/cli/internal/auth"
@@ -27,6 +28,7 @@ type app struct {
 	harness      *harness.Registry
 	renderer     output.Renderer
 	promptReader *inputReader
+	now          func() time.Time
 }
 
 type inputReader struct {
@@ -39,6 +41,13 @@ func authStatus(state config.State) string {
 		return state.CurrentUser
 	}
 	return "not authenticated"
+}
+
+func (a *app) nowUTC() time.Time {
+	if a != nil && a.now != nil {
+		return a.now().UTC()
+	}
+	return time.Now().UTC()
 }
 
 func (a *app) requireAccessToken(ctx context.Context) (string, error) {

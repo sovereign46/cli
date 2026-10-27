@@ -169,6 +169,10 @@ func (c *MockClient) modelList() []string {
 	return DefaultModelList()
 }
 
+func runtimeReasoning(enabled bool) *bool {
+	return &enabled
+}
+
 func mockModelMetadata(models []string) map[string]ModelRuntime {
 	metadata := make(map[string]ModelRuntime, len(models))
 	for _, model := range models {
@@ -181,7 +185,7 @@ func mockModelMetadata(models []string) map[string]ModelRuntime {
 				ClosureSizeBytes: 4096,
 				ContextWindow:    262144,
 				MaxTokens:        32768,
-				Reasoning:        true,
+				Reasoning:        runtimeReasoning(true),
 			}
 		}
 		metadata[model] = runtime

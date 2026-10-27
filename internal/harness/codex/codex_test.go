@@ -75,7 +75,7 @@ func TestStatusReadsConfiguredFile(t *testing.T) {
 	if err := os.WriteFile(configPath, plan.Files[0].Content, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	checks := New().Status(context.Background(), harness.StatusRequest{Env: env, TeamName: "@s46/engineering", Endpoint: "https://gateway.s46.dev", DefaultModel: api.DefaultModel})
+	checks := New().Status(context.Background(), harness.StatusRequest{Env: env, TeamName: "@s46/engineering", Team: api.Team{Endpoint: "https://gateway.s46.dev", DefaultModel: api.DefaultModel}})
 	if len(checks) != 4 {
 		t.Fatalf("expected 4 checks, got %#v", checks)
 	}

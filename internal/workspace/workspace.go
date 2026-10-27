@@ -63,7 +63,7 @@ func Resolve(store *config.Store) (Context, error) {
 		State:      state,
 		TeamName:   teamName,
 		TeamConfig: teamConfig,
-		Team:       teamConfig.API(teamName),
+		Team:       teamConfig.APIForMode(teamName, cfg.ActiveMode()),
 		Mode:       cfg.ActiveMode(),
 	}, nil
 }

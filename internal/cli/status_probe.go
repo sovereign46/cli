@@ -12,10 +12,20 @@ import (
 	"time"
 
 	"github.com/sovereign46/cli/internal/airplane"
+	"github.com/sovereign46/cli/internal/api"
 	"github.com/sovereign46/cli/internal/harness"
 )
 
 const statusResponseLimit = 1 << 20
+
+var gatewayStatusSteps = []struct {
+	name string
+	run  func(gatewayStatusProbe, context.Context) harness.StatusCheck
+}{
+	{name: "readiness", run: gatewayStatusProbe.readiness},
+	{name: "model", run: gatewayStatusProbe.model},
+	{name: "inference", run: gatewayStatusProbe.inference},
+}
 
 type gatewayStatusProbe struct {
 	Env      map[string]string
@@ -26,29 +36,67 @@ type gatewayStatusProbe struct {
 }
 
 func (p gatewayStatusProbe) Checks(ctx context.Context) []harness.StatusCheck {
+	checks, _ := p.ChecksValidated(ctx, nil)
+	return checks
+}
+
+func (p gatewayStatusProbe) ChecksValidated(ctx context.Context, validate func() error) ([]harness.StatusCheck, error) {
 	if checks, ok := statusProbeOverride(p.Env, p.Model); ok {
-		return checks
+		return runValidatedStatusChecks(checks, validate)
 	}
 	if strings.TrimSpace(p.Endpoint) == "" {
 		message := "no active gateway endpoint; run `s46 connect @org/team --harness <name>`"
-		return []harness.StatusCheck{
-			{Name: "readiness", OK: false, Message: message},
-			{Name: "model", OK: false, Message: message},
-			{Name: "inference", OK: false, Message: message},
-		}
+		return failedGatewayStatusChecks(message), nil
 	}
 	if _, err := url.ParseRequestURI(p.Endpoint); err != nil {
 		message := "invalid configured gateway endpoint: " + err.Error()
-		return []harness.StatusCheck{
-			{Name: "readiness", OK: false, Message: message},
-			{Name: "model", OK: false, Message: message},
-			{Name: "inference", OK: false, Message: message},
-		}
+		return failedGatewayStatusChecks(message), nil
 	}
-	readiness := p.readiness(ctx)
-	model := p.model(ctx)
-	inference := p.inference(ctx)
-	return []harness.StatusCheck{readiness, model, inference}
+	checks := make([]harness.StatusCheck, 0, len(gatewayStatusSteps))
+	for index, step := range gatewayStatusSteps {
+		if validate != nil {
+			if err := validate(); err != nil {
+				message := blockedReleaseStatusMessage(err)
+				for _, remaining := range gatewayStatusSteps[index:] {
+					checks = append(checks, harness.StatusCheck{Name: remaining.name, OK: false, Message: message})
+				}
+				return checks, err
+			}
+		}
+		check := step.run(p, ctx)
+		check.Name = step.name
+		checks = append(checks, check)
+	}
+	return checks, nil
+}
+
+func runValidatedStatusChecks(source []harness.StatusCheck, validate func() error) ([]harness.StatusCheck, error) {
+	checks := make([]harness.StatusCheck, 0, len(source))
+	for index, check := range source {
+		if validate != nil {
+			if err := validate(); err != nil {
+				message := blockedReleaseStatusMessage(err)
+				for _, remaining := range source[index:] {
+					checks = append(checks, harness.StatusCheck{Name: remaining.Name, OK: false, Message: message})
+				}
+				return checks, err
+			}
+		}
+		checks = append(checks, check)
+	}
+	return checks, nil
+}
+
+func blockedReleaseStatusMessage(err error) string {
+	return "skipped because release metadata is invalid: " + err.Error()
+}
+
+func failedGatewayStatusChecks(message string) []harness.StatusCheck {
+	checks := make([]harness.StatusCheck, 0, len(gatewayStatusSteps))
+	for _, step := range gatewayStatusSteps {
+		checks = append(checks, harness.StatusCheck{Name: step.name, OK: false, Message: message})
+	}
+	return checks
 }
 
 func (p gatewayStatusProbe) readiness(ctx context.Context) harness.StatusCheck {
@@ -158,7 +206,7 @@ func (p gatewayStatusProbe) requestJSON(ctx context.Context, method, path string
 		}
 		return fmt.Errorf("%s %s returned %s", method, path, response.Status)
 	}
-	if err := json.Unmarshal(raw, output); err != nil {
+	if err := api.UnmarshalStrictJSON(raw, output); err != nil {
 		return fmt.Errorf("decode %s %s response: %w", method, path, err)
 	}
 	return nil

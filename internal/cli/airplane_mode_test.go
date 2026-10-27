@@ -4,11 +4,13 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sovereign46/cli/internal/airplane"
 	"github.com/sovereign46/cli/internal/api"
@@ -110,7 +112,7 @@ func TestAirplaneModeOffRefusesStalePiSnapshotAtomically(t *testing.T) {
 	before := connectHomeFiles(t, env)
 
 	result := run(t, env, "airplane", "mode", "off")
-	if result.err == nil || !strings.Contains(result.err.Error(), "refusing unsafe snapshot restore") || !strings.Contains(result.err.Error(), "no syntactically usable closure binding metadata derived from the team API") {
+	if result.err == nil || !strings.Contains(result.err.Error(), "invalid DeepSeek runtime closure") {
 		t.Fatalf("expected stale Pi snapshot refusal, got err=%v stdout=%q", result.err, result.stdout)
 	}
 	if after := connectHomeFiles(t, env); !reflect.DeepEqual(before, after) {
@@ -145,7 +147,7 @@ func TestAirplaneModeOffValidatesSavedDeepSeekForNonPiSnapshotAtomically(t *test
 	before := connectHomeFiles(t, env)
 
 	result := run(t, env, "airplane", "mode", "off")
-	if result.err == nil || !strings.Contains(result.err.Error(), "saved team contains "+api.DeepSeekModelID) || !strings.Contains(result.err.Error(), "no syntactically usable closure binding metadata derived from the team API") {
+	if result.err == nil || !strings.Contains(result.err.Error(), "invalid DeepSeek runtime closure") {
 		t.Fatalf("expected stale saved team refusal for non-Pi snapshot, got err=%v stdout=%q", result.err, result.stdout)
 	}
 	if after := connectHomeFiles(t, env); !reflect.DeepEqual(before, after) {
@@ -176,7 +178,7 @@ func TestAirplaneModeOffValidatesSavedDeepSeekWithoutHarnessSnapshotAtomically(t
 	before := connectHomeFiles(t, env)
 
 	result := run(t, env, "airplane", "mode", "off")
-	if result.err == nil || !strings.Contains(result.err.Error(), "saved team contains "+api.DeepSeekModelID) {
+	if result.err == nil || !strings.Contains(result.err.Error(), "invalid DeepSeek runtime closure") {
 		t.Fatalf("expected stale saved team refusal without a harness snapshot, got err=%v stdout=%q", result.err, result.stdout)
 	}
 	if after := connectHomeFiles(t, env); !reflect.DeepEqual(before, after) {
@@ -194,18 +196,20 @@ func TestAirplaneModeOffValidatesAllPiSnapshotSelectionsAtomically(t *testing.T)
 		{
 			name: "non-default DeepSeek lacks closure",
 			mutate: func(t *testing.T, team *config.TeamConfig) {
+				localReasoning, deepSeekReasoning := false, true
 				team.APISnapshot = api.Team{
 					Name:         api.DefaultTeam,
 					Endpoint:     api.DefaultGatewayURL,
 					DefaultModel: airplane.LocalModelID,
 					Models:       []string{airplane.LocalModelID, api.DeepSeekModelID},
 					ModelMetadata: map[string]api.ModelRuntime{
-						airplane.LocalModelID: {ContextWindow: 65536, MaxTokens: 4096},
-						api.DeepSeekModelID:   {ContextWindow: 262144, MaxTokens: 32768},
+						airplane.LocalModelID: {Engine: "llama.cpp", Version: "b4720", Reasoning: &localReasoning, ContextWindow: 65536, MaxTokens: 4096},
+						api.DeepSeekModelID:   {Engine: "vllm", Version: "0.31.0", Reasoning: &deepSeekReasoning, ContextWindow: 262144, MaxTokens: 32768},
 					},
 				}
+				setPrelaunchSnapshotClassification(team)
 			},
-			want: "no syntactically usable closure binding metadata derived from the team API",
+			want: "invalid DeepSeek runtime closure",
 		},
 		{
 			name: "manual DeepSeek model in Pi snapshot",
@@ -395,13 +399,33 @@ func unrelatedCloudSnapshot(model string) api.Team {
 }
 
 func setMalformedDeepSeekSnapshot(team *config.TeamConfig) {
+	reasoning := true
 	snapshot := team.APISnapshot
 	snapshot.DefaultModel = api.DeepSeekModelID
 	snapshot.Models = []string{api.DeepSeekModelID}
 	snapshot.ModelMetadata = map[string]api.ModelRuntime{
-		api.DeepSeekModelID: {ContextWindow: 262144, MaxTokens: 32768},
+		api.DeepSeekModelID: {Engine: "vllm", Version: "0.31.0", Reasoning: &reasoning, ContextWindow: 262144, MaxTokens: 32768},
 	}
 	team.APISnapshot = snapshot
+	setPrelaunchSnapshotClassification(team)
+}
+
+func setPrelaunchSnapshotClassification(team *config.TeamConfig) {
+	denied := false
+	policyExpiry := time.Now().UTC().Add(48 * time.Hour).Truncate(time.Second).Format(time.RFC3339)
+	credentialExpiry := time.Now().UTC().Add(24 * time.Hour).Truncate(time.Second).Format(time.RFC3339)
+	team.ReleaseChannel = api.PrelaunchReleaseChannel
+	team.ProductionCertified = &denied
+	team.ProductionAPIPath = &denied
+	team.PolicySHA256 = "sha256:78f328e3dbf8fcda1162ab9c93880cf738204b7944eb8f11f848dee6d7dc54e2"
+	team.PolicyExpiresAt = policyExpiry
+	team.UpstreamCredentialExpiresAt = credentialExpiry
+	team.APISnapshot.ReleaseChannel = team.ReleaseChannel
+	team.APISnapshot.ProductionCertified = &denied
+	team.APISnapshot.ProductionAPIPath = &denied
+	team.APISnapshot.PolicySHA256 = team.PolicySHA256
+	team.APISnapshot.PolicyExpiresAt = policyExpiry
+	team.APISnapshot.UpstreamCredentialExpiresAt = credentialExpiry
 }
 
 func setPiHarnessSnapshotContent(t *testing.T, snapshot *config.HarnessSnapshot, name, content string) {
@@ -923,6 +947,54 @@ func TestApplyAtomicConfigAndSnapshotRefusesGuardedContentAcrossParentSymlinkFli
 		if len(backups) != 0 {
 			t.Fatalf("snapshot restore created backup before refusal: %v", backups)
 		}
+	}
+}
+
+func TestApplyAtomicConfigAndSnapshotRollsBackWhenPostApplyValidationFails(t *testing.T) {
+	dir := t.TempDir()
+	env := map[string]string{"HOME": dir}
+	store := config.NewStore(env, "")
+	before := config.DefaultConfig()
+	before.Mode = config.ModeAirplane
+	if err := store.SaveConfig(before); err != nil {
+		t.Fatal(err)
+	}
+	after := before.Clone()
+	after.Mode = config.ModeCloud
+	target := filepath.Join(dir, "models.json")
+	if err := os.WriteFile(target, []byte("AIRPLANE"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := config.HarnessSnapshot{Files: []config.HarnessFileSnapshot{{Path: target, Existed: true, Content: "CLOUD", Mode: 0o600}}}
+	app := &app{config: store, runtime: Runtime{Env: env}, options: &options{}}
+	validate := func() error {
+		content, err := os.ReadFile(target)
+		if err != nil {
+			return err
+		}
+		if string(content) == "CLOUD" {
+			return errors.New("release expired after snapshot apply")
+		}
+		return nil
+	}
+
+	err := applyAtomicConfigAndSnapshotValidated(app, before, after, snapshot, "airplane mode off", validate)
+	if err == nil || !strings.Contains(err.Error(), "release expired after snapshot apply") {
+		t.Fatalf("late restore validation failure was accepted: err=%v", err)
+	}
+	got, err := store.LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ActiveMode() != config.ModeAirplane {
+		t.Fatalf("config was not rolled back after post-apply restore validation: %#v", got)
+	}
+	content, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "AIRPLANE" {
+		t.Fatalf("snapshot applied after late validation failure: %q", content)
 	}
 }
 
