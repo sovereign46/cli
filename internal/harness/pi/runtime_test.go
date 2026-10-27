@@ -70,7 +70,7 @@ func TestPiModelsRequireDeepSeekRuntimeClosure(t *testing.T) {
 		}},
 		{"missing size", func(runtime *api.ModelRuntime) { runtime.ClosureSizeBytes = 0 }},
 		{"negative size", func(runtime *api.ModelRuntime) { runtime.ClosureSizeBytes = -1 }},
-		{"oversized closure", func(runtime *api.ModelRuntime) { runtime.ClosureSizeBytes = maxRuntimeClosureSize + 1 }},
+		{"oversized closure", func(runtime *api.ModelRuntime) { runtime.ClosureSizeBytes = api.MaxRuntimeClosureSizeBytes + 1 }},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -86,7 +86,7 @@ func TestPiModelsRequireDeepSeekRuntimeClosure(t *testing.T) {
 }
 
 func TestPiModelsAcceptRuntimeClosureSizeBoundaries(t *testing.T) {
-	for _, size := range []int64{1, maxRuntimeClosureSize} {
+	for _, size := range []int64{1, api.MaxRuntimeClosureSizeBytes} {
 		t.Run(fmt.Sprintf("%d", size), func(t *testing.T) {
 			team := cloudTeam()
 			runtime := team.ModelMetadata[api.DeepSeekModelID]

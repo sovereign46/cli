@@ -128,7 +128,7 @@ func collectStatus(ctx context.Context, app *app, cfg config.Config, state confi
 			}
 			checks = append(checks, harness.StatusCheck{Name: "harness-installed", OK: installed, Message: detectMessage})
 			activeTeam := teamCfg.APIForMode(teamName, mode)
-			harnessChecks := adapter.Status(ctx, harness.StatusRequest{Env: app.runtime.Env, TeamName: teamName, Endpoint: teamCfg.Endpoint, DefaultModel: teamCfg.DefaultModel, Mode: mode, Team: activeTeam})
+			harnessChecks := adapter.Status(ctx, harness.StatusRequest{Env: app.runtime.Env, TeamName: teamName, Mode: mode, Team: activeTeam})
 			checks = append(checks, harnessChecks...)
 			checks = append(checks, harness.StatusCheck{Name: "harness", OK: installed && checksPassed(harnessChecks), Message: teamCfg.DefaultHarness + " executable and configuration"})
 		}

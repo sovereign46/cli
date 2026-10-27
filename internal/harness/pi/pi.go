@@ -16,10 +16,9 @@ import (
 )
 
 const (
-	piDirName             = ".pi"
-	piAgentDir            = "agent"
-	deepSeekModelID       = api.DeepSeekModelID
-	maxRuntimeClosureSize = 64 << 20
+	piDirName       = ".pi"
+	piAgentDir      = "agent"
+	deepSeekModelID = api.DeepSeekModelID
 )
 
 func modelsPath(env map[string]string) string {
@@ -227,7 +226,7 @@ func (a Adapter) Status(_ context.Context, req harness.StatusRequest) []harness.
 	}
 	return []harness.StatusCheck{
 		{Name: "pi-provider", OK: s46 != nil, Message: path},
-		{Name: "pi-base-url", OK: s46["baseUrl"] == req.Endpoint+"/v1", Message: fmt.Sprint(s46["baseUrl"])},
+		{Name: "pi-base-url", OK: s46["baseUrl"] == req.Team.Endpoint+"/v1", Message: fmt.Sprint(s46["baseUrl"])},
 		{Name: "pi-api", OK: s46["api"] == "openai-completions", Message: fmt.Sprint(s46["api"])},
 		{Name: "pi-token-helper", OK: s46["apiKey"] == "!s46 token --refresh", Message: fmt.Sprint(s46["apiKey"])},
 		{Name: "pi-auth-header", OK: s46["authHeader"] == true, Message: fmt.Sprint(s46["authHeader"])},
@@ -354,7 +353,7 @@ func piModels(team api.Team, mode string, env map[string]string) ([]map[string]a
 		metadata, ok := team.ModelMetadata[id]
 		if mode == airplane.ModeAirplane && id == airplane.LocalModelID {
 			metadata = api.ModelRuntime{ContextWindow: airplane.ContextWindow(env), MaxTokens: airplane.MaxTokens(env)}
-		} else if !ok || !validRuntimeMetadata(metadata) {
+		} else if !ok || !metadata.HasValidTokenLimits() {
 			return nil, fmt.Errorf("team returned no valid runtime metadata for %s; refresh the model catalog from the team API", id)
 		} else if id == deepSeekModelID && !api.ValidRuntimeClosureBinding(metadata) {
 			return nil, fmt.Errorf("team returned no syntactically usable API closure binding for %s; refresh the model catalog from the team API", id)
@@ -586,17 +585,13 @@ func validateDeepSeekRuntime(team api.Team) error {
 		return fmt.Errorf("no current saved team authorization")
 	}
 	metadata, ok := team.ModelMetadata[deepSeekModelID]
-	if !ok || !validRuntimeMetadata(metadata) {
+	if !ok || !metadata.HasValidTokenLimits() {
 		return fmt.Errorf("no valid runtime metadata derived from the team API")
 	}
 	if !api.ValidRuntimeClosureBinding(metadata) {
 		return fmt.Errorf("no syntactically usable closure binding metadata derived from the team API")
 	}
 	return nil
-}
-
-func validRuntimeMetadata(runtime api.ModelRuntime) bool {
-	return runtime.ContextWindow > 0 && runtime.MaxTokens > 0 && runtime.MaxTokens <= runtime.ContextWindow
 }
 
 func modelName(id string) string {

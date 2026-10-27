@@ -98,6 +98,16 @@ func TestValidateTeamReleaseMetadataFailsClosed(t *testing.T) {
 			runtime.Version = "0.31.0β"
 			team.ModelMetadata[DeepSeekModelID] = runtime
 		}, "must explicitly identify engine, version, and reasoning"},
+		{"unauthorized DeepSeek engine", func(team *Team) {
+			runtime := team.ModelMetadata[DeepSeekModelID]
+			runtime.Engine = "llama.cpp"
+			team.ModelMetadata[DeepSeekModelID] = runtime
+		}, "must identify DeepSeek"},
+		{"unauthorized DeepSeek version", func(team *Team) {
+			runtime := team.ModelMetadata[DeepSeekModelID]
+			runtime.Version = "0.32.0"
+			team.ModelMetadata[DeepSeekModelID] = runtime
+		}, "must identify DeepSeek"},
 		{"missing reasoning claim", func(team *Team) {
 			runtime := team.ModelMetadata[DeepSeekModelID]
 			runtime.Reasoning = nil

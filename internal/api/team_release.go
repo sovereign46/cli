@@ -7,13 +7,16 @@ import (
 	"time"
 )
 
-const PrelaunchReleaseChannel = "prelaunch"
+const (
+	PrelaunchReleaseChannel          = "prelaunch"
+	MaxRuntimeClosureSizeBytes int64 = 64 << 20
+)
 
 // ValidateTeamReleaseMetadata rejects partial or unsupported release-channel
 // claims before they can be persisted or used to configure a harness.
 func ValidateTeamReleaseMetadata(team Team, now time.Time) error {
 	if team.ReleaseChannel == "" {
-		if team.ProductionCertified != nil || team.ProductionAPIPath != nil || team.PolicySHA256 != "" || team.PolicyExpiresAt != "" || team.UpstreamCredentialExpiresAt != "" {
+		if team.HasReleaseMetadata() {
 			return fmt.Errorf("team response contains release metadata without a release channel")
 		}
 		if TeamRequiresPrelaunchMetadata(team) {
@@ -57,7 +60,7 @@ func ValidateTeamReleaseMetadata(team Team, now time.Time) error {
 		}
 		seenModels[id] = true
 		runtime, ok := team.ModelMetadata[id]
-		if !ok || runtime.ContextWindow <= 0 || runtime.MaxTokens <= 0 || runtime.MaxTokens > runtime.ContextWindow {
+		if !ok || !runtime.HasValidTokenLimits() {
 			return fmt.Errorf("prelaunch team response has invalid runtime metadata for %s", id)
 		}
 		if !validRuntimeIdentityValue(runtime.Engine) || !validRuntimeIdentityValue(runtime.Version) || runtime.Reasoning == nil {
@@ -126,7 +129,7 @@ func validRuntimeIdentityValue(value string) bool {
 // ValidRuntimeClosureBinding checks the bounded digest identity required by
 // clients before configuring the protected DeepSeek runtime.
 func ValidRuntimeClosureBinding(runtime ModelRuntime) bool {
-	return runtime.ClosureSizeBytes > 0 && runtime.ClosureSizeBytes <= 64<<20 && validLowerSHA256(runtime.ClosureSHA256) && !periodicHexDigest(runtime.ClosureSHA256)
+	return runtime.ClosureSizeBytes > 0 && runtime.ClosureSizeBytes <= MaxRuntimeClosureSizeBytes && validLowerSHA256(runtime.ClosureSHA256) && !periodicHexDigest(runtime.ClosureSHA256)
 }
 
 func validLowerSHA256(value string) bool {

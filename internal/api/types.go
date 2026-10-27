@@ -116,6 +116,10 @@ func (runtime ModelRuntime) ReasoningEnabled() bool {
 	return runtime.Reasoning != nil && *runtime.Reasoning
 }
 
+func (runtime ModelRuntime) HasValidTokenLimits() bool {
+	return runtime.ContextWindow > 0 && runtime.MaxTokens > 0 && runtime.MaxTokens <= runtime.ContextWindow
+}
+
 type Team struct {
 	Name                        string                  `json:"name"`
 	Endpoint                    string                  `json:"endpoint"`
@@ -130,6 +134,12 @@ type Team struct {
 	PolicySHA256                string                  `json:"policySha256,omitempty"`
 	PolicyExpiresAt             string                  `json:"policyExpiresAt,omitempty"`
 	UpstreamCredentialExpiresAt string                  `json:"upstreamCredentialExpiresAt,omitempty"`
+}
+
+func (team Team) HasReleaseMetadata() bool {
+	return team.ReleaseChannel != "" || team.ProductionCertified != nil ||
+		team.ProductionAPIPath != nil || team.PolicySHA256 != "" ||
+		team.PolicyExpiresAt != "" || team.UpstreamCredentialExpiresAt != ""
 }
 
 type Session struct {

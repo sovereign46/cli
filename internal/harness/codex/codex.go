@@ -103,7 +103,7 @@ func (a Adapter) Status(ctx context.Context, req harness.StatusRequest) []harnes
 	text := string(raw)
 	return []harness.StatusCheck{
 		{Name: "codex-provider", OK: strings.Contains(text, "[model_providers.s46]"), Message: path},
-		{Name: "codex-base-url", OK: strings.Contains(text, fmt.Sprintf("base_url = %q", req.Endpoint+"/codex")), Message: req.Endpoint + "/codex"},
+		{Name: "codex-base-url", OK: strings.Contains(text, fmt.Sprintf("base_url = %q", req.Team.Endpoint+"/codex")), Message: req.Team.Endpoint + "/codex"},
 		{Name: "codex-token-helper", OK: strings.Contains(text, `token_helper = "s46 token --refresh"`), Message: "s46 token --refresh"},
 		{Name: "codex-profile", OK: strings.Contains(text, "[profiles.s46]"), Message: "profile s46"},
 	}

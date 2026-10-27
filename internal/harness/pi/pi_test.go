@@ -150,7 +150,7 @@ func TestStatusReadsConfiguredFile(t *testing.T) {
 	if err := os.WriteFile(modelsPath, plan.Files[0].Content, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	checks := New().Status(context.Background(), harness.StatusRequest{Env: env, TeamName: "@s46/engineering", Endpoint: "https://gateway.s46.dev", DefaultModel: team.DefaultModel, Mode: "cloud", Team: team})
+	checks := New().Status(context.Background(), harness.StatusRequest{Env: env, TeamName: "@s46/engineering", Mode: "cloud", Team: team})
 	if len(checks) != 6 {
 		t.Fatalf("expected 6 checks, got %d: %#v", len(checks), checks)
 	}
@@ -260,17 +260,30 @@ func TestLivePreflightRejectsHostileDeepSeekConfiguration(t *testing.T) {
 				t.Fatal("hostile Pi configuration passed launch preflight")
 			}
 			checks := adapter.Status(context.Background(), harness.StatusRequest{
-				Env: env, TeamName: team.Name, Endpoint: team.Endpoint,
-				DefaultModel: team.DefaultModel, Mode: "cloud", Team: team,
+				Env: env, TeamName: team.Name, Mode: "cloud", Team: team,
 			})
-			passed := false
+			if len(checks) == 0 {
+				t.Fatal("hostile Pi configuration returned no status checks")
+			}
+			wantCheck := "pi-model-runtime"
+			var parsed map[string]any
+			if err := api.UnmarshalStrictJSON(tc.raw, &parsed); err != nil {
+				wantCheck = "pi-config"
+			}
+			failed, found := false, false
 			for _, check := range checks {
-				if check.Name == "pi-model-runtime" {
-					passed = check.OK
+				if !check.OK {
+					failed = true
+				}
+				if check.Name == wantCheck {
+					found = true
+					if check.OK {
+						t.Fatalf("hostile Pi configuration passed %s status: %#v", wantCheck, checks)
+					}
 				}
 			}
-			if passed {
-				t.Fatalf("hostile Pi configuration passed status: %#v", checks)
+			if !failed || !found {
+				t.Fatalf("hostile Pi configuration did not report failed %s status: %#v", wantCheck, checks)
 			}
 		})
 	}
@@ -287,7 +300,7 @@ func TestStatusFlagsWhenS46ProviderAbsent(t *testing.T) {
 	if err := os.WriteFile(modelsPath, []byte(`{"providers":{"ollama":{"baseUrl":"http://localhost:11434/v1"}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	checks := New().Status(context.Background(), harness.StatusRequest{Env: env, TeamName: "@s46/engineering", Endpoint: "https://gateway.s46.dev"})
+	checks := New().Status(context.Background(), harness.StatusRequest{Env: env, TeamName: "@s46/engineering", Team: api.Team{Endpoint: "https://gateway.s46.dev"}})
 	for _, c := range checks {
 		if c.OK {
 			t.Errorf("check %s should fail when s46 provider missing: %#v", c.Name, c)

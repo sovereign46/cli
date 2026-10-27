@@ -115,12 +115,10 @@ type StatusCheck struct {
 // It intentionally does not embed workspace.Context: harness adapters
 // have no business reading State, the full Config, or auth tokens.
 type StatusRequest struct {
-	Env          map[string]string
-	TeamName     string
-	Endpoint     string
-	DefaultModel string
-	Mode         string
-	Team         api.Team
+	Env      map[string]string
+	TeamName string
+	Mode     string
+	Team     api.Team
 }
 
 // ShareRequest asks a harness adapter to turn one of its local session

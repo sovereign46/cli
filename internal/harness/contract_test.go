@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/sovereign46/cli/internal/api"
 	"github.com/sovereign46/cli/internal/harness"
 	"github.com/sovereign46/cli/internal/harness/claude"
 	"github.com/sovereign46/cli/internal/harness/codex"
@@ -23,7 +24,7 @@ func TestEveryAdapterReturnsNonEmptyStatusForMissingConfig(t *testing.T) {
 	t.Parallel()
 	home := t.TempDir() // fresh, empty $HOME
 	env := map[string]string{"HOME": home}
-	req := harness.StatusRequest{Env: env, TeamName: "@s46/engineering", Endpoint: "https://gateway.s46.dev", DefaultModel: "s46/kimi-k2.6"}
+	req := harness.StatusRequest{Env: env, TeamName: "@s46/engineering", Team: api.Team{Endpoint: "https://gateway.s46.dev", DefaultModel: "s46/kimi-k2.6"}}
 
 	adapters := []harness.Adapter{claude.New(), codex.New(), pi.New(), standard.New()}
 	for _, adapter := range adapters {
