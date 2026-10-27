@@ -26,34 +26,44 @@ The 14 GB model path is opened without following links and copied into a size-bo
 
 ## First cloud test: Pi only
 
-Do not run this stage until all of the following have been separately approved and provisioned:
+### Prelaunch acceptance
 
-- Reviewed API/CLI independent-policy loading and initial-serving gates, followed by independently authenticated complete trust policy and current signed registry/audit/advisory evidence.
-- An authenticated gateway and a team authorized for the exact model and runtime.
-- The exact corrected checkpoint, a complete protected/hash-locked vLLM executable closure, independent fresh-load certification evidence, signed release, and verified deployment readiness. A working legacy backend or building this CLI does not satisfy those gates.
-- A restricted test environment for the agent, with only the intended files and narrowly scoped credentials accessible.
+Prelaunch is a short-lived authenticated test route, not production certification or the production API path. Use only an exact release-tagged **0.3.0 candidate** carrying this contract. Homebrew currently installs stable 0.2.5, which is not a supported prelaunch qualification client; this document does not claim that 0.3.0 is published.
 
-Then put the candidate directory first on `PATH`, so Pi's `!s46 token --refresh` helper uses the same candidate:
+Before testing, require the exact protected prelaunch team/model policy, its reviewable candidate/runtime identities and expiries, a separately acquired normal S46 access token, and a restricted agent environment containing only intended files and narrowly scoped credentials. Put the candidate first on `PATH` so Pi's `!s46 token --refresh` helper resolves the same candidate. Authenticate against the normal API before applying the one-command prelaunch override:
 
 ```sh
-export PATH="/absolute/path/to/candidate:$PATH"
+export PATH="/absolute/path/to/release-tagged-0.3.0-candidate:$PATH"
 s46 version
 s46 login --user <email> --device-id <test-device>
-export MODEL_ID='<public ID returned by authorized team discovery>'
-s46 connect @org/team --harness=pi --model="$MODEL_ID"
-pi --provider s46 --model "$MODEL_ID"
+S46_API_BASE_URL=https://gateway.s46.dev \
+  s46 connect @org/team --harness=pi --mode=cloud \
+  --endpoint=https://gateway.s46.dev \
+  --model=s46/deepseek-v4-flash-0731
+pi --provider s46 --model s46/deepseek-v4-flash-0731
 ```
 
-`connect` changes the S46 provider in `~/.pi/agent/models.json`, retaining other providers and creating a backup. It is not a sandbox: Pi's tools have the permissions of the account running Pi. Use an isolated account, container, or VM for the first real tool run. A separate working directory alone does not confine its tools.
+Do not persist `S46_API_BASE_URL`; the prelaunch gateway intentionally does not provide login or token refresh. `connect` and `status` must identify the saved route as `prelaunch`, `not production-certified`, and `not the production API path`, including in structured output. Preserve those statements with any test evidence. A passing file-writing/tool-result round trip is prelaunch compatibility evidence only; it is not model certification, release approval, production serving authority, or production accounting evidence.
 
-The initial target is an actual file-writing/tool-result round trip and a hello-world application that runs successfully through the authorized gateway. Mock responses and direct backend probes are not that acceptance test. No unverified preview or bypass of production certification checks is enabled by this candidate.
+### Production acceptance
+
+Production testing remains blocked until all of the following have been separately approved and provisioned:
+
+- Reviewed API/CLI independent-policy loading and initial-serving gates, followed by independently authenticated complete trust policy and current signed registry/audit/advisory evidence.
+- An authenticated production gateway and a team authorized for the exact released model and runtime.
+- The exact corrected checkpoint, a complete protected/hash-locked vLLM executable closure, independent fresh-load certification evidence, signed release, and verified deployment readiness. A working prelaunch or legacy backend and building this CLI do not satisfy those gates.
+- A restricted test environment for the agent, with only the intended files and narrowly scoped credentials accessible.
+
+Use the public model ID returned by production team discovery. The acceptance target is an actual file-writing/tool-result round trip and a hello-world application through the production-authorized gateway; mock, prelaunch, and direct-backend responses do not satisfy it.
+
+`connect` changes the S46 provider in `~/.pi/agent/models.json`, retaining other providers and creating a backup. It is not a sandbox: Pi's tools have the permissions of the account running Pi. Use an isolated account, container, or VM for the first real tool run. A separate working directory alone does not confine its tools.
 
 ## Pi request contract
 
 - OpenAI Chat Completions through the team's gateway, with the public model ID retained.
 - Context and output limits come from authorized runtime metadata, not name-based guesses.
-- Only the exact ID `s46/deepseek-v4-flash-0731` on vLLM 0.31.0 with reasoning enabled and syntactically usable closure binding metadata derived from the team API gets `thinkingLevelMap: {"off":"none"}`. The CLI checks the binding's syntax and bounds, not its signature or authenticity, and refuses to configure that exact target when the binding is absent or malformed. Unrelated models are not subject to this closure check. This prevents Pi from omitting the disable signal for an incompletely identified runtime. Other thinking levels are unchanged.
-- This mapping was qualified against Pi 1.3.0's local wire behavior and captured backend source. Live reasoning and generated tool-loop behavior still need qualification.
+- Only the exact ID `s46/deepseek-v4-flash-0731` on vLLM 0.31.0 with reasoning enabled and syntactically usable closure binding metadata derived from the team API gets `thinkingLevelMap: {"off":"none"}`. Prelaunch rejects a different or incomplete runtime identity rather than omitting the disable mapping. The CLI checks metadata syntax and bounds, not its signature or authenticity. Unrelated production model IDs are not subject to this closure check. Other thinking levels are unchanged.
+- This mapping was qualified against Pi 1.3.0's local wire behavior and captured backend source. The generated `providers.s46` object contains exactly `baseUrl`, `api`, `apiKey`, `authHeader`, and `models`; launch preflight rejects any additional provider field or changed model behavior. Live reasoning and generated tool-loop behavior still need qualification.
 - Devstral/llama.cpp airplane mode retains its limits and restoration behavior, but release installation now requires one qualified closure that pins the GGUF, complete llama.cpp runtime inventory, and gateway. Model activation still requires the currently absent approved bundled policy, and the gateway closure is not yet available.
 
-Claude Code and Codex qualification are deferred for this cloud runtime. Their existing adapters are not removed or silently restricted.
+Claude Code and Codex qualification are deferred for this cloud runtime. Classified/prelaunch catalogs containing DeepSeek are therefore rejected unless Pi is selected, both at connect and again from saved state before launch. Their adapters remain available for ordinary unclassified cloud teams and valid airplane routes whose active endpoint, default model, and sole catalog entry exactly match the built-in local projection; saved cloud API provenance may remain only for restoration.

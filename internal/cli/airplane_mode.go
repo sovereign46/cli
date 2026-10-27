@@ -331,6 +331,11 @@ func airplaneModeOff(ctx context.Context, app *app) error {
 	if err := validateSavedCloudTeam(teamName, teamConfig, "disabling airplane mode"); err != nil {
 		return err
 	}
+	if snapshot, ok := cloudTeamSnapshot(teamName, teamConfig); ok {
+		if err := api.ValidateTeamReleaseMetadata(snapshot, app.nowUTC()); err != nil {
+			return fmt.Errorf("saved cloud team release metadata is no longer valid before disabling airplane mode: %w", err)
+		}
+	}
 	restored, hasCloudConfig := restoreCloudTeamConfig(teamName, teamConfig)
 	cfgBefore := cfg.Clone()
 	cfgAfter := cfg.Clone()
@@ -373,8 +378,20 @@ func airplaneModeOff(ctx context.Context, app *app) error {
 }
 
 func applyAtomicModeOff(ctx context.Context, app *app, before, after config.Config, teamName string, harnessName string, restored config.TeamConfig, hasCloudConfig bool, snapshot *config.HarnessSnapshot) error {
+	validateReleaseMetadata := func() error {
+		if !hasCloudConfig {
+			return nil
+		}
+		if err := api.ValidateTeamReleaseMetadata(restored.API(teamName), app.nowUTC()); err != nil {
+			return fmt.Errorf("saved cloud team release metadata is no longer valid before disabling airplane mode: %w", err)
+		}
+		return nil
+	}
 	if snapshot != nil {
 		validate := func() error {
+			if err := validateReleaseMetadata(); err != nil {
+				return err
+			}
 			return validateSnapshotRestore(app, teamName, restored, *snapshot)
 		}
 		return applyAtomicConfigAndSnapshotValidated(app, before, after, *snapshot, "airplane mode off", validate)
@@ -390,14 +407,21 @@ func applyAtomicModeOff(ctx context.Context, app *app, before, after config.Conf
 		if len(plan.Files) > 0 {
 			return missingHarnessSnapshotError(plan.Harness)
 		}
-		_, err = applyAtomicConfigAndHarness(ctx, app, before, after, adapter, plan, "airplane mode off")
+		_, err = applyAtomicConfigAndHarnessValidated(ctx, app, before, after, adapter, plan, "airplane mode off", validateReleaseMetadata)
 		return err
 	}
 	if strs.FirstNonEmpty(harnessName, harness.DefaultName) != "standard" {
 		return missingHarnessSnapshotError(strs.FirstNonEmpty(harnessName, harness.DefaultName))
 	}
+	if err := validateReleaseMetadata(); err != nil {
+		return err
+	}
 	if err := app.config.SaveConfig(after); err != nil {
 		return fmt.Errorf("airplane mode off: %w", err)
+	}
+	if err := validateReleaseMetadata(); err != nil {
+		saveErr := app.config.SaveConfig(before)
+		return joinAtomicErrors("airplane mode off", err, nil, saveErr)
 	}
 	return nil
 }
@@ -426,7 +450,16 @@ func applyAtomicConfigAndSnapshotValidated(app *app, before, after config.Config
 	if err := app.config.SaveConfig(after); err != nil {
 		return fmt.Errorf("%s: %w", op, err)
 	}
+	if validate != nil {
+		if err := validate(); err != nil {
+			saveErr := app.config.SaveConfig(before)
+			return joinAtomicErrors(op, err, nil, saveErr)
+		}
+	}
 	applied, err := harness.ApplySnapshot(app.runtime.Env, snapshot)
+	if err == nil && validate != nil {
+		err = validate()
+	}
 	if err == nil {
 		return nil
 	}
@@ -473,8 +506,9 @@ func localAirplaneTeam(teamName string, existing config.TeamConfig, req connectR
 
 func cloudTeamSnapshot(teamName string, teamConfig config.TeamConfig) (api.Team, bool) {
 	snapshot := teamConfig.APISnapshot
-	topLevelCloud := teamConfig.Endpoint != "" && !isLocalEndpoint(teamConfig.Endpoint)
-	if snapshot.Endpoint == "" || isLocalEndpoint(snapshot.Endpoint) {
+	topLevelCloud := teamConfig.Endpoint != "" && (!isLocalEndpoint(teamConfig.Endpoint) || isProtectedCloudTeam(teamConfig.API(teamName)))
+	snapshotCloud := snapshot.Endpoint != "" && (!isLocalEndpoint(snapshot.Endpoint) || isProtectedCloudTeam(snapshot))
+	if !snapshotCloud {
 		if !topLevelCloud {
 			return api.Team{}, false
 		}
@@ -500,7 +534,8 @@ func cloudTeamSnapshot(teamName string, teamConfig config.TeamConfig) (api.Team,
 }
 
 func validateSavedCloudTeam(teamName string, teamConfig config.TeamConfig, operation string) error {
-	if !hasCloudEndpoint(teamConfig.Endpoint) && !hasCloudEndpoint(teamConfig.APISnapshot.Endpoint) {
+	if !hasCloudEndpoint(teamConfig.Endpoint) && !hasCloudEndpoint(teamConfig.APISnapshot.Endpoint) &&
+		!isProtectedCloudTeam(teamConfig.API(teamName)) && !isProtectedCloudTeam(teamConfig.APISnapshot) {
 		return nil
 	}
 	if _, ok := cloudTeamSnapshot(teamName, teamConfig); !ok {
@@ -519,6 +554,12 @@ func restoreCloudTeamConfig(teamName string, teamConfig config.TeamConfig) (conf
 	teamConfig.DefaultModel = snapshot.DefaultModel
 	teamConfig.WorkerHosts = snapshot.WorkerHosts
 	teamConfig.Models = snapshot.Models
+	teamConfig.ReleaseChannel = snapshot.ReleaseChannel
+	teamConfig.ProductionCertified = snapshot.ProductionCertified
+	teamConfig.ProductionAPIPath = snapshot.ProductionAPIPath
+	teamConfig.PolicySHA256 = snapshot.PolicySHA256
+	teamConfig.PolicyExpiresAt = snapshot.PolicyExpiresAt
+	teamConfig.UpstreamCredentialExpiresAt = snapshot.UpstreamCredentialExpiresAt
 	teamConfig.APISnapshot = snapshot
 	return teamConfig, true
 }
@@ -528,12 +569,22 @@ func planHarnessConfig(ctx context.Context, app *app, teamName string, teamConfi
 	if err != nil {
 		return nil, harness.Plan{}, err
 	}
-	team := teamConfig.API(teamName)
+	team := teamConfig.APIForMode(teamName, mode)
 	plan, err := adapter.PlanConnect(ctx, harness.ConnectRequest{Env: app.runtime.Env, Team: team, Model: teamConfig.DefaultModel, Mode: mode, Scope: "user", SetAsDefault: setHarnessDefault})
 	if err != nil {
 		return nil, harness.Plan{}, err
 	}
 	return adapter, plan, nil
+}
+
+func hasTeamReleaseMetadata(team api.Team) bool {
+	return team.ReleaseChannel != "" || team.ProductionCertified != nil ||
+		team.ProductionAPIPath != nil || team.PolicySHA256 != "" ||
+		team.PolicyExpiresAt != "" || team.UpstreamCredentialExpiresAt != ""
+}
+
+func isProtectedCloudTeam(team api.Team) bool {
+	return hasTeamReleaseMetadata(team) || api.TeamRequiresPrelaunchMetadata(team)
 }
 
 func hasCloudEndpoint(endpoint string) bool {

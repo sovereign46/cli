@@ -50,6 +50,20 @@ type LaunchRequest struct {
 	SessionID string
 }
 
+type LaunchConfigRequest struct {
+	Env   map[string]string
+	Team  api.Team
+	Mode  string
+	Model string
+}
+
+// LaunchConfigValidator is implemented by harnesses whose behavior depends on
+// mutable configuration outside the s46 config store. The CLI invokes it
+// immediately before launch and then rechecks any time-bounded route policy.
+type LaunchConfigValidator interface {
+	ValidateLaunchConfig(ctx context.Context, req LaunchConfigRequest) error
+}
+
 type FilePlan struct {
 	Path        string      `json:"-"`
 	DisplayPath string      `json:"path"`
@@ -105,6 +119,8 @@ type StatusRequest struct {
 	TeamName     string
 	Endpoint     string
 	DefaultModel string
+	Mode         string
+	Team         api.Team
 }
 
 // ShareRequest asks a harness adapter to turn one of its local session

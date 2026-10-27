@@ -107,19 +107,29 @@ type ModelRuntime struct {
 	ClosureSizeBytes       int64  `json:"closureSizeBytes,omitempty"`
 	ContextWindow          int    `json:"contextWindow,omitempty"`
 	MaxTokens              int    `json:"maxTokens,omitempty"`
-	Reasoning              bool   `json:"reasoning"`
+	Reasoning              *bool  `json:"reasoning"`
 	MinMemoryBytes         int64  `json:"minMemoryBytes,omitempty"`
 	RecommendedMemoryBytes int64  `json:"recommendedMemoryBytes,omitempty"`
 }
 
+func (runtime ModelRuntime) ReasoningEnabled() bool {
+	return runtime.Reasoning != nil && *runtime.Reasoning
+}
+
 type Team struct {
-	Name          string                  `json:"name"`
-	Endpoint      string                  `json:"endpoint"`
-	Region        string                  `json:"region"`
-	WorkerHosts   []string                `json:"workerHosts"`
-	DefaultModel  string                  `json:"defaultModel"`
-	Models        []string                `json:"models"`
-	ModelMetadata map[string]ModelRuntime `json:"modelMetadata"`
+	Name                        string                  `json:"name"`
+	Endpoint                    string                  `json:"endpoint"`
+	Region                      string                  `json:"region"`
+	WorkerHosts                 []string                `json:"workerHosts"`
+	DefaultModel                string                  `json:"defaultModel"`
+	Models                      []string                `json:"models"`
+	ModelMetadata               map[string]ModelRuntime `json:"modelMetadata"`
+	ReleaseChannel              string                  `json:"releaseChannel,omitempty"`
+	ProductionCertified         *bool                   `json:"productionCertified,omitempty"`
+	ProductionAPIPath           *bool                   `json:"productionAPIPath,omitempty"`
+	PolicySHA256                string                  `json:"policySha256,omitempty"`
+	PolicyExpiresAt             string                  `json:"policyExpiresAt,omitempty"`
+	UpstreamCredentialExpiresAt string                  `json:"upstreamCredentialExpiresAt,omitempty"`
 }
 
 type Session struct {

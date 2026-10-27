@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"syscall"
@@ -237,8 +238,76 @@ func TestLockSerializesConcurrentSaveConfig(t *testing.T) {
 	}
 }
 
+func TestStoreRejectsDivergentCloudReleaseMetadataCopies(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		endpoint string
+		mode     string
+	}{
+		{name: "cloud endpoint", endpoint: "https://gateway.s46.dev"},
+		{name: "empty airplane endpoint", mode: ModeAirplane},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			denied := false
+			team := TeamConfig{
+				Endpoint: tc.endpoint, ReleaseChannel: api.PrelaunchReleaseChannel,
+				ProductionCertified: &denied, ProductionAPIPath: &denied,
+				PolicySHA256:    "sha256:78f328e3dbf8fcda1162ab9c93880cf738204b7944eb8f11f848dee6d7dc54e2",
+				PolicyExpiresAt: "2099-10-27T12:00:00Z", UpstreamCredentialExpiresAt: "2099-10-27T11:00:00Z",
+				APISnapshot: api.Team{Endpoint: "https://gateway.s46.dev"},
+			}
+			cfg := Config{Mode: tc.mode, Teams: map[string]TeamConfig{"@s46/engineering": team}}
+			store := NewStore(nil, filepath.Join(t.TempDir(), "config.json"))
+			if err := WriteJSONAtomic(store.ConfigPath, cfg, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.LoadConfig(); err == nil || !strings.Contains(err.Error(), "differs from its API snapshot") {
+				t.Fatalf("divergent persisted release metadata was accepted: %v", err)
+			}
+			if err := store.SaveConfig(cfg); err == nil || !strings.Contains(err.Error(), "differs from its API snapshot") {
+				t.Fatalf("divergent release metadata was persisted: %v", err)
+			}
+		})
+	}
+}
+
+func TestStoreCrossChecksSavedCloudMetadataForLocalAirplaneTeam(t *testing.T) {
+	denied := false
+	team := TeamConfig{
+		Endpoint: "http://127.0.0.1:8846", ReleaseChannel: api.PrelaunchReleaseChannel,
+		ProductionCertified: &denied, ProductionAPIPath: &denied,
+		PolicySHA256:    "sha256:78f328e3dbf8fcda1162ab9c93880cf738204b7944eb8f11f848dee6d7dc54e2",
+		PolicyExpiresAt: "2099-10-27T12:00:00Z", UpstreamCredentialExpiresAt: "2099-10-27T11:00:00Z",
+		APISnapshot: api.Team{
+			Endpoint: "https://gateway.s46.dev", ReleaseChannel: api.PrelaunchReleaseChannel,
+			ProductionCertified: &denied, ProductionAPIPath: &denied,
+			PolicySHA256:    "sha256:78f328e3dbf8fcda1162ab9c93880cf738204b7944eb8f11f848dee6d7dc54e2",
+			PolicyExpiresAt: "2099-10-27T12:00:00Z", UpstreamCredentialExpiresAt: "2099-10-27T11:00:00Z",
+		},
+	}
+	cfg := Config{Mode: ModeAirplane, Teams: map[string]TeamConfig{"@s46/engineering": team}}
+	store := NewStore(nil, filepath.Join(t.TempDir(), "config.json"))
+	if err := store.SaveConfig(cfg); err != nil {
+		t.Fatalf("matching saved cloud metadata was rejected: %v", err)
+	}
+	if active := team.APIForMode("@s46/engineering", ModeAirplane); hasReleaseMetadata(active) {
+		t.Fatalf("saved cloud metadata classified the active local route: %#v", active)
+	}
+	team.APISnapshot.ReleaseChannel = ""
+	team.APISnapshot.ProductionCertified = nil
+	team.APISnapshot.ProductionAPIPath = nil
+	team.APISnapshot.PolicySHA256 = ""
+	team.APISnapshot.PolicyExpiresAt = ""
+	team.APISnapshot.UpstreamCredentialExpiresAt = ""
+	cfg.Teams["@s46/engineering"] = team
+	if err := store.SaveConfig(cfg); err == nil || !strings.Contains(err.Error(), "differs from its API snapshot") {
+		t.Fatalf("stripped saved cloud classification was accepted: %v", err)
+	}
+}
+
 func TestTeamConfigRoundTripWithAPI(t *testing.T) {
 	t.Parallel()
+	reasoning := true
 	runtime := api.ModelRuntime{
 		Engine:                 "vllm",
 		Version:                "0.31.0",
@@ -247,11 +316,12 @@ func TestTeamConfigRoundTripWithAPI(t *testing.T) {
 		ClosureSizeBytes:       4096,
 		ContextWindow:          8192,
 		MaxTokens:              1024,
-		Reasoning:              true,
+		Reasoning:              &reasoning,
 		MinMemoryBytes:         1024,
 		RecommendedMemoryBytes: 2048,
 	}
-	team := api.Team{Name: "@s46/engineering", Endpoint: "https://gateway.s46.dev", Region: "EU-OPO", WorkerHosts: []string{"worker-01"}, DefaultModel: api.DeepSeekModelID, Models: []string{api.DeepSeekModelID}, ModelMetadata: map[string]api.ModelRuntime{api.DeepSeekModelID: runtime}}
+	prelaunchFalse := false
+	team := api.Team{Name: "@s46/engineering", Endpoint: "https://gateway.s46.dev", Region: "EU-OPO", WorkerHosts: []string{"worker-01"}, DefaultModel: api.DeepSeekModelID, Models: []string{api.DeepSeekModelID}, ModelMetadata: map[string]api.ModelRuntime{api.DeepSeekModelID: runtime}, ReleaseChannel: api.PrelaunchReleaseChannel, ProductionCertified: &prelaunchFalse, ProductionAPIPath: &prelaunchFalse, PolicySHA256: "sha256:78f328e3dbf8fcda1162ab9c93880cf738204b7944eb8f11f848dee6d7dc54e2", PolicyExpiresAt: "2099-10-27T12:00:00Z", UpstreamCredentialExpiresAt: "2099-10-27T11:00:00Z"}
 	tc := TeamConfigFromAPI(team, "claude-code", api.DeepSeekModelID, ModeCloud)
 	if tc.DefaultHarness != "claude-code" || tc.Endpoint != team.Endpoint {
 		t.Fatalf("TeamConfigFromAPI = %#v", tc)
@@ -260,7 +330,31 @@ func TestTeamConfigRoundTripWithAPI(t *testing.T) {
 	if round.Endpoint != team.Endpoint || round.Region != team.Region || round.DefaultModel != team.DefaultModel {
 		t.Fatalf("API round-trip drift: %#v", round)
 	}
-	if got := round.ModelMetadata[api.DeepSeekModelID]; got != runtime {
+	if got := round.ModelMetadata[api.DeepSeekModelID]; !reflect.DeepEqual(got, runtime) {
 		t.Fatalf("runtime metadata round-trip drift:\n got: %#v\nwant: %#v", got, runtime)
+	}
+	if tc.ReleaseChannel != api.PrelaunchReleaseChannel || tc.PolicySHA256 != team.PolicySHA256 || round.ReleaseChannel != api.PrelaunchReleaseChannel || round.PolicyExpiresAt != team.PolicyExpiresAt || round.UpstreamCredentialExpiresAt != team.UpstreamCredentialExpiresAt {
+		t.Fatalf("prelaunch metadata round-trip drift: config=%#v round=%#v", tc, round)
+	}
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	store := NewStore(map[string]string{"HOME": dir}, configPath)
+	if err := store.SaveConfig(Config{ActiveTeam: team.Name, Teams: map[string]TeamConfig{team.Name: tc}}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(raw), `"productionCertified": false`) < 2 || strings.Count(string(raw), `"productionAPIPath": false`) < 2 {
+		t.Fatalf("explicit non-production claims were not persisted in TeamConfig and APISnapshot:\n%s", raw)
+	}
+	loaded, err := store.LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	persisted := loaded.Teams[team.Name]
+	if persisted.ReleaseChannel != api.PrelaunchReleaseChannel || persisted.PolicySHA256 != team.PolicySHA256 || persisted.APISnapshot.ReleaseChannel != api.PrelaunchReleaseChannel || persisted.APISnapshot.PolicyExpiresAt != team.PolicyExpiresAt {
+		t.Fatalf("prelaunch metadata was not persisted in TeamConfig and APISnapshot: %#v", persisted)
 	}
 }

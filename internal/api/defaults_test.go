@@ -15,16 +15,21 @@ func TestDefaultModelIsPublishedDevstral(t *testing.T) {
 	}
 }
 
-func TestPublicCandidateCommandsDoNotAdvertiseDeepSeek(t *testing.T) {
+func TestCandidateGuideScopesDeepSeekCommandToExplicitPrelaunch(t *testing.T) {
 	raw, err := os.ReadFile("../../docs/testing-candidate.md")
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := string(raw)
-	for _, command := range []string{"--model=" + DeepSeekModelID, "--model " + DeepSeekModelID} {
-		if strings.Contains(text, command) {
-			t.Fatalf("public candidate guide advertises unpublished DeepSeek in an actionable command: %q", command)
-		}
+	prelaunch, production, ok := strings.Cut(string(raw), "### Production acceptance")
+	if !ok {
+		t.Fatal("candidate guide does not separate prelaunch from production acceptance")
+	}
+	command := "--model=" + DeepSeekModelID
+	if !strings.Contains(prelaunch, command) || !strings.Contains(prelaunch, "S46_API_BASE_URL=https://gateway.s46.dev") || !strings.Contains(prelaunch, "not production-certified") {
+		t.Fatalf("candidate guide does not bind the DeepSeek command to explicit non-production prelaunch: %q", command)
+	}
+	if strings.Contains(production, command) || strings.Contains(production, "--model "+DeepSeekModelID) {
+		t.Fatalf("production guide advertises unpublished DeepSeek in an actionable command: %q", command)
 	}
 }
 

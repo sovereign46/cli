@@ -50,7 +50,7 @@ func runDisconnect(ctx context.Context, app *app, teamName string, harnessName s
 	if err != nil {
 		return err
 	}
-	team := teamConfig.API(teamName)
+	team := teamConfig.APIForMode(teamName, cfg.ActiveMode())
 	plan, err := adapter.PlanDisconnect(ctx, harness.DisconnectRequest{Env: app.runtime.Env, Team: team, Harness: harnessName, Scope: scope})
 	if err != nil {
 		return err

@@ -9,7 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/sovereign46/cli/internal/airplane"
 	"github.com/sovereign46/cli/internal/api"
 	"github.com/sovereign46/cli/internal/config"
 	"github.com/sovereign46/cli/internal/harness"
@@ -57,6 +59,33 @@ func TestResolveConnectModePrecedence(t *testing.T) {
 				t.Errorf("resolveConnectMode() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestAirplaneReconnectPreservesUnclassifiedProtectedSnapshot(t *testing.T) {
+	const teamName = "@s46/engineering"
+	existing := config.TeamConfig{
+		Endpoint:     airplane.LocalGatewayURL,
+		DefaultModel: airplane.LocalModelID,
+		Models:       []string{airplane.LocalModelID},
+		APISnapshot: api.Team{
+			Name: teamName, Endpoint: "http://127.0.0.1:9443",
+			DefaultModel: api.DeepSeekModelID, Models: []string{api.DeepSeekModelID},
+			ModelMetadata: map[string]api.ModelRuntime{api.DeepSeekModelID: {
+				ClosureSHA256: testRuntimeClosureSHA256, ClosureSizeBytes: 4096,
+				ContextWindow: 262144, MaxTokens: 32768,
+			}},
+		},
+	}
+	cfg := config.Config{ActiveTeam: teamName, Mode: config.ModeAirplane, Teams: map[string]config.TeamConfig{teamName: existing}}
+	local := localAirplaneTeam(teamName, existing, connectRequest{})
+	_, after := buildConnectConfigs(cfg, local, "standard", airplane.LocalModelID, config.ModeAirplane, existing, harness.Plan{})
+	saved := after.Teams[teamName]
+	if saved.APISnapshot.Endpoint != existing.APISnapshot.Endpoint || !api.TeamRequiresPrelaunchMetadata(saved.APISnapshot) {
+		t.Fatalf("airplane reconnect discarded the protected cloud snapshot: %#v", saved)
+	}
+	if err := api.ValidateTeamReleaseMetadata(saved.APISnapshot, time.Now().UTC()); err == nil || !strings.Contains(err.Error(), "requires complete prelaunch release metadata") {
+		t.Fatalf("preserved snapshot was silently declassified: %v", err)
 	}
 }
 
@@ -250,6 +279,50 @@ func (a *failingAdapter) Apply(ctx context.Context, plan harness.Plan) (harness.
 		return partial, err
 	}
 	return partial, errors.New("inject: apply failed on second file")
+}
+
+type successfulAdapter struct{ failingAdapter }
+
+func (a *successfulAdapter) Apply(ctx context.Context, plan harness.Plan) (harness.AppliedPlan, error) {
+	return harness.ApplyPlan(nil, plan)
+}
+
+func TestApplyAtomicConfigAndHarnessRollsBackWhenPostApplyValidationFails(t *testing.T) {
+	dir := t.TempDir()
+	store := config.NewStore(map[string]string{"HOME": dir}, "")
+	before := config.DefaultConfig()
+	if err := store.SaveConfig(before); err != nil {
+		t.Fatal(err)
+	}
+	after := config.DefaultConfig()
+	after.ActiveTeam = "@s46/engineering"
+	after.Teams[after.ActiveTeam] = config.TeamConfig{Endpoint: "https://gateway.s46.dev"}
+	target := filepath.Join(dir, "models.json")
+	plan := harness.Plan{Files: []harness.FilePlan{{Path: target, Content: []byte("MUST NOT APPLY"), Mode: 0o600}}}
+	app := &app{config: store, options: &options{}}
+	validations := 0
+	validate := func() error {
+		validations++
+		if validations == 3 {
+			return errors.New("release expired after harness apply")
+		}
+		return nil
+	}
+
+	_, err := applyAtomicConfigAndHarnessValidated(context.Background(), app, before, after, &successfulAdapter{}, plan, "connect", validate)
+	if err == nil || !strings.Contains(err.Error(), "release expired after harness apply") {
+		t.Fatalf("late validation failure was accepted: validations=%d err=%v", validations, err)
+	}
+	got, err := store.LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ActiveTeam != "" || len(got.Teams) != 0 {
+		t.Fatalf("config was not rolled back after post-apply validation failure: %#v", got)
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("harness plan was not rolled back after post-apply validation failure: %v", err)
+	}
 }
 
 func TestApplyAtomicConfigAndHarnessRollsBackBoth(t *testing.T) {
