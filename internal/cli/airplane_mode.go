@@ -558,7 +558,7 @@ func planHarnessConfig(ctx context.Context, app *app, teamName string, teamConfi
 }
 
 func isProtectedCloudTeam(team api.Team) bool {
-	return team.HasReleaseMetadata() || api.TeamRequiresPrelaunchMetadata(team)
+	return team.HasReleaseMetadata() || api.TeamContainsDeepSeek(team)
 }
 
 func hasCloudEndpoint(endpoint string) bool {

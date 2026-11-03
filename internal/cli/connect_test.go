@@ -81,10 +81,10 @@ func TestAirplaneReconnectPreservesUnclassifiedProtectedSnapshot(t *testing.T) {
 	local := localAirplaneTeam(teamName, existing, connectRequest{})
 	_, after := buildConnectConfigs(cfg, local, "standard", airplane.LocalModelID, config.ModeAirplane, existing, harness.Plan{})
 	saved := after.Teams[teamName]
-	if saved.APISnapshot.Endpoint != existing.APISnapshot.Endpoint || !api.TeamRequiresPrelaunchMetadata(saved.APISnapshot) {
+	if saved.APISnapshot.Endpoint != existing.APISnapshot.Endpoint || !api.TeamContainsDeepSeek(saved.APISnapshot) {
 		t.Fatalf("airplane reconnect discarded the protected cloud snapshot: %#v", saved)
 	}
-	if err := api.ValidateTeamReleaseMetadata(saved.APISnapshot, time.Now().UTC()); err == nil || !strings.Contains(err.Error(), "requires complete prelaunch release metadata") {
+	if err := api.ValidateTeamReleaseMetadata(saved.APISnapshot, time.Now().UTC()); err == nil || !strings.Contains(err.Error(), "requires complete release metadata") {
 		t.Fatalf("preserved snapshot was silently declassified: %v", err)
 	}
 }

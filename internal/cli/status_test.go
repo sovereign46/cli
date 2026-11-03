@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -262,6 +263,72 @@ func TestStatusDoesNotRenderValidatedPrelaunchBannerForInvalidClaims(t *testing.
 	}
 	if !strings.Contains(result.stdout, "[fail] release-channel") {
 		t.Fatalf("status omitted the failed release check:\n%s", result.stdout)
+	}
+}
+
+func TestStatusReportsCachedProductionDiscoveryAsSavedWhenGatewayFails(t *testing.T) {
+	env := testEnv(t)
+	delete(env, "S46_TEST_STATUS_LIVE_OK")
+	team := testPrelaunchDeepSeekTeam(api.DefaultGatewayURL)
+	certified := true
+	team.ReleaseChannel = api.ProductionReleaseChannel
+	team.ProductionCertified = &certified
+	team.ProductionAPIPath = &certified
+	team.PolicySHA256 = ""
+	team.PolicyExpiresAt = ""
+	team.UpstreamCredentialExpiresAt = ""
+	teamConfig := config.TeamConfigFromAPI(team, "pi", team.DefaultModel, config.ModeCloud)
+	store := config.NewStore(env, "")
+	if err := store.SaveConfig(config.Config{
+		ActiveTeam: team.Name,
+		Mode:       config.ModeCloud,
+		Teams:      map[string]config.TeamConfig{team.Name: teamConfig},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	writeSavedPiConfiguration(t, env, team, config.ModeCloud)
+
+	status := func(args ...string) commandResult {
+		var stdout, stderr bytes.Buffer
+		root := NewRootCommand(Runtime{Env: env, Stdout: &stdout, Stderr: &stderr})
+		root.SetArgs(append([]string{"status"}, args...))
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		err := root.ExecuteContext(ctx)
+		return commandResult{stdout: stdout.String(), stderr: stderr.String(), err: err}
+	}
+	jsonResult := status("--json")
+	if jsonResult.err == nil {
+		t.Fatalf("failed gateway probe passed status: %s", jsonResult.stdout)
+	}
+	var payload statusResult
+	if err := json.Unmarshal([]byte(jsonResult.stdout), &payload); err != nil {
+		t.Fatalf("invalid JSON status: %v\n%s", err, jsonResult.stdout)
+	}
+	if payload.OK || statusCheckOK(payload.Checks, "readiness") || !statusCheckOK(payload.Checks, "release-channel") {
+		t.Fatalf("cached production status hid the failed live probe: %#v", payload.Checks)
+	}
+	if payload.ReleaseChannel != "" || payload.ProductionCertified != nil || payload.ProductionAPIPath != nil ||
+		payload.SavedReleaseChannel != api.ProductionReleaseChannel || payload.SavedProductionCertified == nil || !*payload.SavedProductionCertified ||
+		payload.SavedProductionAPIPath == nil || !*payload.SavedProductionAPIPath {
+		t.Fatalf("cached production fields did not identify saved discovery: %#v", payload)
+	}
+	if !strings.Contains(statusCheckMessage(payload.Checks, "release-channel"), "current release authority not checked") {
+		t.Fatalf("saved release check implied current authority: %#v", payload.Checks)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal([]byte(jsonResult.stdout), &fields); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"releaseChannel", "productionCertified", "productionAPIPath"} {
+		if _, exists := fields[name]; exists {
+			t.Fatalf("status emitted current-looking %s from cached config: %s", name, jsonResult.stdout)
+		}
+	}
+	humanResult := status()
+	if humanResult.err == nil || !strings.Contains(humanResult.stdout, "saved team discovery: production-certified") ||
+		!strings.Contains(humanResult.stdout, "current release authority not checked") || !strings.Contains(humanResult.stdout, "[fail] gateway:") {
+		t.Fatalf("human status obscured saved classification or failed probe: err=%v\n%s", humanResult.err, humanResult.stdout)
 	}
 }
 

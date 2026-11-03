@@ -158,7 +158,11 @@ func tokenCommand(runtime Runtime, opts *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			productionDiscovery := api.NewHTTPClient(api.DefaultProductionBaseURL)
 			if err := validateProtectedTokenHelper(cmd.Context(), app); err != nil {
+				return err
+			}
+			if err := validateCurrentProductionTokenHelper(cmd.Context(), app, productionDiscovery); err != nil {
 				return err
 			}
 			service := app.authService()
@@ -167,6 +171,9 @@ func tokenCommand(runtime Runtime, opts *options) *cobra.Command {
 				return err
 			}
 			if err := validateProtectedTokenHelper(cmd.Context(), app); err != nil {
+				return err
+			}
+			if err := validateCurrentProductionTokenHelper(cmd.Context(), app, productionDiscovery); err != nil {
 				return err
 			}
 			if ok, err := app.writeStructured(map[string]any{"token": token}); ok {
@@ -212,6 +219,25 @@ func validateProtectedTokenHelper(ctx context.Context, app *app) error {
 	}
 	request := harness.LaunchConfigRequest{Env: app.runtime.Env, Team: team, Mode: config.ModeCloud, Model: teamConfig.DefaultModel}
 	if err := validator.ValidateLaunchConfig(ctx, request); err != nil {
+		return fmt.Errorf("refusing token helper: %w", err)
+	}
+	return nil
+}
+
+func validateCurrentProductionTokenHelper(ctx context.Context, app *app, discovery api.TeamAPI) error {
+	cfg, err := app.config.LoadConfig()
+	if err != nil {
+		return err
+	}
+	if cfg.ActiveMode() != config.ModeCloud {
+		return nil
+	}
+	teamConfig, ok := cfg.Teams[cfg.ActiveTeam]
+	if !ok || teamConfig.DefaultHarness == "pi" ||
+		(!api.TeamContainsDeepSeek(teamConfig.API(cfg.ActiveTeam)) && !api.TeamContainsDeepSeek(teamConfig.APISnapshot)) {
+		return nil
+	}
+	if err := app.requireCurrentProductionDeepSeek(ctx, discovery, cfg.ActiveTeam, teamConfig.API(cfg.ActiveTeam)); err != nil {
 		return fmt.Errorf("refusing token helper: %w", err)
 	}
 	return nil

@@ -101,14 +101,14 @@ func runConnect(ctx context.Context, app *app, req connectRequest) error {
 	}
 	existing := cfg.Teams[req.TeamName]
 	targetMode := resolveConnectMode(cfg, existing, req)
-	if err := validateConnectHarnessBeforeCloudEffects(existing, req, targetMode, req.Harness); err != nil {
+	if err := validateConnectHarnessBeforeCloudEffects(existing, targetMode, req.Harness); err != nil {
 		return err
 	}
 	harnessName, adapter, err := selectConnectHarness(ctx, app, req)
 	if err != nil {
 		return err
 	}
-	if err := validateConnectHarnessBeforeCloudEffects(existing, req, targetMode, harnessName); err != nil {
+	if err := validateConnectHarnessBeforeCloudEffects(existing, targetMode, harnessName); err != nil {
 		return err
 	}
 	team, err := connectTeam(ctx, app, targetMode, existing, req)
@@ -177,7 +177,7 @@ func (a *app) requireCloudAuthBeforeConnectPrompt(ctx context.Context, req conne
 	}
 	existing := cfg.Teams[teamName]
 	targetMode := resolveConnectMode(cfg, existing, req)
-	if err := validateConnectHarnessBeforeCloudEffects(existing, req, targetMode, req.Harness); err != nil {
+	if err := validateConnectHarnessBeforeCloudEffects(existing, targetMode, req.Harness); err != nil {
 		return err
 	}
 	if targetMode == config.ModeAirplane {
@@ -233,12 +233,11 @@ func fillMissingTeamForConnect(cfg config.Config, state config.State, req connec
 	return req, nil
 }
 
-func validateConnectHarnessBeforeCloudEffects(existing config.TeamConfig, req connectRequest, mode, harnessName string) error {
+func validateConnectHarnessBeforeCloudEffects(existing config.TeamConfig, mode, harnessName string) error {
 	if mode != config.ModeCloud {
 		return nil
 	}
-	requested := api.Team{DefaultModel: req.Model}
-	return validateCloudDeepSeekHarness(mode, harnessName, "connect", requested, existing.API(req.TeamName), existing.APISnapshot)
+	return validateCloudDeepSeekHarness(mode, harnessName, "connect", existing.API(""), existing.APISnapshot)
 }
 
 func validateCloudDeepSeekHarness(mode, harnessName, operation string, teams ...api.Team) error {
@@ -246,7 +245,12 @@ func validateCloudDeepSeekHarness(mode, harnessName, operation string, teams ...
 		return nil
 	}
 	for _, team := range teams {
-		if !api.TeamRequiresPrelaunchMetadata(team) {
+		if !api.TeamContainsDeepSeek(team) {
+			continue
+		}
+		if team.ReleaseChannel == api.ProductionReleaseChannel &&
+			team.ProductionCertified != nil && *team.ProductionCertified &&
+			team.ProductionAPIPath != nil && *team.ProductionAPIPath {
 			continue
 		}
 		if harnessName == "" {
@@ -281,12 +285,18 @@ func connectResult(team api.Team, harnessName, model, mode string, plan harness.
 		if team.ProductionCertified == nil || team.ProductionAPIPath == nil {
 			return nil, fmt.Errorf("release metadata lacks explicit production claims")
 		}
-		result["releaseChannel"] = team.ReleaseChannel
-		result["productionCertified"] = *team.ProductionCertified
-		result["productionAPIPath"] = *team.ProductionAPIPath
-		result["policySha256"] = team.PolicySHA256
-		result["policyExpiresAt"] = team.PolicyExpiresAt
-		result["upstreamCredentialExpiresAt"] = team.UpstreamCredentialExpiresAt
+		if team.ReleaseChannel == api.ProductionReleaseChannel {
+			result["releaseChannelAtConnect"] = team.ReleaseChannel
+			result["productionCertifiedAtConnect"] = *team.ProductionCertified
+			result["productionAPIPathAtConnect"] = *team.ProductionAPIPath
+		} else {
+			result["releaseChannel"] = team.ReleaseChannel
+			result["productionCertified"] = *team.ProductionCertified
+			result["productionAPIPath"] = *team.ProductionAPIPath
+			result["policySha256"] = team.PolicySHA256
+			result["policyExpiresAt"] = team.PolicyExpiresAt
+			result["upstreamCredentialExpiresAt"] = team.UpstreamCredentialExpiresAt
+		}
 	}
 	return result, nil
 }
@@ -429,6 +439,8 @@ func renderConnectApplied(app *app, team api.Team, mode string, plan harness.Pla
 			fmt.Sprintf("[s46] policy:  %s · expires %s", team.PolicySHA256, team.PolicyExpiresAt),
 			fmt.Sprintf("[s46] credential: expires %s", team.UpstreamCredentialExpiresAt),
 		)
+	} else if team.ReleaseChannel == api.ProductionReleaseChannel {
+		lines = append(lines, "[s46] team discovery at connect: production-certified · production API path")
 	}
 	if mode == config.ModeAirplane {
 		lines = append(lines, "[s46] airplane harness configuration only; local runtime setup and readiness were not verified")

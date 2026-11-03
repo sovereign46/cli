@@ -166,6 +166,9 @@ func (c *HTTPClient) Team(ctx context.Context, name string, opts TeamOptions) (T
 	if err := validateTeamReleaseHeaders(team, headers); err != nil {
 		return Team{}, fmt.Errorf("validate team release headers: %w", err)
 	}
+	if team.ReleaseChannel == ProductionReleaseChannel && c.BaseURL != DefaultProductionBaseURL {
+		return Team{}, fmt.Errorf("production team response requires the canonical production API origin")
+	}
 	team.Endpoint = c.rewriteS46URL(team.Endpoint)
 	for i := range team.WorkerHosts {
 		team.WorkerHosts[i] = c.rewriteS46Location(team.WorkerHosts[i])
@@ -371,35 +374,35 @@ func (c *HTTPClient) doWithHeaders(ctx context.Context, method string, endpoint 
 }
 
 func validateTeamReleaseHeaders(team Team, headers http.Header) error {
-	expected := map[string]string{
-		"X-S46-Release-Channel":      PrelaunchReleaseChannel,
-		"X-S46-Production-Certified": "false",
-		"X-S46-Production-API-Path":  "false",
-	}
+	names := []string{"X-S46-Release-Channel", "X-S46-Production-Certified", "X-S46-Production-API-Path"}
 	hasHeaders := false
-	for name, value := range expected {
-		values := headers.Values(name)
-		if len(values) > 0 {
-			hasHeaders = true
-		}
-		if len(values) > 0 && (len(values) != 1 || values[0] != value) {
-			return fmt.Errorf("response header %s must occur exactly once with value %q", name, value)
-		}
+	for _, name := range names {
+		hasHeaders = hasHeaders || len(headers.Values(name)) > 0
 	}
 	if team.ReleaseChannel == "" && !hasHeaders {
 		return nil
 	}
 	if team.ReleaseChannel == "" || !hasHeaders {
-		return errors.New("prelaunch response headers and body classification disagree")
+		return errors.New("release response headers and body classification disagree")
+	}
+	production := team.ReleaseChannel == ProductionReleaseChannel
+	claim := "false"
+	if production {
+		claim = "true"
+	}
+	expected := map[string]string{
+		"X-S46-Release-Channel":      team.ReleaseChannel,
+		"X-S46-Production-Certified": claim,
+		"X-S46-Production-API-Path":  claim,
 	}
 	for name, value := range expected {
 		values := headers.Values(name)
 		if len(values) != 1 || values[0] != value {
-			return fmt.Errorf("prelaunch response header %s must occur exactly once with value %q", name, value)
+			return fmt.Errorf("release response header %s must occur exactly once with value %q", name, value)
 		}
 	}
-	if team.ReleaseChannel != PrelaunchReleaseChannel || team.ProductionCertified == nil || *team.ProductionCertified || team.ProductionAPIPath == nil || *team.ProductionAPIPath {
-		return errors.New("prelaunch response headers and body classification disagree")
+	if team.ProductionCertified == nil || *team.ProductionCertified != production || team.ProductionAPIPath == nil || *team.ProductionAPIPath != production {
+		return errors.New("release response headers and body classification disagree")
 	}
 	return nil
 }

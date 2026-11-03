@@ -18,6 +18,45 @@ func TestValidateTeamReleaseMetadataAcceptsExactPrelaunchContract(t *testing.T) 
 	}
 }
 
+func TestValidateTeamReleaseMetadataAcceptsExactProductionContract(t *testing.T) {
+	team := validProductionTeam()
+	if err := ValidateTeamReleaseMetadata(team, time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("valid production metadata was rejected: %v", err)
+	}
+}
+
+func TestValidateTeamReleaseMetadataRejectsUnqualifiedProductionClaims(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*Team)
+	}{
+		{"certification denied", func(team *Team) { team.ProductionCertified = boolPointer(false) }},
+		{"path denied", func(team *Team) { team.ProductionAPIPath = boolPointer(false) }},
+		{"missing certification", func(team *Team) { team.ProductionCertified = nil }},
+		{"noncanonical gateway", func(team *Team) { team.Endpoint = "https://other.example" }},
+		{"prelaunch expiry", func(team *Team) { team.PolicyExpiresAt = "2099-01-01T00:00:00Z" }},
+		{"DeepSeek removed", func(team *Team) {
+			team.DefaultModel = "s46/other"
+			team.Models = []string{"s46/other"}
+			team.ModelMetadata = map[string]ModelRuntime{"s46/other": {Engine: "llama.cpp", Version: "b1", Reasoning: boolPointer(false), ContextWindow: 8192, MaxTokens: 1024}}
+		}},
+		{"runtime closure removed", func(team *Team) {
+			runtime := team.ModelMetadata[DeepSeekModelID]
+			runtime.ClosureSHA256 = ""
+			team.ModelMetadata[DeepSeekModelID] = runtime
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			team := validProductionTeam()
+			tc.mutate(&team)
+			if err := ValidateTeamReleaseMetadata(team, time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)); err == nil {
+				t.Fatal("unqualified production claim was accepted")
+			}
+		})
+	}
+}
+
 func TestValidateTeamReleaseMetadataAcceptsExplicitNonReasoningRuntime(t *testing.T) {
 	team := validPrelaunchTeam()
 	const model = "s46/non-reasoning"
@@ -71,7 +110,7 @@ func TestValidateTeamReleaseMetadataFailsClosed(t *testing.T) {
 			team.PolicySHA256 = ""
 			team.PolicyExpiresAt = ""
 			team.UpstreamCredentialExpiresAt = ""
-		}, "requires complete prelaunch release metadata"},
+		}, "requires complete release metadata"},
 		{"unknown channel", func(team *Team) { team.ReleaseChannel = "preview" }, "unsupported release channel"},
 		{"missing production certification claim", func(team *Team) { team.ProductionCertified = nil }, "must explicitly deny production"},
 		{"missing production path claim", func(team *Team) { team.ProductionAPIPath = nil }, "must explicitly deny production"},
@@ -160,6 +199,17 @@ func validPrelaunchTeam() Team {
 			},
 		},
 	}
+}
+
+func validProductionTeam() Team {
+	team := validPrelaunchTeam()
+	team.ReleaseChannel = ProductionReleaseChannel
+	team.ProductionCertified = boolPointer(true)
+	team.ProductionAPIPath = boolPointer(true)
+	team.PolicySHA256 = ""
+	team.PolicyExpiresAt = ""
+	team.UpstreamCredentialExpiresAt = ""
+	return team
 }
 
 func boolPointer(value bool) *bool { return &value }

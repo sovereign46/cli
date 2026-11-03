@@ -140,6 +140,11 @@ func launchConnectedHarness(ctx context.Context, app *app, runtime Runtime, task
 	if err := validateReleaseMetadata(); err != nil {
 		return sessioncmd.RunResult{}, "", fmt.Errorf("refusing harness launch: %w", err)
 	}
+	if mode == config.ModeCloud && team.DefaultHarness != "pi" && effectiveModel == api.DeepSeekModelID {
+		if err := app.requireCurrentProductionDeepSeek(ctx, api.NewHTTPClient(api.DefaultProductionBaseURL), cfg.ActiveTeam, activeTeam); err != nil {
+			return sessioncmd.RunResult{}, "", fmt.Errorf("refusing harness launch: %w", err)
+		}
+	}
 	if err := adapter.Launch(ctx, request); err != nil {
 		return sessioncmd.RunResult{}, "", err
 	}

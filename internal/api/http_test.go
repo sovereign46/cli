@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -17,6 +18,69 @@ func setPrelaunchResponseHeaders(header http.Header) {
 	header.Set("X-S46-Release-Channel", PrelaunchReleaseChannel)
 	header.Set("X-S46-Production-Certified", "false")
 	header.Set("X-S46-Production-API-Path", "false")
+}
+
+func TestProductionReleaseHeadersMustMatchBody(t *testing.T) {
+	team := validProductionTeam()
+	header := http.Header{}
+	header.Set("X-S46-Release-Channel", ProductionReleaseChannel)
+	header.Set("X-S46-Production-Certified", "true")
+	header.Set("X-S46-Production-API-Path", "true")
+	if err := validateTeamReleaseHeaders(team, header); err != nil {
+		t.Fatalf("exact production headers were rejected: %v", err)
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(http.Header)
+	}{
+		{"missing path", func(h http.Header) { h.Del("X-S46-Production-API-Path") }},
+		{"false certification", func(h http.Header) { h.Set("X-S46-Production-Certified", "false") }},
+		{"duplicate channel", func(h http.Header) { h.Add("X-S46-Release-Channel", ProductionReleaseChannel) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			changed := header.Clone()
+			tc.mutate(changed)
+			if err := validateTeamReleaseHeaders(team, changed); err == nil {
+				t.Fatal("inconsistent production headers were accepted")
+			}
+		})
+	}
+	if err := validateTeamReleaseHeaders(Team{}, header); err == nil {
+		t.Fatal("production headers without body classification were accepted")
+	}
+}
+
+func TestHTTPClientKeepsClassifiedProductionGatewayCanonical(t *testing.T) {
+	body, err := json.Marshal(validProductionTeam())
+	if err != nil {
+		t.Fatal(err)
+	}
+	header := http.Header{}
+	header.Set("X-S46-Release-Channel", ProductionReleaseChannel)
+	header.Set("X-S46-Production-Certified", "true")
+	header.Set("X-S46-Production-API-Path", "true")
+	client := NewHTTPClient(DefaultProductionBaseURL)
+	client.Client = &http.Client{Transport: staticResponseTransport{body: body, header: header}}
+	team, err := client.Team(context.Background(), "@s46/engineering", TeamOptions{AccessToken: "test"})
+	if err != nil {
+		t.Fatalf("exact production response was rejected: %v", err)
+	}
+	if team.Endpoint != DefaultGatewayURL {
+		t.Fatalf("production gateway was rewritten: %q", team.Endpoint)
+	}
+	client.BaseURL = "http://127.0.0.1:12345"
+	if _, err := client.Team(context.Background(), "@s46/engineering", TeamOptions{AccessToken: "test"}); err == nil || !strings.Contains(err.Error(), "canonical production API origin") {
+		t.Fatalf("local API origin was allowed to claim production certification: %v", err)
+	}
+}
+
+type staticResponseTransport struct {
+	body   []byte
+	header http.Header
+}
+
+func (transport staticResponseTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return &http.Response{StatusCode: http.StatusOK, Header: transport.header.Clone(), Body: io.NopCloser(bytes.NewReader(transport.body))}, nil
 }
 
 const exactPrelaunchTeamResponse = `{
@@ -288,7 +352,7 @@ func TestHTTPClientSuccessJSONKeepsUnknownFieldCompatibility(t *testing.T) {
 	}
 }
 
-func TestHTTPClientRejectsDeepSeekResponseWithoutPrelaunchClassification(t *testing.T) {
+func TestHTTPClientRejectsDeepSeekResponseWithoutReleaseClassification(t *testing.T) {
 	team := validPrelaunchTeam()
 	team.ReleaseChannel = ""
 	team.ProductionCertified = nil
@@ -303,7 +367,7 @@ func TestHTTPClientRejectsDeepSeekResponseWithoutPrelaunchClassification(t *test
 
 	client := NewHTTPClient(server.URL)
 	client.now = func() time.Time { return time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC) }
-	if _, err := client.Team(context.Background(), team.Name, TeamOptions{}); err == nil || !strings.Contains(err.Error(), "requires complete prelaunch release metadata") {
+	if _, err := client.Team(context.Background(), team.Name, TeamOptions{}); err == nil || !strings.Contains(err.Error(), "requires complete release metadata") {
 		t.Fatalf("unclassified DeepSeek response was accepted: %v", err)
 	}
 }
