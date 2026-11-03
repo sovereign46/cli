@@ -162,7 +162,7 @@ func (a Adapter) Status(ctx context.Context, req harness.StatusRequest) []harnes
 	}
 	envMap, _ := settings["env"].(map[string]any)
 	return []harness.StatusCheck{
-		{Name: "claude-token-helper", OK: settings["apiKeyHelper"] == "s46 token --refresh", Message: fmt.Sprint(settings["apiKeyHelper"])},
+		{Name: "claude-token-helper", OK: settings["apiKeyHelper"] == "s46 token --refresh", Message: "expected s46 token --refresh"},
 		{Name: "claude-base-url", OK: envMap["ANTHROPIC_BASE_URL"] == req.Team.Endpoint+"/anthropic", Message: fmt.Sprint(envMap["ANTHROPIC_BASE_URL"])},
 		{Name: "claude-model", OK: settings["model"] == req.Team.DefaultModel && envMap["ANTHROPIC_MODEL"] == req.Team.DefaultModel && envMap["ANTHROPIC_DEFAULT_SONNET_MODEL"] == req.Team.DefaultModel, Message: fmt.Sprint(settings["model"])},
 	}
