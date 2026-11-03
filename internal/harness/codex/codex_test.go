@@ -18,7 +18,7 @@ import (
 	"github.com/sovereign46/cli/internal/harness"
 )
 
-func TestPlanConnectUsesAirplaneModelLimits(t *testing.T) {
+func TestPlanConnectUsesValidCodexProfile(t *testing.T) {
 	home := t.TempDir()
 	env := map[string]string{"HOME": home, "S46_AIRPLANE_CONTEXT": "16384", "S46_AIRPLANE_MAX_TOKENS": "2048"}
 	team := api.Team{Name: "local", Endpoint: airplane.LocalGatewayURL, DefaultModel: airplane.LocalModelID}
@@ -27,9 +27,9 @@ func TestPlanConnectUsesAirplaneModelLimits(t *testing.T) {
 		t.Fatal(err)
 	}
 	content := string(plan.Files[0].Content)
-	for _, want := range []string{"model_context_window = 16384", "model_max_output_tokens = 2048"} {
-		if !strings.Contains(content, want) {
-			t.Fatalf("config missing %q:\n%s", want, content)
+	for _, unsupported := range []string{"model_context_window", "model_max_output_tokens"} {
+		if strings.Contains(content, unsupported) {
+			t.Fatalf("profile contains unsupported %q:\n%s", unsupported, content)
 		}
 	}
 }
