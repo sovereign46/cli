@@ -228,7 +228,7 @@ func (a Adapter) Status(_ context.Context, req harness.StatusRequest) []harness.
 		{Name: "pi-provider", OK: s46 != nil, Message: path},
 		{Name: "pi-base-url", OK: s46["baseUrl"] == req.Team.Endpoint+"/v1", Message: fmt.Sprint(s46["baseUrl"])},
 		{Name: "pi-api", OK: s46["api"] == "openai-completions", Message: fmt.Sprint(s46["api"])},
-		{Name: "pi-token-helper", OK: s46["apiKey"] == "!s46 token --refresh", Message: fmt.Sprint(s46["apiKey"])},
+		{Name: "pi-token-helper", OK: s46["apiKey"] == "!s46 token --refresh", Message: "expected !s46 token --refresh"},
 		{Name: "pi-auth-header", OK: s46["authHeader"] == true, Message: fmt.Sprint(s46["authHeader"])},
 		{Name: "pi-model-runtime", OK: preflightErr == nil, Message: preflightMessage},
 	}

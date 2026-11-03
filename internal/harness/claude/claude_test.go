@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sovereign46/cli/internal/api"
@@ -129,6 +130,41 @@ func TestStatusReportsConfiguredAndDriftedSettings(t *testing.T) {
 	checks = New().Status(context.Background(), harness.StatusRequest{Env: env, TeamName: "@s46/engineering", Team: api.Team{Endpoint: "https://other.s46.dev", DefaultModel: "s46/kimi-k2.6"}})
 	if okOf(checks, "claude-base-url") {
 		t.Errorf("expected claude-base-url to fail on mismatched endpoint: %#v", checks)
+	}
+}
+
+func TestStatusRedactsConfiguredAPIKeyHelper(t *testing.T) {
+	home := t.TempDir()
+	env := map[string]string{"HOME": home}
+	path := filepath.Join(home, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const secret = "s46-sentinel-helper-secret-1234567890"
+	settings := map[string]any{"apiKeyHelper": "printf " + secret}
+	content, err := json.Marshal(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	checks := New().Status(context.Background(), harness.StatusRequest{Env: env, TeamName: "@s46/engineering", Team: api.Team{Endpoint: "https://gateway.s46.dev"}})
+	var helperFailed bool
+	for _, check := range checks {
+		if check.Name == "claude-token-helper" {
+			helperFailed = !check.OK
+		}
+	}
+	if !helperFailed {
+		t.Fatal("expected a failed Claude token helper check")
+	}
+	encoded, err := json.Marshal(checks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), secret) {
+		t.Fatal("status checks exposed the configured API key helper")
 	}
 }
 

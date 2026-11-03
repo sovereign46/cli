@@ -161,6 +161,42 @@ func TestStatusReadsConfiguredFile(t *testing.T) {
 	}
 }
 
+func TestStatusRedactsConfiguredAPIKey(t *testing.T) {
+	home := t.TempDir()
+	env := map[string]string{"HOME": home}
+	team := cloudTeam()
+	plan, err := New().PlanConnect(context.Background(), harness.ConnectRequest{Env: env, Team: team, Model: api.DefaultModel})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const secret = "s46-sentinel-api-key-1234567890"
+	content := strings.Replace(string(plan.Files[0].Content), "!s46 token --refresh", secret, 1)
+	path := filepath.Join(home, ".pi", "agent", "models.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	checks := New().Status(context.Background(), harness.StatusRequest{Env: env, TeamName: team.Name, Team: team})
+	var helperFailed bool
+	for _, check := range checks {
+		if check.Name == "pi-token-helper" {
+			helperFailed = !check.OK
+		}
+	}
+	if !helperFailed {
+		t.Fatal("expected a failed Pi token helper check")
+	}
+	encoded, err := json.Marshal(checks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), secret) {
+		t.Fatal("status checks exposed the configured API key")
+	}
+}
+
 func TestLivePreflightRejectsHostileDeepSeekConfiguration(t *testing.T) {
 	home := t.TempDir()
 	env := map[string]string{"HOME": home}
