@@ -56,7 +56,7 @@ func (a Adapter) PlanConnect(ctx context.Context, req harness.ConnectRequest) (h
 		Operations: []string{
 			"add or replace [model_providers.s46]",
 			"add or replace [profiles.s46]",
-			"set token_helper to 's46 token --refresh'",
+			"set provider auth command to 's46 token --refresh'",
 			fmt.Sprintf("set model to %s", req.Model),
 		},
 		Files: []harness.FilePlan{{
@@ -104,7 +104,7 @@ func (a Adapter) Status(ctx context.Context, req harness.StatusRequest) []harnes
 	return []harness.StatusCheck{
 		{Name: "codex-provider", OK: strings.Contains(text, "[model_providers.s46]"), Message: path},
 		{Name: "codex-base-url", OK: strings.Contains(text, fmt.Sprintf("base_url = %q", req.Team.Endpoint+"/codex")), Message: req.Team.Endpoint + "/codex"},
-		{Name: "codex-token-helper", OK: strings.Contains(text, `token_helper = "s46 token --refresh"`), Message: "s46 token --refresh"},
+		{Name: "codex-auth-command", OK: strings.Contains(text, "[model_providers.s46.auth]") && strings.Contains(text, `command = "s46"`) && strings.Contains(text, `args = ["token", "--refresh"]`), Message: "s46 token --refresh"},
 		{Name: "codex-profile", OK: strings.Contains(text, "[profiles.s46]"), Message: "profile s46"},
 	}
 }
@@ -126,7 +126,10 @@ func codexBlockBody(req harness.ConnectRequest) string {
 		`name = "Sovereign46"`,
 		fmt.Sprintf("base_url = %q", req.Team.Endpoint+"/codex"),
 		`wire_api = "responses"`,
-		`token_helper = "s46 token --refresh"`,
+		"",
+		"[model_providers.s46.auth]",
+		`command = "s46"`,
+		`args = ["token", "--refresh"]`,
 		"",
 		"[profiles.s46]",
 		`model_provider = "s46"`,
@@ -219,7 +222,7 @@ func validateManagedBlock(block string) error {
 	}
 	for _, line := range strings.Split(body, "\n") {
 		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || trimmed == "[model_providers.s46]" || trimmed == "[profiles.s46]" {
+		if trimmed == "" || trimmed == "[model_providers.s46]" || trimmed == "[model_providers.s46.auth]" || trimmed == "[profiles.s46]" {
 			continue
 		}
 		if strings.HasPrefix(trimmed, `name = "Sovereign46"`) ||
@@ -227,6 +230,8 @@ func validateManagedBlock(block string) error {
 			strings.HasPrefix(trimmed, `base_url = "http://127.0.0.1:`) && strings.HasSuffix(trimmed, `/codex"`) ||
 			trimmed == `wire_api = "responses"` ||
 			trimmed == `token_helper = "s46 token --refresh"` ||
+			trimmed == `command = "s46"` ||
+			trimmed == `args = ["token", "--refresh"]` ||
 			trimmed == `model_provider = "s46"` ||
 			strings.HasPrefix(trimmed, `model = "s46/`) ||
 			strings.HasPrefix(trimmed, `model_context_window = `) ||

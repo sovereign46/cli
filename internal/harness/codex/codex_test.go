@@ -2,10 +2,16 @@ package codex
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/sovereign46/cli/internal/airplane"
 	"github.com/sovereign46/cli/internal/api"
@@ -28,6 +34,80 @@ func TestPlanConnectUsesAirplaneModelLimits(t *testing.T) {
 	}
 }
 
+func TestPlanConnectUsesCodexCommandAuth(t *testing.T) {
+	home := t.TempDir()
+	env := map[string]string{"HOME": home}
+	team := api.Team{Name: "@s46/engineering", Endpoint: "https://gateway.s46.dev", DefaultModel: api.DefaultModel}
+	plan, err := New().PlanConnect(context.Background(), harness.ConnectRequest{Env: env, Team: team, Model: api.DefaultModel})
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(plan.Files[0].Content)
+	for _, want := range []string{"[model_providers.s46.auth]", `command = "s46"`, `args = ["token", "--refresh"]`} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("config missing %q:\n%s", want, content)
+		}
+	}
+	if strings.Contains(content, "token_helper") {
+		t.Fatalf("config retained unsupported token_helper:\n%s", content)
+	}
+}
+
+func TestPlanConnectCodexCLICompatibility(t *testing.T) {
+	if os.Getenv("S46_TEST_CODEX_CLI") == "" {
+		t.Skip("set S46_TEST_CODEX_CLI=1 to check the installed Codex CLI")
+	}
+	if _, err := exec.LookPath("codex"); err != nil {
+		t.Skip("Codex CLI is not installed")
+	}
+
+	var reachedResponses atomic.Bool
+	var authenticated atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/codex/responses" {
+			reachedResponses.Store(true)
+			authenticated.Store(r.Header.Get("Authorization") == "Bearer test-token")
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = fmt.Fprint(w, `{"error":{"message":"registry unavailable"}}`)
+	}))
+	defer server.Close()
+
+	home := t.TempDir()
+	configDir := filepath.Join(home, ".codex")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	team := api.Team{Name: "@s46/engineering", Endpoint: server.URL, DefaultModel: api.DefaultModel}
+	plan, err := New().PlanConnect(context.Background(), harness.ConnectRequest{Env: map[string]string{"HOME": home}, Team: team, Model: api.DefaultModel})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(plan.Files[0].Path, plan.Files[0].Content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	binDir := filepath.Join(home, "bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "s46"), []byte("#!/bin/sh\n[ \"$1\" = token ] && [ \"$2\" = --refresh ] || exit 1\nprintf 'test-token\\n'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "codex", "exec", "--strict-config", "--ephemeral", "--skip-git-repo-check", "-C", home, "-s", "read-only", "-p", "s46", "-c", "model_providers.s46.request_max_retries=0", "-c", "model_providers.s46.stream_max_retries=0", "Reply OK.")
+	cmd.Dir = home
+	cmd.Env = append(os.Environ(), "CODEX_HOME="+configDir, "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("Codex CLI timed out: %v", ctx.Err())
+	}
+	if !reachedResponses.Load() || !authenticated.Load() {
+		t.Fatalf("Codex did not reach the local Responses endpoint with command auth (exit: %v): %s", err, output)
+	}
+}
+
 func TestPlanConnectRejectsModifiedManagedBlock(t *testing.T) {
 	home := t.TempDir()
 	env := map[string]string{"HOME": home}
@@ -41,13 +121,47 @@ func TestPlanConnectRejectsModifiedManagedBlock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	modified := strings.Replace(string(plan.Files[0].Content), `token_helper = "s46 token --refresh"`, `token_helper = "manual"`, 1)
+	modified := strings.Replace(string(plan.Files[0].Content), `command = "s46"`, `command = "manual"`, 1)
 	if err := os.WriteFile(configPath, []byte(modified), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	_, err = adapter.PlanConnect(context.Background(), harness.ConnectRequest{Env: env, Team: team, Model: api.DefaultModel})
 	if err == nil || !strings.Contains(err.Error(), "modified by hand") {
 		t.Fatalf("expected modified block error, got %v", err)
+	}
+}
+
+func TestPlanConnectReplacesLegacyTokenHelper(t *testing.T) {
+	home := t.TempDir()
+	env := map[string]string{"HOME": home}
+	path := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	legacy := strings.Join([]string{
+		"[model_providers.s46]",
+		`name = "Sovereign46"`,
+		`base_url = "https://gateway.s46.dev/codex"`,
+		`wire_api = "responses"`,
+		`token_helper = "s46 token --refresh"`,
+		"",
+		"[profiles.s46]",
+		`model_provider = "s46"`,
+		`model = "s46/deepseek-v4-flash-0731"`,
+		`approval_policy = "on-request"`,
+	}, "\n")
+	oldConfig := "# BEGIN s46\n# checksum: sha256:" + checksum(legacy) + "\n" + legacy + "\n# END s46\n"
+	if err := os.WriteFile(path, []byte(oldConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	team := api.Team{Name: "@s46/engineering", Endpoint: "https://gateway.s46.dev", DefaultModel: api.DefaultModel}
+	plan, err := New().PlanConnect(context.Background(), harness.ConnectRequest{Env: env, Team: team, Model: api.DefaultModel})
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(plan.Files[0].Content)
+	if !strings.Contains(content, "[model_providers.s46.auth]") || strings.Contains(content, "token_helper") {
+		t.Fatalf("legacy auth was not replaced:\n%s", content)
 	}
 }
 

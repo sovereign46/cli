@@ -184,7 +184,7 @@ func TestConnectCodexAndPi(t *testing.T) {
 		t.Fatal(err)
 	}
 	codexText := string(codexConfig)
-	for _, want := range []string{"# BEGIN s46", "[model_providers.s46]", `base_url = "https://gateway.s46.dev/codex"`, `token_helper = "s46 token --refresh"`, "[profiles.s46]"} {
+	for _, want := range []string{"# BEGIN s46", "[model_providers.s46]", `base_url = "https://gateway.s46.dev/codex"`, "[model_providers.s46.auth]", `command = "s46"`, `args = ["token", "--refresh"]`, "[profiles.s46]"} {
 		if !strings.Contains(codexText, want) {
 			t.Fatalf("codex config missing %q:\n%s", want, codexText)
 		}
