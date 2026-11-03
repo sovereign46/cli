@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/sovereign46/cli/internal/airplane"
 	"github.com/sovereign46/cli/internal/config"
 	"github.com/sovereign46/cli/internal/harness"
 )
@@ -34,7 +33,7 @@ func (a Adapter) Detect(ctx context.Context, env map[string]string) (harness.Det
 }
 
 func (a Adapter) Launch(ctx context.Context, req harness.LaunchRequest) error {
-	args := []string{"--profile", "s46", "--model", req.Model, "--", req.Task}
+	args := []string{"-c", `web_search="disabled"`, "-c", "features.multi_agent=false", "--profile", "s46", "--model", req.Model, "--", req.Task}
 	return harness.LaunchExecutable(ctx, "codex", args, req)
 }
 
@@ -135,12 +134,6 @@ func codexBlockBody(req harness.ConnectRequest) string {
 		`model_provider = "s46"`,
 		fmt.Sprintf("model = %q", req.Model),
 		`approval_policy = "on-request"`,
-	}
-	if req.Mode == airplane.ModeAirplane {
-		lines = append(lines,
-			fmt.Sprintf("model_context_window = %d", airplane.ContextWindow(req.Env)),
-			fmt.Sprintf("model_max_output_tokens = %d", airplane.MaxTokens(req.Env)),
-		)
 	}
 	return strings.Join(lines, "\n")
 }

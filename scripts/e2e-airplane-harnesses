@@ -2579,7 +2579,6 @@ run_claude() {
   log "running Claude Code against airplane gateway"
   run_capture_timeout "$harness_timeout" "$sandbox/claude.out" "$sandbox/claude.err" \
     claude \
-    --bare \
     --settings "$claude_settings" \
     --permission-mode bypassPermissions \
     --dangerously-skip-permissions \
@@ -2599,6 +2598,8 @@ run_codex() {
   log "running Codex against airplane gateway"
   run_capture_timeout "$harness_timeout" "$sandbox/codex.out" "$sandbox/codex.err" \
     codex exec \
+    -c 'web_search="disabled"' \
+    -c 'features.multi_agent=false' \
     --profile s46 \
     --cd "$sandbox/project" \
     --dangerously-bypass-approvals-and-sandbox \
