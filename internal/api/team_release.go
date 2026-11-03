@@ -9,6 +9,7 @@ import (
 
 const (
 	PrelaunchReleaseChannel          = "prelaunch"
+	ProductionReleaseChannel         = "production"
 	MaxRuntimeClosureSizeBytes int64 = 64 << 20
 )
 
@@ -19,10 +20,13 @@ func ValidateTeamReleaseMetadata(team Team, now time.Time) error {
 		if team.HasReleaseMetadata() {
 			return fmt.Errorf("team response contains release metadata without a release channel")
 		}
-		if TeamRequiresPrelaunchMetadata(team) {
-			return fmt.Errorf("team response containing %s requires complete prelaunch release metadata", DeepSeekModelID)
+		if TeamContainsDeepSeek(team) {
+			return fmt.Errorf("team response containing %s requires complete release metadata", DeepSeekModelID)
 		}
 		return nil
+	}
+	if team.ReleaseChannel == ProductionReleaseChannel {
+		return validateProductionTeamReleaseMetadata(team)
 	}
 	if team.ReleaseChannel != PrelaunchReleaseChannel {
 		return fmt.Errorf("team response has unsupported release channel %q", team.ReleaseChannel)
@@ -47,40 +51,60 @@ func ValidateTeamReleaseMetadata(team Team, now time.Time) error {
 	if credentialExpiry.After(policyExpiry) {
 		return fmt.Errorf("prelaunch upstream credential expires after the route policy")
 	}
+	return validateClassifiedTeamCatalog(team, PrelaunchReleaseChannel)
+}
+
+func validateProductionTeamReleaseMetadata(team Team) error {
+	if team.ProductionCertified == nil || team.ProductionAPIPath == nil || !*team.ProductionCertified || !*team.ProductionAPIPath {
+		return fmt.Errorf("production team response must explicitly claim production certification and the production API path")
+	}
+	if team.Endpoint != DefaultGatewayURL {
+		return fmt.Errorf("production team response must use the canonical production gateway")
+	}
+	if team.PolicySHA256 != "" || team.PolicyExpiresAt != "" || team.UpstreamCredentialExpiresAt != "" {
+		return fmt.Errorf("production team response contains prelaunch-only policy metadata")
+	}
+	if !TeamContainsDeepSeek(team) {
+		return fmt.Errorf("production team response must include %s in its authorized catalog", DeepSeekModelID)
+	}
+	return validateClassifiedTeamCatalog(team, ProductionReleaseChannel)
+}
+
+func validateClassifiedTeamCatalog(team Team, channel string) error {
 	if team.DefaultModel == "" || !slices.Contains(team.Models, team.DefaultModel) {
-		return fmt.Errorf("prelaunch team response default model is not in its authorized catalog")
+		return fmt.Errorf("%s team response default model is not in its authorized catalog", channel)
 	}
 	if len(team.ModelMetadata) != len(team.Models) {
-		return fmt.Errorf("prelaunch team response model metadata does not exactly match its authorized catalog")
+		return fmt.Errorf("%s team response model metadata does not exactly match its authorized catalog", channel)
 	}
 	seenModels := make(map[string]bool, len(team.Models))
 	for _, id := range team.Models {
 		if id == "" || seenModels[id] {
-			return fmt.Errorf("prelaunch team response has an empty or duplicate model id")
+			return fmt.Errorf("%s team response has an empty or duplicate model id", channel)
 		}
 		seenModels[id] = true
 		runtime, ok := team.ModelMetadata[id]
 		if !ok || !runtime.HasValidTokenLimits() {
-			return fmt.Errorf("prelaunch team response has invalid runtime metadata for %s", id)
+			return fmt.Errorf("%s team response has invalid runtime metadata for %s", channel, id)
 		}
 		if !validRuntimeIdentityValue(runtime.Engine) || !validRuntimeIdentityValue(runtime.Version) || runtime.Reasoning == nil {
-			return fmt.Errorf("prelaunch team response must explicitly identify engine, version, and reasoning for %s", id)
+			return fmt.Errorf("%s team response must explicitly identify engine, version, and reasoning for %s", channel, id)
 		}
 		if id == DeepSeekModelID {
 			// Closure identity alone cannot justify Pi's runtime-specific
-			// reasoning mapping. The protected prelaunch policy must bind and
-			// return all three fields explicitly.
+			// reasoning mapping. The classified route must return all three
+			// fields explicitly.
 			if runtime.Engine != "vllm" || runtime.Version != "0.31.0" || !*runtime.Reasoning {
-				return fmt.Errorf("prelaunch team response must identify DeepSeek as vLLM 0.31.0 with reasoning enabled")
+				return fmt.Errorf("%s team response must identify DeepSeek as vLLM 0.31.0 with reasoning enabled", channel)
 			}
 			if !ValidRuntimeClosureBinding(runtime) {
-				return fmt.Errorf("prelaunch team response has an invalid DeepSeek runtime closure")
+				return fmt.Errorf("%s team response has an invalid DeepSeek runtime closure", channel)
 			}
 		}
 	}
 	for id := range team.ModelMetadata {
 		if !seenModels[id] {
-			return fmt.Errorf("prelaunch team response has metadata outside its authorized catalog")
+			return fmt.Errorf("%s team response has metadata outside its authorized catalog", channel)
 		}
 	}
 	return nil
@@ -97,10 +121,8 @@ func parseCanonicalFutureTime(name string, raw string, now time.Time) (time.Time
 	return parsed, nil
 }
 
-// TeamRequiresPrelaunchMetadata identifies the currently protected catalog.
-// Future production support must introduce a distinct, explicit classified
-// contract instead of silently treating this model as ordinary cloud.
-func TeamRequiresPrelaunchMetadata(team Team) bool {
+// TeamContainsDeepSeek detects the model even when it appears only in metadata.
+func TeamContainsDeepSeek(team Team) bool {
 	if team.DefaultModel == DeepSeekModelID || slices.Contains(team.Models, DeepSeekModelID) {
 		return true
 	}

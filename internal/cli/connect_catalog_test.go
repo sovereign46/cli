@@ -317,6 +317,38 @@ func TestDeepSeekHarnessPolicyLeavesAirplaneProvenanceAndOrdinaryCloudUnchanged(
 	}
 }
 
+func TestProductionDeepSeekAllowsAllHarnessesOnlyAfterExactClassification(t *testing.T) {
+	production := testPrelaunchDeepSeekTeam(api.DefaultGatewayURL)
+	certified := true
+	production.ReleaseChannel = api.ProductionReleaseChannel
+	production.ProductionCertified = &certified
+	production.ProductionAPIPath = &certified
+	production.PolicySHA256 = ""
+	production.PolicyExpiresAt = ""
+	production.UpstreamCredentialExpiresAt = ""
+	if err := api.ValidateTeamReleaseMetadata(production, time.Now().UTC()); err != nil {
+		t.Fatalf("production response is invalid: %v", err)
+	}
+	for _, harnessName := range []string{"pi", "claude-code", "codex"} {
+		if err := validateCloudDeepSeekHarness(config.ModeCloud, harnessName, "connect", production); err != nil {
+			t.Fatalf("classified production DeepSeek blocked %s: %v", harnessName, err)
+		}
+	}
+	check, present := releaseChannelStatusCheck(production, time.Now().UTC())
+	if !present || !check.OK || !strings.Contains(check.Message, "production-certified") {
+		t.Fatalf("production release status was not classified: %+v", check)
+	}
+	partial := production
+	denied := false
+	partial.ProductionAPIPath = &denied
+	if err := validateCloudDeepSeekHarness(config.ModeCloud, "codex", "connect", partial); err == nil {
+		t.Fatal("partial production classification allowed Codex")
+	}
+	if err := validateConnectHarnessBeforeCloudEffects(config.TeamConfig{}, config.ModeCloud, "codex"); err != nil {
+		t.Fatalf("fresh team blocked before production discovery: %v", err)
+	}
+}
+
 func TestPrelaunchConnectPersistsChannelAndConfiguresDeepSeekReasoning(t *testing.T) {
 	env := testEnv(t)
 	requireOK(t, run(t, env, "login", "--email", "dscape@s46.dev"))

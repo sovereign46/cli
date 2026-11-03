@@ -21,6 +21,9 @@ type statusResult struct {
 	ReleaseChannel              string                `json:"releaseChannel,omitempty"`
 	ProductionCertified         *bool                 `json:"productionCertified,omitempty"`
 	ProductionAPIPath           *bool                 `json:"productionAPIPath,omitempty"`
+	SavedReleaseChannel         string                `json:"savedReleaseChannel,omitempty"`
+	SavedProductionCertified    *bool                 `json:"savedProductionCertified,omitempty"`
+	SavedProductionAPIPath      *bool                 `json:"savedProductionAPIPath,omitempty"`
 	PolicySHA256                string                `json:"policySha256,omitempty"`
 	PolicyExpiresAt             string                `json:"policyExpiresAt,omitempty"`
 	UpstreamCredentialExpiresAt string                `json:"upstreamCredentialExpiresAt,omitempty"`
@@ -72,6 +75,8 @@ func statusCommand(runtime Runtime, opts *options) *cobra.Command {
 					fmt.Sprintf("[s46] policy:  %s · expires %s", result.PolicySHA256, result.PolicyExpiresAt),
 					fmt.Sprintf("[s46] credential: expires %s", result.UpstreamCredentialExpiresAt),
 				)
+			} else if validProductionStatusBanner(result) {
+				lines = append(lines, "[s46] saved team discovery: production-certified · production API path (current release authority not checked)")
 			}
 			for _, check := range result.Checks {
 				state := "ok"
@@ -98,6 +103,13 @@ func validPrelaunchStatusBanner(result statusResult) bool {
 		return false
 	}
 	return statusCheckOKByName(result.Checks, "release-channel")
+}
+
+func validProductionStatusBanner(result statusResult) bool {
+	return result.SavedReleaseChannel == api.ProductionReleaseChannel &&
+		result.SavedProductionCertified != nil && *result.SavedProductionCertified &&
+		result.SavedProductionAPIPath != nil && *result.SavedProductionAPIPath &&
+		statusCheckOKByName(result.Checks, "release-channel")
 }
 
 func statusCheckOKByName(checks []harness.StatusCheck, name string) bool {
@@ -158,12 +170,18 @@ func collectStatus(ctx context.Context, app *app, cfg config.Config, state confi
 	if mode == config.ModeCloud && hasTeam {
 		team := teamCfg.API(teamName)
 		if team.ReleaseChannel != "" {
-			result.ReleaseChannel = team.ReleaseChannel
-			result.ProductionCertified = team.ProductionCertified
-			result.ProductionAPIPath = team.ProductionAPIPath
-			result.PolicySHA256 = team.PolicySHA256
-			result.PolicyExpiresAt = team.PolicyExpiresAt
-			result.UpstreamCredentialExpiresAt = team.UpstreamCredentialExpiresAt
+			if team.ReleaseChannel == api.ProductionReleaseChannel {
+				result.SavedReleaseChannel = team.ReleaseChannel
+				result.SavedProductionCertified = team.ProductionCertified
+				result.SavedProductionAPIPath = team.ProductionAPIPath
+			} else {
+				result.ReleaseChannel = team.ReleaseChannel
+				result.ProductionCertified = team.ProductionCertified
+				result.ProductionAPIPath = team.ProductionAPIPath
+				result.PolicySHA256 = team.PolicySHA256
+				result.PolicyExpiresAt = team.PolicyExpiresAt
+				result.UpstreamCredentialExpiresAt = team.UpstreamCredentialExpiresAt
+			}
 		}
 	}
 	return result
@@ -234,6 +252,9 @@ func releaseChannelStatusCheck(team api.Team, now time.Time) (harness.StatusChec
 	}
 	if team.ReleaseChannel == "" {
 		return harness.StatusCheck{}, false
+	}
+	if team.ReleaseChannel == api.ProductionReleaseChannel {
+		return harness.StatusCheck{Name: "release-channel", OK: true, Message: "saved team discovery: production-certified; production API path; current release authority not checked"}, true
 	}
 	return harness.StatusCheck{Name: "release-channel", OK: true, Message: "prelaunch; not production-certified; not the production API path"}, true
 }
