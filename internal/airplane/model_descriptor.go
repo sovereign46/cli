@@ -68,7 +68,7 @@ func (s Service) openVerifiedModelDescriptor(ctx context.Context) (verifiedModel
 	if err := os.MkdirAll(cacheDir(s.Env), 0o700); err != nil {
 		return verifiedModelDescriptor{}, err
 	}
-	requiredFree := manifest.Model.Size + llamaDistributionMaxBytes
+	requiredFree := MinDiskBytes + llamaDistributionMaxBytes
 	if free := freeDiskBytesAt(cacheDir(s.Env)); free <= 0 || free < requiredFree {
 		return verifiedModelDescriptor{}, fmt.Errorf("descriptor-bound model launch requires at least %d free bytes in %s, found %d", requiredFree, cacheDir(s.Env), free)
 	}
@@ -96,73 +96,12 @@ func (s Service) openVerifiedModelDescriptor(ctx context.Context) (verifiedModel
 		_ = source.Close()
 		return verifiedModelDescriptor{}, errors.New("verified model descriptor identity does not match the release manifest")
 	}
-	snapshot, err := os.CreateTemp(cacheDir(s.Env), ".verified-model-")
-	if err != nil {
-		_ = source.Close()
-		return verifiedModelDescriptor{}, err
-	}
-	snapshotPath := snapshot.Name()
-	failure := func(err error) (verifiedModelDescriptor, error) {
-		return verifiedModelDescriptor{}, errors.Join(err, source.Close(), snapshot.Close(), os.Remove(snapshotPath))
-	}
-	copyHasher := sha256.New()
-	written, err := io.Copy(io.MultiWriter(snapshot, copyHasher), source)
-	if err != nil || written != before.Size {
-		return failure(errors.Join(errors.New("copy verified model into descriptor-bound snapshot"), err))
-	}
-	var after syscall.Stat_t
-	if err := syscall.Fstat(fd, &after); err != nil {
-		return failure(err)
-	}
-	if before.Dev != after.Dev || before.Ino != after.Ino || before.Size != after.Size {
-		return failure(errors.New("model changed while creating its descriptor-bound snapshot"))
-	}
-	if digest := hex.EncodeToString(copyHasher.Sum(nil)); digest != manifest.Model.SHA256 {
-		return failure(fmt.Errorf("model descriptor SHA-256 %s does not match release manifest", digest))
-	}
-	if err := snapshot.Sync(); err != nil {
-		return failure(err)
-	}
-	if err := os.Chmod(snapshotPath, 0o400); err != nil {
-		return failure(err)
-	}
-	readFD, err := syscall.Open(snapshotPath, syscall.O_RDONLY|syscall.O_NOFOLLOW, 0)
-	if err != nil {
-		return failure(fmt.Errorf("open descriptor-bound model snapshot read-only: %w", err))
-	}
-	verified := os.NewFile(uintptr(readFD), snapshotPath)
-	if verified == nil {
-		_ = syscall.Close(readFD)
-		return failure(errors.New("create read-only model snapshot descriptor"))
-	}
-	verifiedFailure := func(err error) (verifiedModelDescriptor, error) {
-		return verifiedModelDescriptor{}, errors.Join(err, source.Close(), snapshot.Close(), verified.Close(), os.Remove(snapshotPath))
-	}
-	if err := os.Remove(snapshotPath); err != nil {
-		return verifiedFailure(fmt.Errorf("unlink verified model snapshot: %w", err))
-	}
-	if err := snapshot.Close(); err != nil {
-		_ = source.Close()
-		_ = verified.Close()
-		return verifiedModelDescriptor{}, err
-	}
-	if err := source.Close(); err != nil {
-		_ = verified.Close()
-		return verifiedModelDescriptor{}, err
-	}
-	verifiedHasher := sha256.New()
-	verifiedSize, err := io.Copy(verifiedHasher, verified)
-	if err != nil || verifiedSize != written {
-		_ = verified.Close()
-		return verifiedModelDescriptor{}, errors.Join(errors.New("rehash read-only model snapshot descriptor"), err)
-	}
-	digest := hex.EncodeToString(verifiedHasher.Sum(nil))
-	if digest != manifest.Model.SHA256 {
-		_ = verified.Close()
-		return verifiedModelDescriptor{}, fmt.Errorf("read-only model snapshot SHA-256 %s does not match release manifest", digest)
-	}
-	if _, err := verified.Seek(0, io.SeekStart); err != nil {
-		_ = verified.Close()
+	verified, digest, cloneErr := cloneVerifiedModelSnapshot(source, cacheDir(s.Env), before, manifest.Model.SHA256, requiredFree)
+	closeErr := source.Close()
+	if err := errors.Join(cloneErr, closeErr); err != nil {
+		if verified != nil {
+			_ = verified.Close()
+		}
 		return verifiedModelDescriptor{}, err
 	}
 	snapshotInfo, err := verified.Stat()
@@ -181,7 +120,7 @@ func (s Service) openVerifiedModelDescriptor(ctx context.Context) (verifiedModel
 		_ = verified.Close()
 		return verifiedModelDescriptor{}, errors.New("inspect verified model snapshot identity")
 	}
-	return verifiedModelDescriptor{File: verified, SHA256: digest, Size: written, Device: uint64(stat.Dev), Inode: stat.Ino, ManifestSHA256: hex.EncodeToString(manifestDigest[:])}, nil
+	return verifiedModelDescriptor{File: verified, SHA256: digest, Size: before.Size, Device: uint64(stat.Dev), Inode: stat.Ino, ManifestSHA256: hex.EncodeToString(manifestDigest[:])}, nil
 }
 
 func (s Service) saveModelRuntimeIdentity(identity modelRuntimeIdentity) error {
