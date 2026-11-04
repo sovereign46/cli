@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "signingKeys": [
+    {
+      "keyId": "s46-models-2026-05",
+      "publicKey": "ayvzAt4pU76dVDY1hynEtzGDjRAY94tbdJGc10l8YeU",
+      "identity": {
+        "issuer": "https://models.s46.dev",
+        "subject": "sovereign46/models-release"
+      }
+    }
+  ],
+  "sigsum": {
+    "policyName": "sigsum-generic-2025-1",
+    "policy": "# This is a Sigsum trust policy that has been vetted by the Sigsum project\n# See https://git.glasklar.is/sigsum/project/documentation/-/blob/main/policy-maintenance.md\n\n# https://git.glasklar.is/glasklar/services/sigsum-logs/-/blob/main/instances/seasalp.md (accessed 2025-12-04)\nlog 0ec7e16843119b120377a73913ac6acbc2d03d82432e2c36b841b09a95841f25 https://seasalp.glasklar.is\n\n# https://ginkgo.tlog.mullvad.net/about (accessed 2025-12-04)\nlog f00c159663d09bbda6131ee1816863b6adcacfe80b0b288000b11aba8fe38314 https://ginkgo.tlog.mullvad.net\n\n# https://git.glasklar.is/glasklar/services/witnessing/-/blob/main/witness.glasklar.is/about.md (accessed 2025-12-04)\nwitness witness.glasklar.is            b2106db9065ec97f25e09c18839216751a6e26d8ed8b41e485a563d3d1498536\n\n# https://witness.mullvad.net/about (accessed 2025-12-04)\nwitness witness.mullvad.net            15d6d0141543247b74bab3c1076372d9c894f619c376d64b29aa312cc00f61ad\n\n# https://github.com/tillitis/tillitis.se-tillitis-witness-1/blob/main/about.md (accessed 2025-12-04)\nwitness tillitis.se/tillitis-witness-1 076be8c9ee7ea60916f0df3608c945d7730082ecb37749dad2c9ed339fea770c\n\n# Requiring 2 of 3 is intended to give reasonable balance between security and availability.\ngroup quorum-rule 2 witness.glasklar.is witness.mullvad.net tillitis.se/tillitis-witness-1\n\nquorum quorum-rule\n",
+    "logs": [
+      {
+        "keyId": "44ad38f8226ff9bd27629a41e55df727308d0a1cd8a2c31d3170048ac1dd22a1",
+        "publicKey": "DsfhaEMRmxIDd6c5E6xqy8LQPYJDLiw2uEGwmpWEHyU",
+        "url": "https://seasalp.glasklar.is"
+      },
+      {
+        "keyId": "c03f05182be9341e33b9edd5f3f8675b08332164640203e743f4285359cace47",
+        "publicKey": "8AwVlmPQm72mEx7hgWhjtq3Kz+gLCyiAALEauo/jgxQ",
+        "url": "https://ginkgo.tlog.mullvad.net"
+      }
+    ],
+    "witnesses": [
+      {
+        "keyId": "5da2b3803c2f802eed9744b74e3e4a3d31e1e77ed994ef56730d57fa52f698a5",
+        "publicKey": "FdbQFBVDJHt0urPBB2Ny2ciU9hnDdtZLKaoxLMAPYa0"
+      },
+      {
+        "keyId": "6bdf03b285fce48e00ff9b199cb2b77472dcc4a112f067fa5b274929cb9504e3",
+        "publicKey": "shBtuQZeyX8l4JwYg5IWdRpuJtjti0HkhaVj09FJhTY"
+      },
+      {
+        "keyId": "774fafee07d3b0d9399d669676440a6301db9fa8fe2140d7d352418da25144c5",
+        "publicKey": "B2voye5+pgkW8N82CMlF13MAguyzd0na0sntM5/qdww"
+      }
+    ],
+    "submitKeys": [
+      {
+        "keyId": "sigsum-submit-s46-models-2026-05",
+        "publicKey": "2VblAHWOpKA5VcsUc3LEqU3QwkQh5MeT48iqK1pD7Z8",
+        "signingKeyId": "s46-models-2026-05",
+        "identity": {
+          "issuer": "https://models.s46.dev",
+          "subject": "sovereign46/models-release"
+        }
+      }
+    ]
+  },
+  "transparencyStatus": {
+    "state": "operational"
+  },
+  "requireSigningIdentity": true
+}
