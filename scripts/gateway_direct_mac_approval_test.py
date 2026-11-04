@@ -179,6 +179,16 @@ class GatewayDirectMacApprovalTest(unittest.TestCase):
         with self.assertRaisesRegex(approval.ApprovalError, "evidence is incomplete"):
             approval.checked_subject(self.bundle, self.qualification_path, self.evidence)
 
+    def test_boolean_exit_cannot_pass_diagnostic(self):
+        result = json.loads((self.evidence / "result.json").read_bytes())
+        result["harnesses"]["pi"]["client"]["exit"] = False
+        with self.assertRaisesRegex(approval.ApprovalError, "pi client did not pass"):
+            approval.verify_diagnostic(candidate.canonical(result), self.record)
+        result["harnesses"]["pi"]["client"]["exit"] = 0
+        result["harnesses"]["pi"]["app"]["run"]["exit"] = False
+        with self.assertRaisesRegex(approval.ApprovalError, "pi client did not pass"):
+            approval.verify_diagnostic(candidate.canonical(result), self.record)
+
     def test_malformed_nested_qualification_types_fail_cleanly(self):
         self.qualification["controls"] = [{"loadedProcessBindingPassed": True}]
         self.write_qualification()
