@@ -5,6 +5,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -21,9 +22,32 @@ import (
 )
 
 func TestCurrentProjectRootIgnoresParentGitEnvironment(t *testing.T) {
+	hookRepository := t.TempDir()
+	hookInit := exec.Command("git", "init", "--quiet", hookRepository)
+	hookInit.Env = withoutRepositoryGitEnvironment(os.Environ())
+	if output, err := hookInit.CombinedOutput(); err != nil {
+		t.Fatalf("initialize hook repository: %v\n%s", err, output)
+	}
+	hookConfig := filepath.Join(hookRepository, ".git", "config")
+	before, err := os.ReadFile(hookConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_DIR", filepath.Join(hookRepository, ".git"))
+	t.Setenv("GIT_WORK_TREE", hookRepository)
+
 	parent := t.TempDir()
-	if output, err := exec.Command("git", "init", "--quiet", parent).CombinedOutput(); err != nil {
+	command := exec.Command("git", "init", "--quiet", parent)
+	command.Env = withoutRepositoryGitEnvironment(os.Environ())
+	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("initialize parent repository: %v\n%s", err, output)
+	}
+	after, err := os.ReadFile(hookConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("initializing a test repository changed the hook repository")
 	}
 	outside := t.TempDir()
 	t.Setenv("GIT_DIR", filepath.Join(parent, ".git"))
