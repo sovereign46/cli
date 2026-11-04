@@ -50,3 +50,56 @@ Fred and Gonçalo must receive and sign the exact reviewed release and
 qualification inputs under approved role-specific trust. This candidate tool
 does not create either input or accept signatures; those authority and
 publication decisions remain pending.
+
+## Direct Mac approval verifier
+
+`scripts/gateway_direct_mac_approval.py` checks a **separate** qualification
+record before preparing one canonical approval subject. The qualification
+record must use schema `s46.gateway-direct-mac-qualification.v1`, bind the
+candidate record and Gateway archive SHA-256, and bind the exact Devstral GGUF
+and llama.cpp archive/binary identities. Its `controls` object must explicitly
+mark independent isolation review, loaded-process binding, cleanup, and the
+Pi, Claude Code, and Codex client tests as passed. Its `evidence` object must
+hash the private diagnostic's `README.md`, `result.json`, `run.py`,
+`combined.py`, and `control/diagnostic.sb`, plus **separate** retained files
+for independent isolation review and loaded-process binding. The verifier
+checks all those local evidence bytes and checks the diagnostic result's exact
+candidate/runtime hashes, isolation probe, three client exits, application
+outputs, and cleanup. The existing diagnostic does not have the two separate
+review/binding files and cannot qualify itself.
+
+The subject also fixes the source commit/archive, Go toolchain archive,
+Gateway archive/binary, qualification-record digest, and consent to publish
+that exact archive as a local airplane adapter under `models.s46.dev/cli-assets`.
+Both reviewers sign the **same subject bytes** in the
+`s46-gateway-direct-mac-approval-v1` SSH signature namespace. The separate
+`scripts/gateway-direct-mac-approval-trust.json` has no enrolled keys; an
+authenticated trust decision must enroll distinct SSH Ed25519 public keys for
+`fredoliveira` and `goncalossilva` before verification can pass. This trust is
+not shared with model-release or historical CLI-release keys.
+
+```sh
+python3 scripts/gateway_direct_mac_approval.py prepare-subject \
+  --bundle /absolute/private/candidate-directory \
+  --qualification /absolute/private/qualification.json \
+  --evidence-root /absolute/private/evidence-directory \
+  --subject /absolute/private/absent-subject.json
+
+# Each reviewer signs the same subject using their enrolled private SSH key.
+ssh-keygen -Y sign -f /absolute/path/to/reviewer-key \
+  -n s46-gateway-direct-mac-approval-v1 \
+  < /absolute/private/subject.json > /absolute/private/approvals/REVIEWER.sig
+
+python3 scripts/gateway_direct_mac_approval.py verify \
+  --bundle /absolute/private/candidate-directory \
+  --qualification /absolute/private/qualification.json \
+  --evidence-root /absolute/private/evidence-directory \
+  --subject /absolute/private/subject.json \
+  --approvals /absolute/private/approvals
+```
+
+Use `fredoliveira.sig` and `goncalossilva.sig` as the two signature names.
+Verification checks signed assertions and exact retained bytes; reviewers
+must inspect the isolation and loaded-process evidence itself. Approval
+verification does not edit `gateway-release.json`, publish bytes, or certify
+the model runtime.
