@@ -60,32 +60,93 @@ class GatewayDirectMacApprovalTest(unittest.TestCase):
         return record
 
     def make_qualification(self):
+        model_path = "/Users/_s46airplane/input/model.gguf"
+        llama = self.evidence / "runtime/llama/llama-b9270/llama-server"
+        metal = self.evidence / "runtime/llama/llama-b9270/libggml-metal.0.12.0.dylib"
+        gateway = self.evidence / "gateway/s46-gateway"
+        files = {name: b"retained diagnostic evidence\n" for name in approval.DIAGNOSTIC_REQUIRED}
+        files["home/pi/.pi/agent/sessions/test.jsonl"] = b'{"type":"toolCall","name":"write"}\n'
+        for name in ("pi", "claude", "codex"):
+            files[f"project/{name}_hello.py"] = f'def hello_from_{name}():\n    return "hello from {name}"\n'.encode()
+            files[f"out/{name}_app.stdout"] = f"hello from {name}\n".encode()
+            files[f"out/{name}.stderr"] = b""
+            files[f"out/{name}_app.stderr"] = b""
+        files["out/sandbox-probe.stdout"] = candidate.canonical({
+            "file": {"type": "PermissionError", "errno": 1},
+            "network": {"type": "PermissionError", "errno": 1},
+        })
+        files["out/openai-stream.sse"] = b"data: {}\n\ndata: [DONE]\n\n"
+        files["out/anthropic-stream.sse"] = b"event: message_stop\ndata: {}\n\n"
+        files["out/codex-stream.sse"] = b"event: response.completed\ndata: {}\n\n"
+        for phase in ("before", "after"):
+            files[f"out/llama-{phase}-lsof.txt"] = (
+                f"llama-ser 123 user txt REG 1,15 8023664 7 {llama}\n"
+                f"llama-ser 123 user txt REG 1,15 {approval.MODEL_SIZE} 9 {model_path}\n").encode()
+            files[f"out/llama-{phase}-vmmap.txt"] = f"{model_path}\n{metal}\n".encode()
+            files[f"out/llama-{phase}-ps.txt"] = b"123 llama-server\n"
+        files["out/gateway-before-lsof.txt"] = f"s46-gatew 124 user txt REG 1,15 12 8 {gateway}\n".encode()
+        files["out/gateway-before-vmmap.txt"] = f"{gateway}\n".encode()
+        files["out/gateway-before-ps.txt"] = b"124 s46-gateway\n"
+        def observed(name):
+            return {"exit": 0, "path": str(self.evidence / name),
+                    "sha256": candidate.sha256(files[name]), "sizeBytes": len(files[name])}
+        def process(pid, executable, digest, phase, model=False):
+            prefix = f"out/{phase}"
+            return {"process": {"pid": pid, "executable": str(executable), "executableSha256": digest},
+                    "lsof": observed(prefix + "-lsof.txt"), "ps": observed(prefix + "-ps.txt"),
+                    "vmmap": observed(prefix + "-vmmap.txt"), **({"modelPathObserved": True} if model else {})}
+        harnesses = {}
+        for name in ("pi", "claude", "codex"):
+            harnesses[name] = {
+                "client": {"exit": 0, "stdoutSha256": candidate.sha256(files[f"out/{name}.stdout"]),
+                           "stderrSha256": candidate.sha256(files[f"out/{name}.stderr"])},
+                "app": {"ok": True, "output": f"hello from {name}",
+                        "run": {"exit": 0,
+                                "stdoutSha256": candidate.sha256(files[f"out/{name}_app.stdout"]),
+                                "stderrSha256": candidate.sha256(files[f"out/{name}_app.stderr"])},
+                        "sourceSha256": candidate.sha256(files[f"project/{name}_hello.py"])},
+            }
+        streams = {}
+        for name, terminal in (("openai", "data: [DONE]"), ("anthropic", "event: message_stop"),
+                               ("codex", "event: response.completed")):
+            stream = f"out/{name}-stream.sse"
+            streams[name] = {"path": str(self.evidence / stream), "status": 200,
+                             "contentType": "text/event-stream", "rawSha256": candidate.sha256(files[stream]),
+                             "sizeBytes": len(files[stream]), "terminal": terminal}
         diagnostic = {
-            "kind": "s46-gateway-031-loopback-diagnostic-not-release-or-qualification",
-            "apiCommit": candidate.COMMIT, "apiTree": candidate.TREE,
-            "gatewayArchiveSha256": self.record["gateway"]["archiveSha256"],
-            "modelSha256": approval.MODEL_SHA256,
-            "llamaArchiveSha256": approval.LLAMA_ARCHIVE_SHA256,
-            "inputs": {name: {"sha256": digest} for name, digest in {
-                "gatewayArchive": self.record["gateway"]["archiveSha256"],
-                "gatewayBinary": self.record["gateway"]["binarySha256"],
-                "model": approval.MODEL_SHA256,
-                "llamaArchive": approval.LLAMA_ARCHIVE_SHA256,
-                "llamaBinary": approval.LLAMA_BINARY_SHA256,
-            }.items()},
-            "isolationProbe": "host private file denied; external egress denied; scratch write permitted",
+            "kind": approval.DIAGNOSTIC_KIND, "projectInitiallyEmpty": True,
+            "inputs": {"gatewayArchiveSha256": self.record["gateway"]["archiveSha256"],
+                       "gatewayBinarySha256": self.record["gateway"]["binarySha256"],
+                       "llamaArchiveSha256": approval.LLAMA_ARCHIVE_SHA256,
+                       "llamaBinarySha256": approval.LLAMA_BINARY_SHA256,
+                       "model": {"path": model_path, "sha256": approval.MODEL_SHA256,
+                                 "sizeBytes": approval.MODEL_SIZE, "inode": 9}},
+            "modelSha256After": approval.MODEL_SHA256,
+            "sandboxProfileSha256": candidate.sha256(files["control/diagnostic.sb"]),
+            "llamaBeforeRequest": process(123, llama, approval.LLAMA_BINARY_SHA256, "llama-before", True),
+            "llamaAfterRequest": process(123, llama, approval.LLAMA_BINARY_SHA256, "llama-after", True),
+            "gatewayBeforeRequest": process(124, gateway, self.record["gateway"]["binarySha256"],
+                                            "gateway-before"),
+            "harnesses": harnesses, "streams": streams,
+            "inference": {"status": 200, "body": {"model": approval.PUBLIC_MODEL,
+                                                   "choices": [{"finish_reason": "stop",
+                                                                "message": {"content": "hello from devstral"}}]}},
+            "worker": {"state": "ready", "mode": "airplane",
+                       "models": [{"id": approval.PUBLIC_MODEL,
+                                   "backendModel": approval.BACKEND_MODEL, "state": "ready"}]},
             "cleanupErrors": [], "servicesStopped": True, "portsFree": True,
-            "harnesses": {name: {"client": {"exit": 0}, "app": {"ok": True,
-                                                               "output": f"hello from {name}",
-                                                               "run": {"exit": 0}}}
-                          for name in ("pi", "claude", "codex")},
         }
-        files = {name: b"retained diagnostic evidence\n" for name in approval.DIAGNOSTIC_FILES}
         files["result.json"] = candidate.canonical(diagnostic)
-        files["isolation-review.json"] = b"independently reviewed isolation evidence\n"
-        files["loaded-process.json"] = b"loaded-process binding evidence\n"
         for name, body in files.items():
-            (self.evidence / name).write_bytes(body)
+            path = self.evidence / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(body)
+        inventory = {"schema": approval.DIAGNOSTIC_INVENTORY,
+                     "files": [{"path": name, "sha256": candidate.sha256(files[name]),
+                                "sizeBytes": len(files[name])} for name in sorted(files)]}
+        (self.evidence / "evidence-manifest.json").write_bytes(candidate.canonical(inventory))
+        (self.evidence / "isolation-review.json").write_bytes(b"independently reviewed isolation evidence\n")
+        (self.evidence / "POST-RUN-LIBRARY-AUDIT.md").write_bytes(b"post-run pinned tree audit\n")
         identity = lambda name: {"path": name, **candidate.file_identity(self.evidence / name, 16 << 20)}
         return {
             "schema": approval.QUALIFICATION_SCHEMA,
@@ -96,9 +157,9 @@ class GatewayDirectMacApprovalTest(unittest.TestCase):
                         "llamaBinarySha256": approval.LLAMA_BINARY_SHA256},
             "controls": {name: True for name in approval.CONTROLS},
             "evidence": {
-                "diagnostic": [identity(name) for name in sorted(approval.DIAGNOSTIC_FILES)],
+                "diagnosticManifest": identity("evidence-manifest.json"),
                 "independentIsolationReview": identity("isolation-review.json"),
-                "loadedProcessBinding": identity("loaded-process.json"),
+                "loadedProcessBinding": identity("POST-RUN-LIBRARY-AUDIT.md"),
             },
         }
 
@@ -128,6 +189,15 @@ class GatewayDirectMacApprovalTest(unittest.TestCase):
         for reviewer in approval.REVIEWERS:
             self.sign(reviewer)
 
+    def diagnostic_files(self):
+        return approval.diagnostic_files(self.evidence, self.qualification["evidence"]["diagnosticManifest"])
+
+    def rejected_diagnostic(self, result, message, files=None):
+        files = files or self.diagnostic_files()
+        with self.assertRaisesRegex(approval.ApprovalError, message):
+            approval.verify_diagnostic({**files, "result.json": candidate.canonical(result)},
+                                       self.evidence, self.record)
+
     def test_two_distinct_reviewers_sign_same_subject(self):
         self.sign_both()
         approval.verify_approvals(self.subject, self.approvals)
@@ -150,7 +220,7 @@ class GatewayDirectMacApprovalTest(unittest.TestCase):
         self.sign("fredoliveira", namespace="s46-model-release-approval-v1")
         with self.assertRaisesRegex(approval.ApprovalError, "fredoliveira signature is invalid"):
             approval.verify_approvals(self.subject, self.approvals)
-        (self.evidence / "loaded-process.json").write_bytes(b"changed evidence\n")
+        (self.evidence / "POST-RUN-LIBRARY-AUDIT.md").write_bytes(b"changed evidence\n")
         with self.assertRaisesRegex(approval.ApprovalError, "evidence bytes differ"):
             approval.checked_subject(self.bundle, self.qualification_path, self.evidence)
 
@@ -180,14 +250,76 @@ class GatewayDirectMacApprovalTest(unittest.TestCase):
             approval.checked_subject(self.bundle, self.qualification_path, self.evidence)
 
     def test_boolean_exit_cannot_pass_diagnostic(self):
-        result = json.loads((self.evidence / "result.json").read_bytes())
+        files = self.diagnostic_files()
+        result = json.loads(files["result.json"])
         result["harnesses"]["pi"]["client"]["exit"] = False
-        with self.assertRaisesRegex(approval.ApprovalError, "pi client did not pass"):
-            approval.verify_diagnostic(candidate.canonical(result), self.record)
+        self.rejected_diagnostic(result, "pi client did not pass", files)
         result["harnesses"]["pi"]["client"]["exit"] = 0
         result["harnesses"]["pi"]["app"]["run"]["exit"] = False
-        with self.assertRaisesRegex(approval.ApprovalError, "pi client did not pass"):
-            approval.verify_diagnostic(candidate.canonical(result), self.record)
+        self.rejected_diagnostic(result, "pi client did not pass", files)
+
+    def test_old_diagnostic_or_stale_project_cannot_qualify(self):
+        result = json.loads(self.diagnostic_files()["result.json"])
+        result["kind"] = "s46-gateway-031-loopback-diagnostic-not-release-or-qualification"
+        self.rejected_diagnostic(result, "fresh project differs")
+        result["kind"] = approval.DIAGNOSTIC_KIND
+        result["projectInitiallyEmpty"] = False
+        self.rejected_diagnostic(result, "fresh project differs")
+        result["projectInitiallyEmpty"] = True
+        result["error"] = "RuntimeError: diagnostic failed"
+        self.rejected_diagnostic(result, "diagnostic result", None)
+
+    def test_stream_and_process_records_must_match_raw_evidence(self):
+        files = self.diagnostic_files()
+        result = json.loads(files["result.json"])
+        files["out/openai-stream.sse"] = b"data: {}\n\n"
+        result["streams"]["openai"]["rawSha256"] = candidate.sha256(files["out/openai-stream.sse"])
+        result["streams"]["openai"]["sizeBytes"] = len(files["out/openai-stream.sse"])
+        self.rejected_diagnostic(result, "openai stream did not terminate", files)
+        files = self.diagnostic_files()
+        result = json.loads(files["result.json"])
+        files["out/openai-stream.sse"] = b'data: {}\n\ndata: {"note":"data: [DONE]"}\n\n'
+        result["streams"]["openai"]["rawSha256"] = candidate.sha256(files["out/openai-stream.sse"])
+        result["streams"]["openai"]["sizeBytes"] = len(files["out/openai-stream.sse"])
+        self.rejected_diagnostic(result, "openai stream did not terminate", files)
+        files = self.diagnostic_files()
+        result = json.loads(files["result.json"])
+        result["llamaAfterRequest"]["process"]["pid"] = 999
+        self.rejected_diagnostic(result, "llama-after executable is not in lsof", files)
+
+    def test_inference_and_worker_model_must_match_devstral(self):
+        result = json.loads(self.diagnostic_files()["result.json"])
+        result["inference"]["body"]["model"] = "other-model"
+        self.rejected_diagnostic(result, "inference did not complete")
+        result["inference"]["body"]["model"] = approval.PUBLIC_MODEL
+        result["worker"]["models"][0]["backendModel"] = "other-model"
+        self.rejected_diagnostic(result, "inference did not complete")
+
+    def test_sandbox_policy_denial_and_full_inventory_are_required(self):
+        files = self.diagnostic_files()
+        result = json.loads(files["result.json"])
+        files["out/sandbox-probe.stdout"] = candidate.canonical({
+            "file": {"type": "PermissionError", "errno": 1},
+            "network": {"type": "TimeoutError", "errno": 110},
+        })
+        self.rejected_diagnostic(result, "sandbox denial is missing", files)
+        manifest = json.loads((self.evidence / "evidence-manifest.json").read_bytes())
+        manifest["files"] = [item for item in manifest["files"] if item["path"] != "out/claude.stdout"]
+        (self.evidence / "evidence-manifest.json").write_bytes(candidate.canonical(manifest))
+        self.qualification["evidence"]["diagnosticManifest"] = {
+            "path": "evidence-manifest.json",
+            **candidate.file_identity(self.evidence / "evidence-manifest.json", 1 << 20),
+        }
+        self.write_qualification()
+        with self.assertRaisesRegex(approval.ApprovalError, "inventory omits required evidence"):
+            approval.checked_subject(self.bundle, self.qualification_path, self.evidence)
+
+    def test_empty_log_is_bound_and_duplicate_json_keys_fail(self):
+        (self.evidence / "out/pi.stderr").write_bytes(b"unexpected stderr")
+        with self.assertRaisesRegex(approval.ApprovalError, "evidence bytes differ"):
+            approval.checked_subject(self.bundle, self.qualification_path, self.evidence)
+        with self.assertRaisesRegex(approval.ApprovalError, "duplicate key"):
+            approval.parse_json(b'{"kind":1,"kind":2}', "result")
 
     def test_malformed_nested_qualification_types_fail_cleanly(self):
         self.qualification["controls"] = [{"loadedProcessBindingPassed": True}]
@@ -195,9 +327,9 @@ class GatewayDirectMacApprovalTest(unittest.TestCase):
         with self.assertRaisesRegex(approval.ApprovalError, "qualification lacks"):
             approval.checked_subject(self.bundle, self.qualification_path, self.evidence)
         self.qualification["controls"] = {name: True for name in approval.CONTROLS}
-        self.qualification["evidence"]["diagnostic"][0]["path"] = ["README.md"]
+        self.qualification["evidence"]["diagnosticManifest"]["path"] = ["evidence-manifest.json"]
         self.write_qualification()
-        with self.assertRaisesRegex(approval.ApprovalError, "complete private diagnostic"):
+        with self.assertRaisesRegex(approval.ApprovalError, "diagnostic manifest"):
             approval.checked_subject(self.bundle, self.qualification_path, self.evidence)
 
     def test_symlinked_trust_evidence_and_signature_fail_closed(self):
@@ -212,7 +344,7 @@ class GatewayDirectMacApprovalTest(unittest.TestCase):
         path.unlink()
         path.write_bytes(raw)
 
-        path = self.evidence / "loaded-process.json"
+        path = self.evidence / "POST-RUN-LIBRARY-AUDIT.md"
         original = self.root / "loaded-process-original.json"
         path.rename(original)
         path.symlink_to(original)

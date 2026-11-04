@@ -55,23 +55,30 @@ publication decisions remain pending.
 
 `scripts/gateway_direct_mac_approval.py` checks a **separate** qualification
 record before preparing one canonical approval subject. The qualification
-record must use schema `s46.gateway-direct-mac-qualification.v1`, bind the
+record must use schema `s46.gateway-direct-mac-qualification.v2`, bind the
 candidate record and Gateway archive SHA-256, and bind the exact Devstral GGUF
 and llama.cpp archive/binary identities. Its `controls` object must explicitly
 mark independent isolation review, loaded-process binding, cleanup, and the
 Pi, Claude Code, and Codex client tests as passed. Its `evidence` object must
-hash the private diagnostic's `README.md`, `result.json`, `run.py`,
-`combined.py`, and `control/diagnostic.sb`, plus **separate** retained files
-for independent isolation review and loaded-process binding. The verifier
-checks all those local evidence bytes and checks the diagnostic result's exact
-candidate/runtime hashes, isolation probe, three client exits, application
-outputs, and cleanup. The existing diagnostic does not have the two separate
-review/binding files and cannot qualify itself.
+hash the fresh isolation diagnostic's `evidence-manifest.json` (41 files in
+the current run) and **separate** retained files for independent isolation review and loaded-process
+binding. The verifier checks every inventoried file, including empty logs,
+and checks the result's exact candidate/runtime hashes, fresh empty project,
+same observed serving process and model mapping before and after requests,
+sandbox denial probe, three client/application outcomes, direct OpenAI,
+Anthropic, and Codex stream-ending events, one nonstreaming inference, and
+cleanup. The `...isolation-v3` directory is the third execution attempt; its
+`s46-private-devstral-mac-isolation-diagnostic-v2` kind is the evidence schema.
+The earlier 0.3.1 result schema is no longer accepted.
 
-The automated check covers the recorded hello-world outcome. Reviewers must
-inspect the retained request logs for tool calls and streaming termination;
-this verifier does not parse those protocol events or establish the later
-model runtime and release acceptance gates.
+The retained post-run library audit can be bound as the separate
+`loadedProcessBinding` file. It compares the currently extracted llama.cpp
+tree and mapped dylib paths with the pinned inventory, but does not hash
+library bytes at mapping time or prove GPU memory contents. Reviewers must
+assess that timing limit, the sandbox's remaining broad Mach/process/IOKit
+permissions, and the raw client tool traces. Direct protocol probes establish
+stream endings separately from the clients' own streams. The current v3 run
+has no independent isolation review; it cannot qualify itself.
 
 The subject also fixes the source commit/archive, Go toolchain archive,
 Gateway archive/binary, qualification-record digest, and consent to publish
