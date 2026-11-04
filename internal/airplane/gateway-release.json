@@ -1,5 +1,5 @@
 {
-  "schema": "s46.airplane-release.v2",
+  "schema": "s46.airplane-release.v3",
   "qualified": false,
   "model": {
     "id": "s46/devstral-small-2-24b",
@@ -25,10 +25,8 @@
     }
   },
   "gateway": {
-    "authorityOrigin": "https://models.s46.dev/release-authority/v1",
     "repository": "sovereign46/api",
     "version": "",
-    "releaseId": "",
     "platforms": {}
   }
 }

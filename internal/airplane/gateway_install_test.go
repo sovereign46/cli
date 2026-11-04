@@ -15,7 +15,7 @@ import (
 	"testing"
 )
 
-const testGatewayReleaseID = "sha256-bc59a6d476bec9e478897571c18d04ee88e050da6d60958563f101f8a878af68"
+const testGatewayArchiveSHA256 = "bc59a6d476bec9e478897571c18d04ee88e050da6d60958563f101f8a878af68"
 
 func TestEmbeddedGatewayReleasePinsFailClosedWhileUnapproved(t *testing.T) {
 	if _, err := embeddedGatewayReleasePin(runtime.GOOS, runtime.GOARCH); err == nil {
@@ -26,7 +26,7 @@ func TestEmbeddedGatewayReleasePinsFailClosedWhileUnapproved(t *testing.T) {
 	}
 }
 
-func TestDecodeGatewayReleasePinBindsExactAuthorityIdentityAndAsset(t *testing.T) {
+func TestDecodeGatewayReleasePinBindsExactStaticAsset(t *testing.T) {
 	binary := []byte("#!/bin/sh\n")
 	archive := gatewayArchive(t)
 	platformPin := gatewayPlatformPin{
@@ -41,13 +41,13 @@ func TestDecodeGatewayReleasePinBindsExactAuthorityIdentityAndAsset(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pin.Repository != "sovereign46/api" || pin.Version != "1.2.3" || pin.Tag != "gateway-v1.2.3" || pin.ReleaseID != testGatewayReleaseID {
+	if pin.Repository != "sovereign46/api" || pin.Version != "1.2.3" {
 		t.Fatalf("unexpected release identity: %#v", pin)
 	}
 	if pin.ArchiveName != platformPin.ArchiveName {
 		t.Fatalf("unexpected asset name: %q", pin.ArchiveName)
 	}
-	wantURL := gatewayReleaseAuthorityOrigin + "/releases/" + testGatewayReleaseID + "/assets/" + url.PathEscape(platformPin.ArchiveName)
+	wantURL := gatewayStaticArchiveOrigin + "/" + platformPin.ArchiveSHA256 + "/" + url.PathEscape(platformPin.ArchiveName)
 	gotURL, err := gatewayDownloadURL(pin)
 	if err != nil {
 		t.Fatal(err)
@@ -60,7 +60,7 @@ func TestDecodeGatewayReleasePinBindsExactAuthorityIdentityAndAsset(t *testing.T
 	}
 }
 
-func TestDecodeGatewayReleasePinRejectsAuthorityIdentityMutations(t *testing.T) {
+func TestDecodeGatewayReleasePinRejectsAssetIdentityMutations(t *testing.T) {
 	validPin := gatewayPlatformPin{
 		ArchiveName:   "s46-gateway_1.2.3_linux_amd64.tar.gz",
 		ArchiveSHA256: strings.Repeat("a", 64),
@@ -72,15 +72,15 @@ func TestDecodeGatewayReleasePinRejectsAuthorityIdentityMutations(t *testing.T) 
 		name   string
 		mutate func(*airplaneReleaseManifest)
 	}{
-		{name: "GitHub authority", mutate: func(m *airplaneReleaseManifest) { m.Gateway.AuthorityOrigin = "https://github.com" }},
-		{name: "authority trailing slash", mutate: func(m *airplaneReleaseManifest) { m.Gateway.AuthorityOrigin += "/" }},
+		{name: "legacy schema", mutate: func(m *airplaneReleaseManifest) { m.Schema = "s46.airplane-release.v2" }},
 		{name: "uppercase repository", mutate: func(m *airplaneReleaseManifest) { m.Gateway.Repository = "Sovereign46/api" }},
 		{name: "wrong repository", mutate: func(m *airplaneReleaseManifest) { m.Gateway.Repository = "sovereign46/other" }},
 		{name: "noncanonical version", mutate: func(m *airplaneReleaseManifest) { m.Gateway.Version = "v1.2.3" }},
-		{name: "release ID from another tag", mutate: func(m *airplaneReleaseManifest) {
-			m.Gateway.ReleaseID = gatewayReleaseID(DefaultGatewayRepo, "gateway-v1.2.4")
+		{name: "uppercase archive digest", mutate: func(m *airplaneReleaseManifest) {
+			pin := m.Gateway.Platforms["linux/amd64"]
+			pin.ArchiveSHA256 = strings.ToUpper(pin.ArchiveSHA256)
+			m.Gateway.Platforms["linux/amd64"] = pin
 		}},
-		{name: "uppercase release ID", mutate: func(m *airplaneReleaseManifest) { m.Gateway.ReleaseID = strings.ToUpper(m.Gateway.ReleaseID) }},
 		{name: "archive traversal", mutate: func(m *airplaneReleaseManifest) {
 			pin := m.Gateway.Platforms["linux/amd64"]
 			pin.ArchiveName = "../" + pin.ArchiveName
@@ -110,11 +110,11 @@ func TestDecodeGatewayReleasePinRejectsAuthorityIdentityMutations(t *testing.T) 
 
 func TestValidatePinnedGatewayURLRejectsNonCanonicalAndUnsafeURLs(t *testing.T) {
 	asset := "s46-gateway_1.2.3_darwin_arm64.tar.gz"
-	canonical, err := gatewayAssetURL(testGatewayReleaseID, asset)
+	canonical, err := gatewayAssetURL(testGatewayArchiveSHA256, asset)
 	if err != nil {
 		t.Fatal(err)
 	}
-	escaped, err := gatewayAssetURL(testGatewayReleaseID, "gateway archive.tar.gz")
+	escaped, err := gatewayAssetURL(testGatewayArchiveSHA256, "gateway archive.tar.gz")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,12 +123,12 @@ func TestValidatePinnedGatewayURLRejectsNonCanonicalAndUnsafeURLs(t *testing.T) 
 	}
 	tests := []string{
 		"https://github.com/sovereign46/api/releases/download/gateway-v1.2.3/" + asset,
-		"https://user@models.s46.dev/release-authority/v1/releases/" + testGatewayReleaseID + "/assets/" + asset,
+		"https://user@models.s46.dev/cli-assets/" + testGatewayArchiveSHA256 + "/" + asset,
 		canonical + "?download=1",
 		canonical + "#fragment",
-		gatewayReleaseAuthorityOrigin + "/releases/" + testGatewayReleaseID + "/assets/../" + asset,
-		strings.Replace(canonical, "/assets/s46-", "/assets/%73%34%36-", 1),
-		strings.Replace(canonical, "/assets/", "/assets/%2e%2e%2f", 1),
+		gatewayStaticArchiveOrigin + "/" + testGatewayArchiveSHA256 + "/../" + asset,
+		strings.Replace(canonical, "/s46-gateway_", "/%73%34%36-gateway_", 1),
+		strings.Replace(canonical, "/"+testGatewayArchiveSHA256+"/", "/%2e%2e%2f/", 1),
 	}
 	for _, raw := range tests {
 		t.Run(raw, func(t *testing.T) {
@@ -136,7 +136,7 @@ func TestValidatePinnedGatewayURLRejectsNonCanonicalAndUnsafeURLs(t *testing.T) 
 			if parseErr != nil {
 				return
 			}
-			if err := validatePinnedGatewayURL(parsed, testGatewayReleaseID, asset); err == nil {
+			if err := validatePinnedGatewayURL(parsed, testGatewayArchiveSHA256, asset); err == nil {
 				t.Fatal("unsafe or noncanonical URL was accepted")
 			}
 		})
@@ -146,22 +146,22 @@ func TestValidatePinnedGatewayURLRejectsNonCanonicalAndUnsafeURLs(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := validatePinnedGatewayURL(parsed, testGatewayReleaseID, asset); err != nil {
-		t.Fatalf("canonical authority URL was rejected: %v", err)
+	if err := validatePinnedGatewayURL(parsed, testGatewayArchiveSHA256, asset); err != nil {
+		t.Fatalf("canonical static URL was rejected: %v", err)
 	}
-	if err := validatePinnedGatewayURL(parsed, "../release", asset); err == nil {
-		t.Fatal("traversal release ID was accepted")
+	if err := validatePinnedGatewayURL(parsed, "../archive", asset); err == nil {
+		t.Fatal("traversal archive digest was accepted")
 	}
 	escapedWithPlus, err := url.Parse(strings.Replace(escaped, "%20", "+", 1))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := validatePinnedGatewayURL(escapedWithPlus, testGatewayReleaseID, "gateway archive.tar.gz"); err == nil {
+	if err := validatePinnedGatewayURL(escapedWithPlus, testGatewayArchiveSHA256, "gateway archive.tar.gz"); err == nil {
 		t.Fatal("noncanonical asset escaping was accepted")
 	}
 }
 
-func TestDecodeGatewayReleasePinRejectsCallerSuppliedURL(t *testing.T) {
+func TestDecodeGatewayReleasePinRejectsUnapprovedTransportFields(t *testing.T) {
 	pin := gatewayPlatformPin{
 		ArchiveName:   "s46-gateway_1.2.3_linux_amd64.tar.gz",
 		ArchiveSHA256: strings.Repeat("a", 64),
@@ -169,10 +169,16 @@ func TestDecodeGatewayReleasePinRejectsCallerSuppliedURL(t *testing.T) {
 		BinarySHA256:  strings.Repeat("b", 64),
 		BinarySize:    1,
 	}
-	raw := marshalTestManifest(t, testAirplaneReleaseManifest("linux/amd64", pin))
-	raw = []byte(strings.Replace(string(raw), `"releaseId":`, `"url":"https://example.com/archive.tar.gz","releaseId":`, 1))
-	if _, err := decodeGatewayReleasePin(raw, "linux", "amd64"); err == nil || !strings.Contains(err.Error(), "unknown field") {
-		t.Fatalf("caller-supplied gateway URL was accepted: %v", err)
+	raw := string(marshalTestManifest(t, testAirplaneReleaseManifest("linux/amd64", pin)))
+	for _, field := range []string{
+		`"url":"https://example.com/archive.tar.gz",`,
+		`"authorityOrigin":"https://models.s46.dev/release-authority/v1",`,
+		`"releaseId":"sha256-deadbeef",`,
+	} {
+		mutated := []byte(strings.Replace(raw, `"repository":`, field+`"repository":`, 1))
+		if _, err := decodeGatewayReleasePin(mutated, "linux", "amd64"); err == nil || !strings.Contains(err.Error(), "unknown field") {
+			t.Fatalf("unapproved gateway transport field %s was accepted: %v", field, err)
+		}
 	}
 }
 
@@ -183,16 +189,13 @@ func TestGatewayHTTPClientRejectsRedirects(t *testing.T) {
 	}
 }
 
-func TestLoadGatewayArchiveRequiresExactFinalAuthorityResponse(t *testing.T) {
+func TestLoadGatewayArchiveRequiresExactStaticResponse(t *testing.T) {
 	archive := []byte("exact gateway archive")
 	pin := gatewayResolvedPin{
-		AuthorityOrigin: gatewayReleaseAuthorityOrigin,
-		Repository:      DefaultGatewayRepo,
-		Version:         "1.2.3",
-		Tag:             "gateway-v1.2.3",
-		ReleaseID:       testGatewayReleaseID,
-		GOOS:            "darwin",
-		GOARCH:          "arm64",
+		Repository: DefaultGatewayRepo,
+		Version:    "1.2.3",
+		GOOS:       "darwin",
+		GOARCH:     "arm64",
 		gatewayPlatformPin: gatewayPlatformPin{
 			ArchiveName:   "s46-gateway_1.2.3_darwin_arm64.tar.gz",
 			ArchiveSHA256: sha256Hex(archive),
@@ -203,19 +206,14 @@ func TestLoadGatewayArchiveRequiresExactFinalAuthorityResponse(t *testing.T) {
 	}
 	newResponse := func(request *http.Request) *http.Response {
 		if request.Header.Get("Accept") != "application/gzip" || request.Header.Get("Accept-Encoding") != "identity" {
-			t.Fatalf("unexpected authority request headers: %#v", request.Header)
+			t.Fatalf("unexpected static archive request headers: %#v", request.Header)
 		}
 		length := int64(len(archive))
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Status:     "200 OK",
 			Header: http.Header{
-				"Cache-Control":          {"public, max-age=31536000, immutable, no-transform"},
-				"Content-Disposition":    {"attachment; filename=" + pin.ArchiveName},
-				"Content-Length":         {fmt.Sprintf("%d", length)},
-				"Content-Type":           {"application/gzip"},
-				"Etag":                   {`"sha256:` + pin.ArchiveSHA256 + `"`},
-				"X-Content-Type-Options": {"nosniff"},
+				"Content-Length": {fmt.Sprintf("%d", length)},
 			},
 			Body:          io.NopCloser(bytes.NewReader(archive)),
 			ContentLength: length,
@@ -238,18 +236,22 @@ func TestLoadGatewayArchiveRequiresExactFinalAuthorityResponse(t *testing.T) {
 		return err
 	}
 	if err := load(t, nil); err != nil {
-		t.Fatalf("exact authority response was rejected: %v", err)
+		t.Fatalf("exact static response was rejected: %v", err)
 	}
 	mutations := map[string]func(*http.Response){
 		"partial status": func(response *http.Response) {
 			response.StatusCode, response.Status = http.StatusPartialContent, "206 Partial Content"
 		},
-		"wrong cache policy": func(response *http.Response) { response.Header.Set("Cache-Control", "no-store") },
-		"wrong disposition":  func(response *http.Response) { response.Header.Set("Content-Disposition", "attachment") },
-		"duplicate etag": func(response *http.Response) {
-			response.Header["Etag"] = append(response.Header["Etag"], response.Header.Get("Etag"))
+		"same-size changed bytes": func(response *http.Response) {
+			response.Body = io.NopCloser(bytes.NewReader(bytes.Repeat([]byte("x"), len(archive))))
 		},
-		"wrong media type": func(response *http.Response) { response.Header.Set("Content-Type", "application/octet-stream") },
+		"different final URL": func(response *http.Response) {
+			response.Request.URL.Path = "/cli-assets/other/archive.tar.gz"
+		},
+		"missing length": func(response *http.Response) { response.Header.Del("Content-Length") },
+		"duplicate length": func(response *http.Response) {
+			response.Header["Content-Length"] = append(response.Header["Content-Length"], response.Header.Get("Content-Length"))
+		},
 		"content encoding": func(response *http.Response) { response.Header.Set("Content-Encoding", "gzip") },
 		"chunked":          func(response *http.Response) { response.TransferEncoding = []string{"chunked"} },
 		"wrong length": func(response *http.Response) {
@@ -323,11 +325,9 @@ func testAirplaneReleaseManifest(platform string, gatewayPin gatewayPlatformPin)
 			platform: {AssetName: "llama.tar.gz", ArchiveSHA256: strings.Repeat("c", 64), ArchiveSize: 1, BinarySHA256: strings.Repeat("d", 64), BinarySize: 1, InventorySchema: llamaCppInventorySchema, InventorySHA256: strings.Repeat("e", 64), VersionOutput: "version: 9270"},
 		}},
 		Gateway: gatewayReleasePins{
-			AuthorityOrigin: gatewayReleaseAuthorityOrigin,
-			Repository:      DefaultGatewayRepo,
-			Version:         "1.2.3",
-			ReleaseID:       testGatewayReleaseID,
-			Platforms:       map[string]gatewayPlatformPin{platform: gatewayPin},
+			Repository: DefaultGatewayRepo,
+			Version:    "1.2.3",
+			Platforms:  map[string]gatewayPlatformPin{platform: gatewayPin},
 		},
 	}
 }

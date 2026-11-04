@@ -2,6 +2,8 @@
 
 This candidate prepares the CLI and its published Go dependencies for testing. It is **not** a certified model release, an API/gateway deployment, or evidence of a successful production tool loop. The CLI embeds the exact independently approved production model activation policy, which is a registry trust decision only. See [model activation policy](model-activation-policy.md). API policy loading, initial cloud-serving gates, and production provisioning must be independently verified; this CLI change does not establish their readiness. Keep the existing installed CLI and harness configuration until you choose to test the candidate.
 
+Airplane gateway installation uses a persistent static content-addressed URL under `/cli-assets/<archive-sha256>/`. The embedded airplane manifest pins the archive and installed binary SHA-256 and size; the archive path repeats its digest. HTTPS, headers, and the static origin deliver bytes but do not approve the build. An independently reviewed gateway build and signed CLI release must supply those pins, and the current manifest remains `qualified:false`. This path does not require the gateway release broker.
+
 > **Publication status (2026-11-04):** The repository contains a direct protected release-authority workflow, described in [Releases](../README.md#releases). No v0.3.0 release or qualified airplane record exists yet. Native runner isolation, exact artifact inputs, independent signatures, authority credentials, and environment approvals must be verified before that workflow can publish.
 
 ## Check the candidate without connecting
