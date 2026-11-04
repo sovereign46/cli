@@ -68,6 +68,11 @@ candidate/runtime hashes, isolation probe, three client exits, application
 outputs, and cleanup. The existing diagnostic does not have the two separate
 review/binding files and cannot qualify itself.
 
+The automated check covers the recorded hello-world outcome. Reviewers must
+inspect the retained request logs for tool calls and streaming termination;
+this verifier does not parse those protocol events or establish the later
+model runtime and release acceptance gates.
+
 The subject also fixes the source commit/archive, Go toolchain archive,
 Gateway archive/binary, qualification-record digest, and consent to publish
 that exact archive as a local airplane adapter under `models.s46.dev/cli-assets`.

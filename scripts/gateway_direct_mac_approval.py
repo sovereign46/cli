@@ -125,8 +125,9 @@ def verify_diagnostic(raw, candidate_record):
         client = item.get("client")
         require(isinstance(app, dict) and isinstance(client, dict) and
                 isinstance(app.get("run"), dict), f"diagnostic {name} client is malformed")
-        require(client.get("exit") == 0 and app.get("ok") is True and
-                app.get("output") == f"hello from {name}" and app["run"].get("exit") == 0,
+        require(type(client.get("exit")) is int and client["exit"] == 0 and
+                app.get("ok") is True and app.get("output") == f"hello from {name}" and
+                type(app["run"].get("exit")) is int and app["run"]["exit"] == 0,
                 f"diagnostic {name} client did not pass")
 
 
