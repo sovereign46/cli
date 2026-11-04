@@ -4,6 +4,8 @@ package models
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +17,9 @@ func TestReleaseCandidateActivationPolicy(t *testing.T) {
 	body := []byte(bundledActivationPolicy)
 	if len(bytes.TrimSpace(body)) == 0 {
 		t.Fatal("release candidate has an empty embedded activation policy")
+	}
+	if len(body) != 3133 || fmt.Sprintf("%x", sha256.Sum256(body)) != "00604e4fb49ac078c9d60b72aeb9be0aef72ca155fa854ca2209abfa79518d05" {
+		t.Fatal("release candidate activation policy differs from the independently approved bytes")
 	}
 	root, err := attest.ParseTrustRoot(body)
 	if err != nil {

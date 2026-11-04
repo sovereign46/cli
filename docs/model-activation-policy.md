@@ -1,10 +1,10 @@
 # Independent model activation policy
 
-## Implemented mechanism; production authority unavailable
+## Approved production trust policy
 
-The CLI loads a complete policy embedded at `internal/models/policy/activation-root.json` before model-registry requests, receipt reads, or artifact access in `Install` and `VerifyInstalled`. **That asset is intentionally empty: no real complete production policy has been independently approved.** Model installation and cached activation therefore fail closed with an explicit unavailable-policy error. This also gates the model-verification portion of airplane setup. Devstral's model selection, llama.cpp settings, and harness restoration behavior are unchanged.
+The CLI loads a complete policy embedded at `internal/models/policy/activation-root.json` before model-registry requests, receipt reads, or artifact access in `Install` and `VerifyInstalled`. Fred and Gonçalo independently approved the exact 3,133-byte production trust policy with SHA-256 `00604e4fb49ac078c9d60b72aeb9be0aef72ca155fa854ca2209abfa79518d05` in [their authenticated root decisions](https://github.com/sovereign46/models-cli/issues/13). The embedded bytes match the reviewed candidate and retained private copy. This permits strict model evidence verification under that policy; it does not authorize a model release, runtime, deployment, or airplane mode. Devstral's model selection, llama.cpp settings, and harness restoration behavior are unchanged.
 
-Do not populate the asset from a registry response, a receipt, or a generated test root. Approval must cover the entire policy, including release signing identities and keys, Sigsum logs, witnesses/quorum or embedded Sigsum policy, submit-key authorizations, revocations, transparency status, and expiry. Matching the release signer alone does not authenticate these other fields. Approval and provisioning of that production artifact remain separate release prerequisites.
+Do not replace the asset from a registry response, a receipt, or a generated test root. Approval covers the entire policy, including release signing identities and keys, Sigsum logs, witnesses/quorum or embedded Sigsum policy, submit-key authorizations, revocations, transparency status, and expiry. Matching the release signer alone does not authenticate these other fields. A changed policy requires its own independent approval.
 
 ## Verification behavior
 

@@ -12,8 +12,8 @@ import (
 	attest "github.com/sovereign46/attest"
 )
 
-// No production policy has been independently approved yet. Keep this asset
-// empty until that approval; never populate it from registry/receipt evidence.
+// The exact production policy embedded here was independently approved for
+// model activation trust. It is not release or runtime authority.
 //
 //go:embed policy/activation-root.json
 var bundledActivationPolicy string

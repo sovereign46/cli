@@ -33,7 +33,6 @@ func TestIndependentPolicyRequiredBeforeIO(t *testing.T) {
 		body []byte
 		want string
 	}{
-		{"unavailable bundle", nil, "bundled model activation policy unavailable"},
 		{"empty", []byte{}, "bundled model activation policy unavailable"},
 		{"whitespace", []byte(" \n"), "bundled model activation policy unavailable"},
 		{"malformed", []byte(`{`), "decode independent model activation policy"},
