@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -196,11 +197,25 @@ class GatewayDirectMacApprovalTest(unittest.TestCase):
         files = files or self.diagnostic_files()
         with self.assertRaisesRegex(approval.ApprovalError, message):
             approval.verify_diagnostic({**files, "result.json": candidate.canonical(result)},
-                                       self.evidence, self.record)
+                                       self.record)
 
     def test_two_distinct_reviewers_sign_same_subject(self):
         self.sign_both()
         approval.verify_approvals(self.subject, self.approvals)
+
+    def test_copied_evidence_keeps_original_path_checks(self):
+        copied = self.root / "reviewer-copy"
+        shutil.copytree(self.evidence, copied)
+        self.assertEqual(approval.checked_subject(self.bundle, self.qualification_path, copied),
+                         self.subject)
+        (copied / "out/pi.stderr").write_bytes(b"changed in transit")
+        with self.assertRaisesRegex(approval.ApprovalError, "evidence bytes differ"):
+            approval.checked_subject(self.bundle, self.qualification_path, copied)
+
+        result = json.loads(self.diagnostic_files()["result.json"])
+        result["gatewayBeforeRequest"]["process"]["executable"] = str(
+            copied / "gateway/s46-gateway")
+        self.rejected_diagnostic(result, "gateway-before executable differs")
 
     def test_forged_key_and_role_mismatch_fail(self):
         self.sign_both()

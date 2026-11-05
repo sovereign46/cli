@@ -39,12 +39,13 @@ provenance or an approved release.
 The build disables Go module network resolution; it does not prove an OS egress
 block or protected-host isolation. The earlier Pi, Claude Code, and Codex
 hello-world diagnostic was for API commit `ecb5ca7` and an older unsigned
-archive. Its passing result cannot qualify this corrected source or establish
-loaded model bytes. A fresh, retained 0.3.1 client run and independently
-reviewed isolation evidence are still needed. After the Gateway archive is
-separately approved and installed through a qualified CLI manifest, the
-existing `scripts/e2e-airplane-harnesses` exercises the normal installer and
-all three clients without bypassing `qualified:false`.
+archive; its passing result cannot qualify this corrected source. A later
+retained 0.3.1 v3 diagnostic and separate second-pass isolation review cover
+the exact archive above. They remain bounded observations, including only
+post-run on-disk library hashes, not proof of GPU-resident bytes. After the
+Gateway archive is separately approved and installed through a qualified CLI
+manifest, the existing `scripts/e2e-airplane-harnesses` exercises the normal
+installer and all three clients without bypassing `qualified:false`.
 
 Fred and Gonçalo must receive and sign the exact reviewed release and
 qualification inputs under approved role-specific trust. This candidate tool
@@ -71,14 +72,14 @@ cleanup. The `...isolation-v3` directory is the third execution attempt; its
 `s46-private-devstral-mac-isolation-diagnostic-v2` kind is the evidence schema.
 The earlier 0.3.1 result schema is no longer accepted.
 
-The retained post-run library audit can be bound as the separate
-`loadedProcessBinding` file. It compares the currently extracted llama.cpp
-tree and mapped dylib paths with the pinned inventory, but does not hash
-library bytes at mapping time or prove GPU memory contents. Reviewers must
-assess that timing limit, the sandbox's remaining broad Mach/process/IOKit
-permissions, and the raw client tool traces. Direct protocol probes establish
-stream endings separately from the clients' own streams. The current v3 run
-has no independent isolation review; it cannot qualify itself.
+The retained post-run library audit is bound as the separate
+`loadedProcessBinding` file. It compares the extracted llama.cpp tree and
+mapped dylib paths with the pinned inventory, but does not hash library bytes
+at mapping time or prove GPU memory contents. The separate second-pass
+isolation review records the sandbox's remaining broad Mach/process/IOKit
+permissions. Reviewers must assess both limits and the raw client tool traces.
+Direct protocol probes establish stream endings separately from the clients'
+own streams.
 
 The subject also fixes the source commit/archive, Go toolchain archive,
 Gateway archive/binary, qualification-record digest, and consent to publish
@@ -115,3 +116,14 @@ Verification checks signed assertions and exact retained bytes; reviewers
 must inspect the isolation and loaded-process evidence itself. Approval
 verification does not edit `gateway-release.json`, publish bytes, or certify
 the model runtime.
+
+The selected direct Mac Gateway adapter review uses this verifier and does
+not depend on the historical self-hosted Actions qualification wrapper. A
+reviewer may copy the complete retained diagnostic inventory to another
+private directory and pass that directory as `--evidence-root`. The verifier
+reads and hashes only the supplied copy, while checking that the original
+absolute paths in `result.json`, process snapshots, `lsof`, `vmmap`, and
+stream records agree with one another. Relocation does not change the
+canonical approval subject. The two reviewer keys must first be enrolled
+for this separate purpose; this path leaves the CLI `qualified:false` gate
+and the historical four-platform release requirements intact.
