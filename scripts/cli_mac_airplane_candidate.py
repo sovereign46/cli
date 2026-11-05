@@ -22,6 +22,7 @@ TAG = "v0.3.1-mac.1"
 ARCHIVE = "s46_0.3.1_darwin_arm64.tar.gz"
 GATEWAY_ARCHIVE_SHA256 = "ef9d322d2bb775ae065d712280b786841c149ed959acf70942c25c74e8f32d3a"
 GATEWAY_BINARY_SHA256 = "6abaef72f4c0975fc459db8f7cad89b88f99b04e970464685c07180518382ca2"
+GATEWAY_APPROVAL_SUBJECT_SHA256 = "e913b6ca19523abb0a6326143ba55b48d00a7320491f7af735ce1820f452eb7c"
 PROFILE = {
     ARCHIVE: ("application/gzip", "cli-archive"),
     "gateway-approval-subject.json": ("application/json", "gateway-approval-subject"),
@@ -42,6 +43,8 @@ def candidate_assets(bundle, expected_archive_sha256, gateway_bundle, qualificat
         raise SystemExit("Mac CLI archive needs an independently supplied SHA-256")
 
     subject = checked_subject(gateway_bundle, qualification, evidence_root)
+    if sha256(subject) != GATEWAY_APPROVAL_SUBJECT_SHA256:
+        raise SystemExit("Gateway approval subject is not the exact reviewed packet")
     subject_record = parse_json(subject, "Gateway approval subject")
     build = subject_record["build"]
     if (build["gatewayArchiveSha256"] != GATEWAY_ARCHIVE_SHA256 or

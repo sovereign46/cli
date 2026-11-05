@@ -21,10 +21,9 @@ class MacAirplaneCandidateTests(unittest.TestCase):
         self.bundle.mkdir()
         (self.bundle / mac.ARCHIVE).write_bytes(b"pinned Mac CLI archive")
         self.archive_sha256 = hashlib.sha256((self.bundle / mac.ARCHIVE).read_bytes()).hexdigest()
-        self.subject = approval.canonical({
-            "build": {"gatewayArchiveSha256": mac.GATEWAY_ARCHIVE_SHA256,
-                      "gatewayBinarySha256": mac.GATEWAY_BINARY_SHA256},
-        })
+        self.subject = (Path(__file__).with_name("testdata") /
+                        "gateway-approval-subject-ef9d322.json").read_bytes()
+        self.assertEqual(hashlib.sha256(self.subject).hexdigest(), mac.GATEWAY_APPROVAL_SUBJECT_SHA256)
         (self.bundle / "gateway-approval-subject.json").write_bytes(self.subject)
         reviewers = {}
         for name in approval.REVIEWERS:
@@ -88,12 +87,17 @@ class MacAirplaneCandidateTests(unittest.TestCase):
         self.assertFalse((self.root / "records").exists())
 
     def test_gateway_digest_is_fixed_independent_of_signed_subject(self):
-        different = approval.canonical({
-            "build": {"gatewayArchiveSha256": "0" * 64,
-                      "gatewayBinarySha256": mac.GATEWAY_BINARY_SHA256},
-        })
+        different = self.subject.replace(mac.GATEWAY_ARCHIVE_SHA256.encode(), b"0" * 64)
         with patch.object(mac, "checked_subject", return_value=different):
-            with self.assertRaisesRegex(SystemExit, "reviewed Mac archive"):
+            with self.assertRaisesRegex(SystemExit, "exact reviewed packet"):
+                mac.command_stage(self.args())
+        self.assertFalse((self.root / "records").exists())
+
+    def test_changed_qualification_with_same_gateway_bytes_is_rejected(self):
+        different = self.subject.replace(b"7ece1191378e1ae3d660ae18465ce8a2e5faaf4ec67c89927f18f7cadd76f336",
+                                         b"0" * 64)
+        with patch.object(mac, "checked_subject", return_value=different):
+            with self.assertRaisesRegex(SystemExit, "exact reviewed packet"):
                 mac.command_stage(self.args())
         self.assertFalse((self.root / "records").exists())
 

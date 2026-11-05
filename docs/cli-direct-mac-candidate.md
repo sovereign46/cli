@@ -19,6 +19,9 @@ goncalossilva.sig
 ```
 
 The subject is copied byte for byte from the approved Gateway packet. It must
+have SHA-256 `e913b6ca19523abb0a6326143ba55b48d00a7320491f7af735ce1820f452eb7c`,
+which binds the reviewed qualification and diagnostic manifest as well as the
+Gateway bytes. It must also
 pin Gateway archive SHA-256
 `ef9d322d2bb775ae065d712280b786841c149ed959acf70942c25c74e8f32d3a`
 and binary SHA-256
