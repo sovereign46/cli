@@ -222,17 +222,8 @@ func airplaneAuthCheck(token string) harness.StatusCheck {
 func airplaneStatusProbe(env map[string]string, token string) gatewayStatusProbe {
 	return gatewayStatusProbe{
 		Env:      env,
-		Endpoint: strings.TrimSpace(firstNonEmpty(env["S46_AIRPLANE_GATEWAY_URL"], airplane.LocalGatewayURL)),
+		Endpoint: airplane.GatewayURL(env),
 		Model:    airplane.LocalModelID,
 		Token:    strings.TrimSpace(token),
 	}
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
-		}
-	}
-	return ""
 }

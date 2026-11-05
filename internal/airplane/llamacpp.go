@@ -67,6 +67,9 @@ func (s Service) PullModel(ctx context.Context) error {
 }
 
 func (s Service) StartLlamacpp(ctx context.Context) error {
+	if LlamacppURL(s.Env) == "" {
+		return errors.New("airplane llama.cpp URL must be a canonical numeric loopback HTTP endpoint")
+	}
 	if s.setupChecksSkipped() {
 		return nil
 	}
@@ -402,6 +405,9 @@ func parseEnvFields(raw string) map[string]string {
 }
 
 func (s Service) advertisedLlamacppModels(ctx context.Context) []string {
+	if LlamacppURL(s.Env) == "" {
+		return nil
+	}
 	if models, ok := s.seamAdvertisedLlamacppModels(); ok {
 		return models
 	}
@@ -462,6 +468,9 @@ func (s Service) explicitModelPath() string {
 }
 
 func (s Service) llamacppRunning(ctx context.Context) bool {
+	if LlamacppURL(s.Env) == "" {
+		return false
+	}
 	if running, ok := s.seamLlamacppRunning(); ok {
 		return running
 	}
@@ -481,6 +490,9 @@ func (s Service) llamacppRunning(ctx context.Context) bool {
 }
 
 func LlamacppURL(env map[string]string) string {
+	if !airplaneRuntimeOverridesAllowed() {
+		return qualifiedAirplaneURL(strs.EnvValue(env, "S46_LOCAL_LLAMACPP_URL"), LocalLlamacppURL)
+	}
 	return strs.FirstNonEmpty(strs.EnvValue(env, "S46_LOCAL_LLAMACPP_URL"), LocalLlamacppURL)
 }
 

@@ -359,7 +359,7 @@ func verifyLlamaCppBinary(ctx context.Context, binary string, pin llamaCppResolv
 func verifyLlamaCppVersion(ctx context.Context, binary string, pin llamaCppResolvedPin) error {
 	command := exec.CommandContext(ctx, binary, "--version")
 	command.Dir = filepath.Dir(binary)
-	command.Env = append(os.Environ(), "DYLD_LIBRARY_PATH="+filepath.Dir(binary))
+	command.Env = (Service{}).processEnv("DYLD_LIBRARY_PATH=" + filepath.Dir(binary))
 	output, err := command.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("run pinned llama-server --version: %w: %s", err, strings.TrimSpace(string(output)))

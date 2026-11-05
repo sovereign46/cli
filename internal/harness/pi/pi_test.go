@@ -74,7 +74,7 @@ func TestPlanConnectUsesAirplaneModelLimits(t *testing.T) {
 	s46 := models["providers"].(map[string]any)["s46"].(map[string]any)
 	configuredModels := s46["models"].([]any)
 	model := configuredModels[0].(map[string]any)
-	if model["contextWindow"] != float64(16384) || model["maxTokens"] != float64(2048) {
+	if model["contextWindow"] != float64(airplane.ContextWindow(env)) || model["maxTokens"] != float64(airplane.MaxTokens(env)) {
 		t.Fatalf("unexpected airplane limits: %#v", model)
 	}
 }

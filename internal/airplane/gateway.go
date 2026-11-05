@@ -31,6 +31,9 @@ func (s Service) StartGatewayAssumingVerifiedModel(ctx context.Context) error {
 }
 
 func (s Service) startGateway(ctx context.Context, assumeVerifiedModel bool) error {
+	if s.gatewayURL() == "" || LlamacppURL(s.Env) == "" {
+		return errors.New("airplane endpoints must be canonical numeric loopback HTTP URLs")
+	}
 	if s.setupChecksSkipped() {
 		return nil
 	}
@@ -65,10 +68,7 @@ func (s Service) startGateway(ctx context.Context, assumeVerifiedModel bool) err
 	env := append([]string{"S46_ENV=airplane", "S46_ADDR=127.0.0.1:8080", "S46_LOCAL_MODEL=" + s.backendModel()}, AirplaneGatewayEnv(s.Env)...)
 	pin, pinErr := embeddedGatewayReleasePin(runtime.GOOS, runtime.GOARCH)
 	if pinErr != nil {
-		cmd := exec.Command(command.Path, command.Args...)
-		cmd.Dir = command.Dir
-		cmd.Env = s.processEnv(env...)
-		return s.startDetached(cmd, "s46-gateway-airplane.log")
+		return s.startDevelopmentGateway(command, env)
 	}
 	if err := s.cleanupStaleGatewayRuntimeSnapshot(); err != nil {
 		return err
@@ -176,7 +176,14 @@ func (s Service) gatewayCommand() (gatewayCommand, bool) {
 }
 
 func (s Service) gatewayURL() string {
-	return strs.FirstNonEmpty(strs.EnvValue(s.Env, "S46_AIRPLANE_GATEWAY_URL"), LocalGatewayURL)
+	return GatewayURL(s.Env)
+}
+
+func GatewayURL(env map[string]string) string {
+	if !airplaneRuntimeOverridesAllowed() {
+		return qualifiedAirplaneURL(strs.EnvValue(env, "S46_AIRPLANE_GATEWAY_URL"), LocalGatewayURL)
+	}
+	return strs.FirstNonEmpty(strs.EnvValue(env, "S46_AIRPLANE_GATEWAY_URL"), LocalGatewayURL)
 }
 
 func (s Service) gatewayMessage(ctx context.Context, ready bool, path string) string {
