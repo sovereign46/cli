@@ -181,8 +181,7 @@ func (s Service) installLlamaCppArchive(ctx context.Context, archive []byte, pin
 		return err
 	}
 	defer func() {
-		_ = os.Chmod(temporary, 0o700)
-		err = errors.Join(err, os.RemoveAll(temporary))
+		err = errors.Join(err, removeRuntimeSnapshot(temporary))
 	}()
 	if err := extractLlamaCppDistribution(archive, temporary); err != nil {
 		return err
@@ -201,9 +200,6 @@ func (s Service) installLlamaCppArchive(ctx context.Context, archive []byte, pin
 	if err := verifyLlamaCppDistributionFiles(distributionRoot, binary, pin); err != nil {
 		return err
 	}
-	if err := os.Chmod(temporary, 0o555); err != nil {
-		return err
-	}
 	target := s.managedLlamaCppDir(pin)
 	if _, err := os.Lstat(target); err == nil {
 		return errors.New("existing llama.cpp distribution failed verification; refusing to replace it implicitly")
@@ -212,6 +208,9 @@ func (s Service) installLlamaCppArchive(ctx context.Context, archive []byte, pin
 	}
 	if err := os.Rename(temporary, target); err != nil {
 		return fmt.Errorf("install pinned llama.cpp distribution: %w", err)
+	}
+	if err := os.Chmod(target, 0o555); err != nil {
+		return errors.Join(fmt.Errorf("lock installed llama.cpp distribution: %w", err), os.Rename(target, temporary))
 	}
 	return nil
 }

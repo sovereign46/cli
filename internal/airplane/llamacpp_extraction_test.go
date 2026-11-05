@@ -99,6 +99,54 @@ func TestVerifyLlamaCppBinaryRejectsDigestAndVersionMismatch(t *testing.T) {
 	}
 }
 
+func TestInstallLlamaCppArchiveLocksRenamedTree(t *testing.T) {
+	content := "#!/bin/sh\nexit 0\n"
+	archive := llamaArchive(t,
+		llamaArchiveMember{name: "llama-b9270/", typeflag: tar.TypeDir, mode: 0o755},
+		llamaArchiveMember{name: "llama-b9270/llama-server", typeflag: tar.TypeReg, mode: 0o755, content: content},
+	)
+	source := t.TempDir()
+	t.Cleanup(func() { _ = removeRuntimeSnapshot(source) })
+	if err := extractLlamaCppDistribution(archive, source); err != nil {
+		t.Fatal(err)
+	}
+	distribution, err := llamaCppDistributionRoot(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := makeLlamaCppTreeReadOnly(distribution); err != nil {
+		t.Fatal(err)
+	}
+	inventory, err := llamaCppInventorySHA256(distribution)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pin := llamaCppResolvedPin{Version: "b9270", llamaCppPlatformPin: llamaCppPlatformPin{
+		InventorySHA256: inventory, BinarySHA256: sha256Hex([]byte(content)), BinarySize: int64(len(content)),
+	}}
+	data := t.TempDir()
+	t.Cleanup(func() { _ = removeRuntimeSnapshot(data) })
+	service := Service{Env: map[string]string{"XDG_DATA_HOME": data}}
+	if err := service.installLlamaCppArchive(t.Context(), archive, pin); err != nil {
+		t.Fatal(err)
+	}
+	target := service.managedLlamaCppDir(pin)
+	info, err := os.Lstat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o555 {
+		t.Fatalf("installed root was not locked: mode=%v", info.Mode())
+	}
+	if _, ok := service.verifiedManagedLlamaCpp(t.Context(), pin); !ok {
+		t.Fatal("installed distribution failed verification")
+	}
+	entries, err := os.ReadDir(filepath.Dir(target))
+	if err != nil || len(entries) != 1 || entries[0].Name() != "b9270" {
+		t.Fatalf("install left a temporary tree: entries=%v err=%v", entries, err)
+	}
+}
+
 func archiveWithPAXRecord(t *testing.T, name string) []byte {
 	t.Helper()
 	var buffer bytes.Buffer
