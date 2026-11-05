@@ -118,7 +118,7 @@ func TestEnsureModelDirCreatesConfiguredDirectory(t *testing.T) {
 
 func TestInstallLlamacppFailsClosedWithoutCompleteQualifiedClosure(t *testing.T) {
 	err := (Service{}).InstallLlamacpp(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "gateway pin") && !strings.Contains(err.Error(), "unsupported") {
+	if err == nil || !strings.Contains(err.Error(), "candidate and has not passed qualification") {
 		t.Fatalf("unqualified llama.cpp candidate was accepted: %v", err)
 	}
 }

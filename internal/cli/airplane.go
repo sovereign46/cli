@@ -1,6 +1,11 @@
 package cli
 
-import "github.com/spf13/cobra"
+import (
+	"fmt"
+
+	"github.com/sovereign46/cli/internal/airplane"
+	"github.com/spf13/cobra"
+)
 
 type airplaneSetupIncompleteError struct{}
 
@@ -15,11 +20,26 @@ func airplaneCommand(runtime Runtime, opts *options) *cobra.Command {
 	var setupMode string
 	var setupHarness string
 	var setupYes bool
+	var setupCandidate bool
 	setup := &cobra.Command{
 		Use:   "setup",
 		Short: "check and prepare local airplane-mode dependencies",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if setupCandidate {
+				if !airplane.CandidateSupported() {
+					return fmt.Errorf("this release build does not support unsigned airplane candidates")
+				}
+				if runtime.Env == nil {
+					runtime.Env = ProcessEnv()
+				}
+				env := make(map[string]string, len(runtime.Env)+1)
+				for key, value := range runtime.Env {
+					env[key] = value
+				}
+				env["S46_AIRPLANE_CANDIDATE"] = "1"
+				runtime.Env = env
+			}
 			app, err := newApp(runtime, opts)
 			if err != nil {
 				return err
@@ -54,6 +74,7 @@ func airplaneCommand(runtime Runtime, opts *options) *cobra.Command {
 	setup.Flags().StringVar(&setupMode, "mode", "", "set mode after setup (on)")
 	setup.Flags().StringVar(&setupHarness, "harness", "", "harness to configure when enabling airplane mode")
 	setup.Flags().BoolVar(&setupYes, "yes", false, "accept setup prompts non-interactively")
+	setup.Flags().BoolVar(&setupCandidate, "candidate", false, "use exact pinned unsigned Mac diagnostic artifacts (non-release build only)")
 	cmd.AddCommand(setup)
 	mode := &cobra.Command{Use: "mode", Short: "turn airplane mode on or off"}
 	var modeHarness string

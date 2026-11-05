@@ -14,6 +14,19 @@ import (
 	"testing"
 )
 
+func TestReleaseBuildRejectsUnsignedCandidateOptIn(t *testing.T) {
+	service := Service{Env: map[string]string{"S46_AIRPLANE_CANDIDATE": "1"}}
+	if CandidateSupported() || service.candidateMode() {
+		t.Fatal("release build enabled an unsigned airplane candidate")
+	}
+	if _, err := service.gatewayPin("darwin", "arm64"); err == nil {
+		t.Fatal("release build accepted the unsigned Gateway candidate")
+	}
+	if _, err := service.llamaCppPin("darwin", "arm64"); err == nil {
+		t.Fatal("release build accepted the unsigned llama.cpp candidate")
+	}
+}
+
 func TestReleaseBuildIgnoresRemoteAirplaneEndpointOverrides(t *testing.T) {
 	t.Setenv("S46_AIRPLANE_GATEWAY_URL", "https://ambient.invalid")
 	t.Setenv("S46_LOCAL_LLAMACPP_URL", "https://ambient.invalid")

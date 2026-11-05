@@ -41,7 +41,7 @@ s46 sessions
 s46 share [session] [--ttl=1d|7d|30d|365d|never] [--local]
 s46 share revoke <session-or-share-id>
 s46 mode [cloud|airplane]
-s46 airplane setup [--yes] [--mode=on] [--harness=pi|claude-code|codex|standard]
+s46 airplane setup [--yes] [--mode=on] [--harness=pi|claude-code|codex|standard] [--candidate]
 s46 airplane mode on|off [--harness=pi|claude-code|codex|standard]
 s46 airplane logs [llamacpp|gateway|all] [--follow]
 s46 models verify <model-id> [--output <path>] [--backend-model <id>] [--yes]
@@ -66,6 +66,8 @@ Encrypted shares are uploaded to `S46_SHARE_API_URL` (default `https://gist.s46.
 `s46 login` records the authenticated `/v1/me` identity without depending on team-catalog availability. `s46 connect` is the separate catalog/authorization step: it requires a valid login for cloud teams so the API can verify team access, then writes harness config to `~/.claude/settings.json`, `~/.codex/config.toml`, or `~/.pi/agent/models.json`. Existing files are merged and backed up with `.s46-backup-<timestamp>`. A connect failure that leaves files half-written is rolled back automatically.
 
 `s46 status` performs live checks rather than treating configuration as readiness: cloud mode calls `/v1/me`; airplane mode probes gateway readiness, authenticated model listing, minimal inference, and harness configuration. A failed structured status exits nonzero. `s46 run` launches the selected installed harness and records a session only after successful harness exit; the `standard` adapter does not claim direct-runner support. Release builds also reject the mock share backend.
+
+The unsigned Darwin/arm64 Devstral airplane diagnostic is documented in [docs/airplane-mac-diagnostic.md](docs/airplane-mac-diagnostic.md). It is an explicit non-release path and does not change the signed release status.
 
 ## DeepSeek cloud candidate: Pi first
 

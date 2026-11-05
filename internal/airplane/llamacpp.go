@@ -92,7 +92,7 @@ func (s Service) StartLlamacpp(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	pin, err := embeddedLlamaCppReleasePin(runtime.GOOS, runtime.GOARCH)
+	pin, err := s.llamaCppPin(runtime.GOOS, runtime.GOARCH)
 	if err != nil {
 		return err
 	}
@@ -194,7 +194,7 @@ func (s Service) llamacppServingVerifiedModel(ctx context.Context) (bool, string
 	if !ok {
 		return false, "could not verify llama-server process model identity; restart it with `s46 airplane setup`"
 	}
-	if pin, err := embeddedLlamaCppReleasePin(runtime.GOOS, runtime.GOARCH); err == nil {
+	if pin, err := s.llamaCppPin(runtime.GOOS, runtime.GOARCH); err == nil {
 		if s.descriptorBoundModelIsRunning(process, pin) {
 			return true, "serving descriptor-bound verified model release"
 		}
@@ -258,10 +258,13 @@ func (s Service) llamacppPath() (string, bool) {
 	if path, installed, ok := s.seamLlamacppPath(); ok {
 		return path, installed
 	}
-	if pin, err := embeddedLlamaCppReleasePin(runtime.GOOS, runtime.GOARCH); err == nil {
+	if pin, err := s.llamaCppPin(runtime.GOOS, runtime.GOARCH); err == nil {
 		if path, ok := s.verifiedManagedLlamaCpp(context.Background(), pin); ok {
 			return path, true
 		}
+	}
+	if s.candidateMode() {
+		return "", false
 	}
 	return s.developmentLlamacppPath()
 }
@@ -270,7 +273,7 @@ func (s Service) llamacppServeProcess(ctx context.Context) (llamacppProcess, boo
 	if process, found, ok := s.seamLlamacppServeProcess(); ok {
 		return process, found
 	}
-	if _, err := embeddedLlamaCppReleasePin(runtime.GOOS, runtime.GOARCH); err == nil {
+	if _, err := s.llamaCppPin(runtime.GOOS, runtime.GOARCH); err == nil {
 		identity, identityErr := s.loadModelRuntimeIdentity()
 		if identityErr != nil || len(identity.Command) == 0 {
 			return llamacppProcess{}, false

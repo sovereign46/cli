@@ -41,6 +41,14 @@ type llamaCppResolvedPin struct {
 }
 
 func embeddedLlamaCppReleasePin(goos, goarch string) (llamaCppResolvedPin, error) {
+	return embeddedLlamaCppPin(goos, goarch, false)
+}
+
+func (s Service) llamaCppPin(goos, goarch string) (llamaCppResolvedPin, error) {
+	return embeddedLlamaCppPin(goos, goarch, s.candidateMode())
+}
+
+func embeddedLlamaCppPin(goos, goarch string, candidate bool) (llamaCppResolvedPin, error) {
 	manifest, err := embeddedAirplaneReleaseManifest()
 	if err != nil {
 		return llamaCppResolvedPin{}, err
@@ -71,7 +79,7 @@ func embeddedLlamaCppReleasePin(goos, goarch string) (llamaCppResolvedPin, error
 	if err := validateGatewayPlatformPin(gatewayPin); err != nil {
 		return llamaCppResolvedPin{}, fmt.Errorf("embedded gateway pin for %s is invalid: %w", platform, err)
 	}
-	if !manifest.Qualified {
+	if !manifest.Qualified && !candidate {
 		return llamaCppResolvedPin{}, errors.New("embedded airplane release closure is a candidate and has not passed qualification")
 	}
 	return llamaCppResolvedPin{
@@ -88,7 +96,7 @@ func (s Service) LlamacppDownloadAvailable() bool {
 	if available, ok := s.seamLlamacppDownloadAvailable(); ok {
 		return available
 	}
-	_, err := embeddedLlamaCppReleasePin(runtime.GOOS, runtime.GOARCH)
+	_, err := s.llamaCppPin(runtime.GOOS, runtime.GOARCH)
 	return err == nil
 }
 
@@ -96,7 +104,7 @@ func (s Service) LlamacppInstallDescription() string {
 	if _, ok := s.seamLlamacppDownloadAvailable(); ok {
 		return "test-qualified llama.cpp runtime"
 	}
-	pin, err := embeddedLlamaCppReleasePin(runtime.GOOS, runtime.GOARCH)
+	pin, err := s.llamaCppPin(runtime.GOOS, runtime.GOARCH)
 	if err != nil {
 		return err.Error()
 	}
@@ -104,7 +112,7 @@ func (s Service) LlamacppInstallDescription() string {
 }
 
 func (s Service) installPinnedLlamaCpp(ctx context.Context) error {
-	pin, err := embeddedLlamaCppReleasePin(runtime.GOOS, runtime.GOARCH)
+	pin, err := s.llamaCppPin(runtime.GOOS, runtime.GOARCH)
 	if err != nil {
 		return err
 	}
@@ -119,6 +127,13 @@ func (s Service) installPinnedLlamaCpp(ctx context.Context) error {
 }
 
 func (s Service) loadLlamaCppArchive(ctx context.Context, pin llamaCppResolvedPin) ([]byte, error) {
+	if s.candidateMode() {
+		path := strings.TrimSpace(strs.EnvValue(s.Env, "S46_AIRPLANE_CANDIDATE_LLAMA_ARCHIVE"))
+		if !filepath.IsAbs(path) {
+			return nil, errors.New("candidate llama.cpp archive needs S46_AIRPLANE_CANDIDATE_LLAMA_ARCHIVE set to an absolute local path")
+		}
+		return readVerifiedRegularFile(path, pin.ArchiveSHA256, pin.ArchiveSize, gatewayArchiveMaxBytes, "candidate llama.cpp archive")
+	}
 	cachePath := s.llamaCppArchiveCachePath()
 	if _, err := os.Lstat(cachePath); err == nil {
 		return readVerifiedRegularFile(cachePath, pin.ArchiveSHA256, pin.ArchiveSize, gatewayArchiveMaxBytes, "cached llama.cpp archive")

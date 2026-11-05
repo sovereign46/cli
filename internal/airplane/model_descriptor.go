@@ -59,10 +59,10 @@ func (s Service) openVerifiedModelDescriptor(ctx context.Context) (verifiedModel
 	if err != nil {
 		return verifiedModelDescriptor{}, err
 	}
-	if !manifest.Qualified {
+	if !manifest.Qualified && !s.candidateMode() {
 		return verifiedModelDescriptor{}, errors.New("embedded airplane release closure has not passed qualification")
 	}
-	if _, err := embeddedLlamaCppReleasePin(runtime.GOOS, runtime.GOARCH); err != nil {
+	if _, err := s.llamaCppPin(runtime.GOOS, runtime.GOARCH); err != nil {
 		return verifiedModelDescriptor{}, err
 	}
 	if err := os.MkdirAll(cacheDir(s.Env), 0o700); err != nil {
@@ -141,7 +141,7 @@ func (s Service) descriptorBoundModelIsRunning(process llamacppProcess, pin llam
 		return false
 	}
 	manifest, err := embeddedAirplaneReleaseManifest()
-	if err != nil || !manifest.Qualified {
+	if err != nil || (!manifest.Qualified && !s.candidateMode()) {
 		return false
 	}
 	parent, err := s.verifiedRuntimeSnapshotParent()
