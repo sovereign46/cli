@@ -329,7 +329,7 @@ func TestRunRevalidatesPrelaunchExpiryImmediatelyBeforeHarnessLaunch(t *testing.
 		}
 		return time.Date(2031, 1, 1, 0, 0, 0, 0, time.UTC)
 	}
-	_, _, err = launchConnectedHarness(context.Background(), application, application.runtime, "do not launch", "", "")
+	_, _, err = launchConnectedHarness(context.Background(), application, application.runtime, "do not launch", "", "", false)
 	if err == nil || !strings.Contains(err.Error(), "refusing harness launch") || !strings.Contains(err.Error(), "policy has expired") {
 		t.Fatalf("harness launch did not revalidate expiry: calls=%d err=%v output=%q", calls, err, stdout.String())
 	}
@@ -399,7 +399,7 @@ func TestRunRejectsHostilePiRuntimeConfigurationBeforeLaunch(t *testing.T) {
 		t.Fatal(err)
 	}
 	application.now = func() time.Time { return time.Date(2029, 1, 1, 0, 0, 0, 0, time.UTC) }
-	_, _, err = launchConnectedHarness(context.Background(), application, application.runtime, "do not launch", "", "")
+	_, _, err = launchConnectedHarness(context.Background(), application, application.runtime, "do not launch", "", "", false)
 	if err == nil || !strings.Contains(err.Error(), "Pi configuration does not exactly match") {
 		t.Fatalf("hostile Pi configuration was launched: %v\n%s", err, stdout.String())
 	}
@@ -444,5 +444,29 @@ func TestRunUsesTranscriptSessionID(t *testing.T) {
 	unauthorized := run(t, env, "run", "task", "--model=s46/not-authorized")
 	if unauthorized.err == nil || !regexp.MustCompile(`model .* is not authorized`).MatchString(unauthorized.err.Error()) {
 		t.Fatalf("unauthorized exact model was accepted: %v", unauthorized.err)
+	}
+}
+
+func TestRunNonInteractiveReachesHarnessAndRecordsTranscript(t *testing.T) {
+	env := testEnv(t)
+	requireOK(t, run(t, env, "login", "--email", "dscape@s46.dev"))
+	requireOK(t, run(t, env, "connect", "@s46/engineering", "--harness=pi"))
+	result := run(t, env, "run", "create hello.go", "--non-interactive", "--json")
+	if result.err != nil {
+		t.Fatalf("non-interactive run failed: %v\n%s", result.err, result.stderr)
+	}
+	if !strings.Contains(result.stderr, "[test-harness] pi non-interactive") {
+		t.Fatalf("Pi did not receive --print: %s", result.stderr)
+	}
+	var recorded struct {
+		ID    string `json:"id"`
+		Model string `json:"model"`
+		Task  string `json:"task"`
+	}
+	if err := json.Unmarshal([]byte(result.stdout), &recorded); err != nil {
+		t.Fatal(err)
+	}
+	if recorded.ID == "" || recorded.Model != api.DevstralModelID || recorded.Task != "create hello.go" {
+		t.Fatalf("incorrect transcript attribution: %+v", recorded)
 	}
 }

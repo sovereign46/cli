@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -12,6 +13,19 @@ import (
 	"github.com/sovereign46/cli/internal/api"
 	"github.com/sovereign46/cli/internal/harness"
 )
+
+func TestLaunchArgsSelectNonInteractiveMode(t *testing.T) {
+	req := harness.LaunchRequest{Model: api.DeepSeekModelID, SessionID: "session-123", Task: "create hello.go"}
+	wantInteractive := []string{"--provider", "s46", "--model", api.DeepSeekModelID, "--session-id", "session-123", "--", "create hello.go"}
+	if got := piLaunchArgs(req); !reflect.DeepEqual(got, wantInteractive) {
+		t.Fatalf("interactive args = %q, want %q", got, wantInteractive)
+	}
+	req.NonInteractive = true
+	wantBatch := []string{"--provider", "s46", "--model", api.DeepSeekModelID, "--print", "--session-id", "session-123", "--", "create hello.go"}
+	if got := piLaunchArgs(req); !reflect.DeepEqual(got, wantBatch) {
+		t.Fatalf("non-interactive args = %q, want %q", got, wantBatch)
+	}
+}
 
 func TestPlanConnectPreservesProvidersAndAddsS46(t *testing.T) {
 	home := t.TempDir()

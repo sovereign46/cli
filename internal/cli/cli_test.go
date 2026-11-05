@@ -60,11 +60,13 @@ set -eu
 session=""
 model=""
 task=""
+print_mode=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --session-id) session=$2; shift 2 ;;
     --model) model=$2; shift 2 ;;
     --provider) shift 2 ;;
+    --print) print_mode=1; shift ;;
     --) shift; task=${1:-coding-session}; break ;;
     *) shift ;;
   esac
@@ -76,7 +78,11 @@ now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 printf '{"type":"session","version":3,"id":"%s","cwd":"%s","timestamp":"%s"}\n' "$session" "$(pwd)" "$now" > "$dir/${session}.jsonl"
 printf '{"type":"model_change","id":"model","timestamp":"%s","provider":"s46","modelId":"%s"}\n' "$now" "$model" >> "$dir/${session}.jsonl"
 printf '{"type":"message","id":"user","timestamp":"%s","message":{"role":"user","content":[{"type":"text","text":"%s"}]}}\n' "$now" "$task" >> "$dir/${session}.jsonl"
-printf '[test-harness] pi\n'
+if [ -n "$print_mode" ]; then
+  printf '[test-harness] pi non-interactive\n'
+else
+  printf '[test-harness] pi\n'
+fi
 `
 		}
 		if err := os.WriteFile(path, []byte(script), 0o755); err != nil {

@@ -41,13 +41,14 @@ type DisconnectRequest struct {
 }
 
 type LaunchRequest struct {
-	Env       map[string]string
-	Stdin     io.Reader
-	Stdout    io.Writer
-	Stderr    io.Writer
-	Task      string
-	Model     string
-	SessionID string
+	Env            map[string]string
+	Stdin          io.Reader
+	Stdout         io.Writer
+	Stderr         io.Writer
+	Task           string
+	Model          string
+	SessionID      string
+	NonInteractive bool
 }
 
 type LaunchConfigRequest struct {

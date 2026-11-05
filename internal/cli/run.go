@@ -20,6 +20,7 @@ import (
 func runCommand(runtime Runtime, opts *options) *cobra.Command {
 	var model string
 	var sessionID string
+	var nonInteractive bool
 	cmd := &cobra.Command{
 		Use:   "run [task]",
 		Short: "launch the active real coding harness",
@@ -38,7 +39,7 @@ func runCommand(runtime Runtime, opts *options) *cobra.Command {
 			var harnessName string
 			if err := app.withLock(cmd.Context(), func() error {
 				var err error
-				result, harnessName, err = launchConnectedHarness(cmd.Context(), app, runtime, task, model, sessionID)
+				result, harnessName, err = launchConnectedHarness(cmd.Context(), app, runtime, task, model, sessionID, nonInteractive)
 				return err
 			}); err != nil {
 				return err
@@ -54,10 +55,11 @@ func runCommand(runtime Runtime, opts *options) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&model, "model", "", "exact model passed to the harness")
 	cmd.Flags().StringVar(&sessionID, "session-id", "", "exact harness session id (Pi and Claude Code)")
+	cmd.Flags().BoolVar(&nonInteractive, "non-interactive", false, "run the harness once and exit after the task")
 	return cmd
 }
 
-func launchConnectedHarness(ctx context.Context, app *app, runtime Runtime, task, requestedModel, requestedSessionID string) (sessioncmd.RunResult, string, error) {
+func launchConnectedHarness(ctx context.Context, app *app, runtime Runtime, task, requestedModel, requestedSessionID string, nonInteractive bool) (sessioncmd.RunResult, string, error) {
 	cfg, err := app.config.LoadConfig()
 	if err != nil {
 		return sessioncmd.RunResult{}, "", err
@@ -130,7 +132,7 @@ func launchConnectedHarness(ctx context.Context, app *app, runtime Runtime, task
 	if app.options.machineReadable() {
 		launchStdout = runtime.Stderr
 	}
-	request := harness.LaunchRequest{Env: runtime.Env, Stdin: runtime.Stdin, Stdout: launchStdout, Stderr: runtime.Stderr, Task: task, Model: effectiveModel, SessionID: launchSessionID}
+	request := harness.LaunchRequest{Env: runtime.Env, Stdin: runtime.Stdin, Stdout: launchStdout, Stderr: runtime.Stderr, Task: task, Model: effectiveModel, SessionID: launchSessionID, NonInteractive: nonInteractive}
 	if validator, ok := adapter.(harness.LaunchConfigValidator); ok {
 		validationRequest := harness.LaunchConfigRequest{Env: runtime.Env, Team: activeTeam, Mode: mode, Model: effectiveModel}
 		if err := validator.ValidateLaunchConfig(ctx, validationRequest); err != nil {
