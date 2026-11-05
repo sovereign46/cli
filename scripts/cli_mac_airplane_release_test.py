@@ -1,6 +1,7 @@
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import tarfile
@@ -52,9 +53,11 @@ class MacAirplaneReleaseTests(unittest.TestCase):
         self.gateway_trust_patch = patch.object(approval, "TRUST", self.gateway_trust)
         self.cli_trust_patch = patch.object(release, "TRUST", self.cli_trust)
         self.real_checked_manifest = release.checked_manifest
+        self.real_remote_check = release.require_remote_main
         self.manifest_patch = patch.object(release, "checked_manifest", return_value=("c" * 64, 1234))
+        self.remote_patch = patch.object(release, "require_remote_main", return_value=None)
         for active in (self.gateway_patch, self.gateway_trust_patch, self.cli_trust_patch,
-                       self.manifest_patch):
+                       self.manifest_patch, self.remote_patch):
             active.start()
             self.addCleanup(active.stop)
         self.commit = "a" * 40
@@ -188,6 +191,31 @@ class MacAirplaneReleaseTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "not qualified"):
                 self.real_checked_manifest(self.root, self.commit, self.tree)
 
+    @patch.dict(os.environ, release.GIT_ENV, clear=True)
+    def test_branch_commit_is_not_release_authority(self):
+        repo = self.root / "source-check"
+        remote = self.root / "origin-check.git"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+        subprocess.run(["git", "init", "--bare", "-q", str(remote)], check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test Reviewer"], check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@s46.invalid"], check=True)
+        subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", str(remote)], check=True)
+        (repo / "README").write_text("main\n")
+        subprocess.run(["git", "-C", str(repo), "add", "README"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-qm", "Main fixture"], check=True)
+        subprocess.run(["git", "-C", str(repo), "push", "-q", "origin", "main"], check=True)
+        main_commit = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"]).decode().strip()
+        subprocess.run(["git", "-C", str(repo), "switch", "-qc", "unreviewed"], check=True)
+        (repo / "README").write_text("branch\n")
+        subprocess.run(["git", "-C", str(repo), "commit", "-qam", "Branch fixture"], check=True)
+        branch_commit = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"]).decode().strip()
+        with patch.object(release, "OFFICIAL_ORIGINS", {str(remote)}):
+            self.real_remote_check(repo, main_commit)
+            with self.assertRaisesRegex(SystemExit, "exact remote main head"):
+                self.real_remote_check(repo, branch_commit)
+
+    @patch.dict(os.environ, release.GIT_ENV, clear=True)
     def test_publication_plan_binds_exact_annotated_tag(self):
         repo = self.root / "source"
         repo.mkdir()

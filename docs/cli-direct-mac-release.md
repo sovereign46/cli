@@ -101,7 +101,11 @@ python3 scripts/cli_mac_airplane_release.py qualified-record \
 This command re-verifies the Gateway packet and signatures, committed
 qualified manifest, source tree and runner script, exact CLI archive and
 embedded executable, installer evidence, three harnesses, loaded runtime
-pins, sequence-2 CAS identity, and both CLI signatures. It rejects adapter-only
+pins, sequence-2 CAS identity, and both CLI signatures. The source commit must
+be the exact current `origin/main` head of `sovereign46/cli` when sequence 3 is
+prepared and again when the publication plan is prepared. If main advances,
+the Mac candidate must be reviewed and restaged against the new source commit.
+The command rejects adapter-only
 diagnostics and Actions-shaped or incomplete direct Mac evidence. Upload the
 three new blobs using the stage-only authority credential, append the exact
 sequence-3 record with the captured sequence-2 ETag, then capture and compare

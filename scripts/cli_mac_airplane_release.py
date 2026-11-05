@@ -6,6 +6,7 @@ import copy
 import datetime
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -39,6 +40,9 @@ RUNNER = "scripts/e2e-airplane-harnesses"
 MANIFEST = "internal/airplane/gateway-release.json"
 SOURCE = Path(__file__).resolve().parent.parent
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+OFFICIAL_ORIGINS = {"git@github.com:sovereign46/cli.git",
+                    "https://github.com/sovereign46/cli.git"}
+GIT_ENV = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
 
 
 def require(condition, message):
@@ -49,16 +53,28 @@ def require(condition, message):
 def source_bytes(repo, commit, path):
     require(mac.OBJECT.fullmatch(commit) is not None, "source commit is not canonical")
     result = subprocess.run(["git", "-C", str(repo), "show", f"{commit}:{path}"],
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, env=GIT_ENV)
     require(result.returncode == 0, f"source commit lacks {path}")
     return result.stdout
 
 
 def source_tree(repo, commit):
     result = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", f"{commit}^{{tree}}"],
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, env=GIT_ENV)
     require(result.returncode == 0, "source commit is not present locally")
     return result.stdout.decode("ascii").strip()
+
+
+def require_remote_main(repo, commit):
+    remote = subprocess.run(["git", "-C", str(repo), "remote", "get-url", "origin"],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, env=GIT_ENV)
+    require(remote.returncode == 0 and remote.stdout.decode("utf-8").strip() in OFFICIAL_ORIGINS,
+            "Mac CLI source origin is not the official repository")
+    head = subprocess.run(["git", "-C", str(repo), "ls-remote", "--heads", "origin",
+                           "refs/heads/main"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          timeout=30, env=GIT_ENV)
+    require(head.returncode == 0 and head.stdout == f"{commit}\trefs/heads/main\n".encode(),
+            "Mac CLI source commit is not the exact remote main head")
 
 
 def archive_binary(path):
@@ -233,6 +249,7 @@ def qualified_record(args):
     previous = parse_record(Path(args.sequence_two).read_bytes())
     require(canonical_record(previous) == canonical_record(expected),
             "Mac CLI qualification does not start at the exact deterministic sequence-2 candidate")
+    require_remote_main(Path(args.source_repo), args.commit)
     raw = checked_qualification(args.bundle, previous, Path(args.source_repo))
     successor = copy.deepcopy(previous)
     successor["sequence"] = 3
@@ -264,13 +281,13 @@ def command_publication(args):
             "publication does not start at the exact signed Mac qualification")
     require(mac.OBJECT.fullmatch(args.tag_object) is not None, "annotated tag object is invalid")
     tag = subprocess.run(["git", "-C", args.source_repo, "cat-file", "-p", args.tag_object],
-                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, env=GIT_ENV)
     require(tag.returncode == 0 and tag.stdout.startswith(
         f"object {args.commit}\ntype commit\ntag {mac.TAG}\n".encode()),
         "annotated Mac release tag does not target the qualified commit")
     remote = subprocess.run(["git", "-C", args.source_repo, "ls-remote", "--refs", "origin",
                              f"refs/tags/{mac.TAG}"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            timeout=30)
+                            timeout=30, env=GIT_ENV)
     require(remote.returncode == 0 and remote.stdout ==
             f"{args.tag_object}\trefs/tags/{mac.TAG}\n".encode(),
             "remote Mac release tag object differs from the reviewed tag")
