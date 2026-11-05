@@ -2,7 +2,9 @@
 """Run six cloud client hello-world checks through a supplied s46 CLI binary.
 
 The dry run reads local executables only. The real run requires an isolated,
-already authenticated HOME and final production model grants.
+already authenticated HOME and final production model grants. HOME separates
+configuration; run the agent tools under a separate OS account or sandbox to
+restrict their filesystem access.
 """
 
 import argparse
@@ -73,6 +75,18 @@ def production_env(home, bin_dir, tmp_dir):
         "PATH": str(bin_dir) + os.pathsep + env.get("PATH", ""),
         "S46_SKIP_UPDATE_CHECK": "1",
     })
+    backend = os.environ.get("S46_KEYRING_BACKEND")
+    keyring_file = os.environ.get("S46_KEYRING_FILE")
+    if backend is not None or keyring_file is not None:
+        if backend != "file" or not keyring_file:
+            raise RuntimeError("file keyring requires S46_KEYRING_BACKEND=file and S46_KEYRING_FILE")
+        path = Path(keyring_file)
+        resolved_home = home.resolve()
+        resolved_path = path.resolve()
+        if (not path.is_absolute() or resolved_path == resolved_home or
+                not resolved_path.is_relative_to(resolved_home)):
+            raise RuntimeError("S46_KEYRING_FILE must be inside the isolated HOME")
+        env.update({"S46_KEYRING_BACKEND": "file", "S46_KEYRING_FILE": str(path)})
     return env
 
 

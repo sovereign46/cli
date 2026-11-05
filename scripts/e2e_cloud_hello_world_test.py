@@ -41,6 +41,35 @@ class ProductionEnvironmentTest(unittest.TestCase):
             self.assertEqual(env["CODEX_HOME"], str(base / "home" / ".codex"))
             self.assertTrue(env["PATH"].startswith(str(base / "bin") + os.pathsep))
 
+    def test_explicit_file_keyring_stays_in_isolated_home(self):
+        with tempfile.TemporaryDirectory() as root:
+            home = Path(root) / "home"
+            home.mkdir()
+            keyring = home / ".local" / "share" / "s46" / "keyring.json"
+            with patch.dict(os.environ, {
+                "S46_KEYRING_BACKEND": "file", "S46_KEYRING_FILE": str(keyring),
+            }):
+                env = MODULE.production_env(home, Path(root) / "bin", Path(root) / "tmp")
+            self.assertEqual(env["S46_KEYRING_BACKEND"], "file")
+            self.assertEqual(env["S46_KEYRING_FILE"], str(keyring))
+
+    def test_file_keyring_outside_home_or_missing_pair_is_rejected(self):
+        with tempfile.TemporaryDirectory() as root:
+            base = Path(root)
+            home = base / "home"
+            home.mkdir()
+            (home / "escape").symlink_to(base, target_is_directory=True)
+            for values in (
+                {"S46_KEYRING_BACKEND": "file", "S46_KEYRING_FILE": str(base / "keyring.json")},
+                {"S46_KEYRING_BACKEND": "file", "S46_KEYRING_FILE": str(home / "escape" / "keyring.json")},
+                {"S46_KEYRING_BACKEND": "file", "S46_KEYRING_FILE": "keyring.json"},
+                {"S46_KEYRING_BACKEND": "file"},
+                {"S46_KEYRING_FILE": str(home / "keyring.json")},
+            ):
+                with self.subTest(values=values), patch.dict(os.environ, values, clear=True):
+                    with self.assertRaises(RuntimeError):
+                        MODULE.production_env(home, base / "bin", base / "tmp")
+
 
 if __name__ == "__main__":
     unittest.main()
