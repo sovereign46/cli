@@ -18,7 +18,7 @@ fredoliveira.sig
 goncalossilva.sig
 ```
 
-The subject is copied byte for byte from the approved Gateway packet. It must
+The subject is copied byte for byte from the reviewed Gateway handoff packet. It must
 have SHA-256 `e913b6ca19523abb0a6326143ba55b48d00a7320491f7af735ce1820f452eb7c`,
 which binds the reviewed qualification and diagnostic manifest as well as the
 Gateway bytes. It must also
