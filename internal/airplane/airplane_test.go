@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -118,7 +119,11 @@ func TestEnsureModelDirCreatesConfiguredDirectory(t *testing.T) {
 
 func TestInstallLlamacppFailsClosedWithoutCompleteQualifiedClosure(t *testing.T) {
 	err := (Service{}).InstallLlamacpp(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "gateway pin") && !strings.Contains(err.Error(), "unsupported") {
+	want := "no complete qualified llama.cpp runtime pin"
+	if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
+		want = "candidate and has not passed qualification"
+	}
+	if err == nil || !strings.Contains(err.Error(), want) {
 		t.Fatalf("unqualified llama.cpp candidate was accepted: %v", err)
 	}
 }

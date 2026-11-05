@@ -101,7 +101,7 @@ func (s Service) InstallGateway(ctx context.Context) error {
 	if handled, err := s.seamInstallGateway(); handled {
 		return err
 	}
-	pin, err := embeddedGatewayReleasePin(runtime.GOOS, runtime.GOARCH)
+	pin, err := s.gatewayPin(runtime.GOOS, runtime.GOARCH)
 	if err != nil {
 		return err
 	}
@@ -119,19 +119,31 @@ func (s Service) GatewayDownloadAvailable() bool {
 	if available, ok := s.seamGatewayDownloadAvailable(); ok {
 		return available
 	}
-	_, err := embeddedGatewayReleasePin(runtime.GOOS, runtime.GOARCH)
+	_, err := s.gatewayPin(runtime.GOOS, runtime.GOARCH)
 	return err == nil
 }
 
 func embeddedGatewayReleasePin(goos, goarch string) (gatewayResolvedPin, error) {
+	return embeddedGatewayPin(goos, goarch, false)
+}
+
+func (s Service) gatewayPin(goos, goarch string) (gatewayResolvedPin, error) {
+	return embeddedGatewayPin(goos, goarch, s.candidateMode())
+}
+
+func embeddedGatewayPin(goos, goarch string, candidate bool) (gatewayResolvedPin, error) {
 	raw, err := gatewayReleaseFiles.ReadFile("gateway-release.json")
 	if err != nil {
 		return gatewayResolvedPin{}, fmt.Errorf("read embedded gateway release pins: %w", err)
 	}
-	return decodeGatewayReleasePin(raw, goos, goarch)
+	return decodeGatewayPin(raw, goos, goarch, candidate)
 }
 
 func decodeGatewayReleasePin(raw []byte, goos, goarch string) (gatewayResolvedPin, error) {
+	return decodeGatewayPin(raw, goos, goarch, false)
+}
+
+func decodeGatewayPin(raw []byte, goos, goarch string, candidate bool) (gatewayResolvedPin, error) {
 	manifest, err := decodeAirplaneReleaseManifest(raw)
 	if err != nil {
 		return gatewayResolvedPin{}, err
@@ -168,7 +180,7 @@ func decodeGatewayReleasePin(raw []byte, goos, goarch string) (gatewayResolvedPi
 	if _, err := gatewayDownloadURL(resolved); err != nil {
 		return gatewayResolvedPin{}, fmt.Errorf("embedded gateway release pin for %s has an invalid asset URL: %w", platform, err)
 	}
-	if !manifest.Qualified {
+	if !manifest.Qualified && !candidate {
 		return gatewayResolvedPin{}, errors.New("embedded airplane release closure is a candidate and has not passed qualification")
 	}
 	return resolved, nil
@@ -294,6 +306,13 @@ func ensureGatewayJSONEOF(decoder *json.Decoder) error {
 }
 
 func (s Service) loadGatewayArchive(ctx context.Context, pin gatewayResolvedPin) ([]byte, error) {
+	if s.candidateMode() {
+		path := strings.TrimSpace(strs.EnvValue(s.Env, "S46_AIRPLANE_CANDIDATE_GATEWAY_ARCHIVE"))
+		if !filepath.IsAbs(path) {
+			return nil, errors.New("candidate Gateway archive needs S46_AIRPLANE_CANDIDATE_GATEWAY_ARCHIVE set to an absolute local path")
+		}
+		return readPinnedGatewayArchive(path, pin)
+	}
 	cachePath := s.gatewayArchiveCachePath()
 	if archive, err := readPinnedGatewayArchive(cachePath, pin); err == nil {
 		return archive, nil

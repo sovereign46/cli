@@ -17,6 +17,7 @@ import (
 type statusResult struct {
 	OK                          bool                  `json:"ok"`
 	Mode                        string                `json:"mode"`
+	DiagnosticCandidate         bool                  `json:"diagnosticCandidate,omitempty"`
 	Team                        string                `json:"team,omitempty"`
 	ReleaseChannel              string                `json:"releaseChannel,omitempty"`
 	ProductionCertified         *bool                 `json:"productionCertified,omitempty"`
@@ -64,6 +65,9 @@ func statusCommand(runtime Runtime, opts *options) *cobra.Command {
 				return nil
 			}
 			lines := []string{fmt.Sprintf("[s46] mode: %s", result.Mode)}
+			if result.DiagnosticCandidate {
+				lines = append(lines, "[s46] unsigned local diagnostic candidate; release certification is not implied")
+			}
 			if result.Team != "" {
 				team := cfg.Teams[result.Team]
 				lines = append(lines, fmt.Sprintf("[s46] team:    %s · %s · %s", result.Team, team.Region, result.Mode))
@@ -126,6 +130,7 @@ func collectStatus(ctx context.Context, app *app, cfg config.Config, state confi
 	teamName := cfg.ActiveTeam
 	teamCfg, hasTeam := cfg.Teams[teamName]
 	checks := make([]harness.StatusCheck, 0, 16)
+	diagnosticCandidate := false
 
 	if mode == config.ModeAirplane {
 		token, _ := app.authService().Token(ctx, false)
@@ -134,6 +139,7 @@ func collectStatus(ctx context.Context, app *app, cfg config.Config, state confi
 		checks = appendGatewayProbeChecks(checks, probe.Checks(ctx))
 		service := airplane.Service{Env: app.runtime.Env}
 		report := service.Check(ctx)
+		diagnosticCandidate = report.DiagnosticCandidate
 		for _, check := range report.Checks {
 			checks = append(checks, harness.StatusCheck{Name: check.Name, OK: check.OK, Message: check.Message})
 		}
@@ -166,7 +172,7 @@ func collectStatus(ctx context.Context, app *app, cfg config.Config, state confi
 		checks = append(checks, harness.StatusCheck{Name: "harness", OK: false, Message: "no harness is connected"})
 	}
 
-	result := statusResult{OK: checksPassed(checks), Mode: mode, Team: teamName, Checks: checks}
+	result := statusResult{OK: checksPassed(checks), Mode: mode, DiagnosticCandidate: diagnosticCandidate, Team: teamName, Checks: checks}
 	if mode == config.ModeCloud && hasTeam {
 		team := teamCfg.API(teamName)
 		if team.ReleaseChannel != "" {

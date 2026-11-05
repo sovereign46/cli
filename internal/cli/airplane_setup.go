@@ -65,7 +65,11 @@ func continueAirplaneSetup(ctx context.Context, app *app, service airplane.Servi
 	changed := false
 	if missingCheck(report, "llamacpp-installed") && service.LlamacppDownloadAvailable() {
 		description := service.LlamacppInstallDescription()
-		if yes, err := confirmAirplaneSetup(app, options, fmt.Sprintf("[s46] The qualified llama-server runtime is not installed.\n[s46] Install %s? [Y/n] ", description), true); err != nil {
+		qualifier := "qualified"
+		if airplane.CandidateSupported() && app.runtime.Env["S46_AIRPLANE_CANDIDATE"] == "1" {
+			qualifier = "pinned diagnostic"
+		}
+		if yes, err := confirmAirplaneSetup(app, options, fmt.Sprintf("[s46] The %s llama-server runtime is not installed.\n[s46] Install %s? [Y/n] ", qualifier, description), true); err != nil {
 			return report, err
 		} else if yes {
 			if err := app.renderer.Lines("[s46] installing exact pinned llama.cpp distribution..."); err != nil {

@@ -56,6 +56,9 @@ func renderAirplaneReportWithTitle(report airplane.Report, title string) []strin
 		fmt.Sprintf("[s46] %s: checking local runtime", title),
 		fmt.Sprintf("[s46] model: %s -> %s", report.Model, report.BackendModel),
 	}
+	if report.DiagnosticCandidate {
+		lines = append(lines, "[s46] unsigned local diagnostic candidate; release certification is not implied")
+	}
 	for _, check := range report.Checks {
 		lines = append(lines, fmt.Sprintf("[s46] [%s] %s: %s", airplaneCheckStatus(check), check.Name, check.Message))
 	}

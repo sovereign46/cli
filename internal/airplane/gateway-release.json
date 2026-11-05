@@ -26,7 +26,15 @@
   },
   "gateway": {
     "repository": "sovereign46/api",
-    "version": "",
-    "platforms": {}
+    "version": "0.3.1",
+    "platforms": {
+      "darwin/arm64": {
+        "archiveName": "s46-gateway_0.3.1_darwin_arm64.tar.gz",
+        "archiveSha256": "ef9d322d2bb775ae065d712280b786841c149ed959acf70942c25c74e8f32d3a",
+        "archiveSize": 4562976,
+        "binarySha256": "6abaef72f4c0975fc459db8f7cad89b88f99b04e970464685c07180518382ca2",
+        "binarySize": 12990738
+      }
+    }
   }
 }

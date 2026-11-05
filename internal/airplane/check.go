@@ -25,18 +25,19 @@ type Check struct {
 }
 
 type Report struct {
-	Mode          string  `json:"mode"`
-	Model         string  `json:"model"`
-	BackendModel  string  `json:"backendModel"`
-	GatewayURL    string  `json:"gatewayUrl"`
-	LlamacppURL   string  `json:"llamacppUrl"`
-	Ready         bool    `json:"ready"`
-	Checks        []Check `json:"checks"`
-	MemoryGB      int64   `json:"memoryGb,omitempty"`
-	FreeDiskGB    int64   `json:"freeDiskGb,omitempty"`
-	LlamacppPath  string  `json:"llamacppPath,omitempty"`
-	ModelPath     string  `json:"modelPath,omitempty"`
-	GatewayBinary string  `json:"gatewayBinary,omitempty"`
+	Mode                string  `json:"mode"`
+	DiagnosticCandidate bool    `json:"diagnosticCandidate,omitempty"`
+	Model               string  `json:"model"`
+	BackendModel        string  `json:"backendModel"`
+	GatewayURL          string  `json:"gatewayUrl"`
+	LlamacppURL         string  `json:"llamacppUrl"`
+	Ready               bool    `json:"ready"`
+	Checks              []Check `json:"checks"`
+	MemoryGB            int64   `json:"memoryGb,omitempty"`
+	FreeDiskGB          int64   `json:"freeDiskGb,omitempty"`
+	LlamacppPath        string  `json:"llamacppPath,omitempty"`
+	ModelPath           string  `json:"modelPath,omitempty"`
+	GatewayBinary       string  `json:"gatewayBinary,omitempty"`
 }
 
 func (s Service) Check(ctx context.Context) Report {
@@ -54,7 +55,7 @@ func (s Service) check(ctx context.Context, assumeVerifiedModel bool) Report {
 		return s.skippedReport()
 	}
 
-	report := Report{Mode: ModeAirplane, Model: LocalModelID, BackendModel: s.backendModel(), GatewayURL: s.gatewayURL(), LlamacppURL: LlamacppURL(s.Env), ModelPath: s.modelPath()}
+	report := Report{Mode: ModeAirplane, DiagnosticCandidate: s.candidateMode(), Model: LocalModelID, BackendModel: s.backendModel(), GatewayURL: s.gatewayURL(), LlamacppURL: LlamacppURL(s.Env), ModelPath: s.modelPath()}
 
 	platformOK, platformMessage := s.airplanePlatform(ctx)
 	report.add(Check{Name: "os/arch", OK: platformOK, Required: true, Message: platformMessage})
@@ -141,7 +142,7 @@ func (s Service) skippedReport() Report {
 		{Name: "model-probe", OK: true, Required: true, Message: LocalModelID + " responds"},
 		{Name: "local-gateway", OK: true, Required: true, Message: s.gatewayURL()},
 	}
-	return Report{Mode: ModeAirplane, Model: LocalModelID, BackendModel: s.backendModel(), GatewayURL: s.gatewayURL(), LlamacppURL: LlamacppURL(s.Env), ModelPath: s.modelPath(), Ready: true, Checks: checks, MemoryGB: 64, FreeDiskGB: 30}
+	return Report{Mode: ModeAirplane, DiagnosticCandidate: s.candidateMode(), Model: LocalModelID, BackendModel: s.backendModel(), GatewayURL: s.gatewayURL(), LlamacppURL: LlamacppURL(s.Env), ModelPath: s.modelPath(), Ready: true, Checks: checks, MemoryGB: 64, FreeDiskGB: 30}
 }
 
 func (s Service) airplanePlatform(ctx context.Context) (bool, string) {
@@ -348,7 +349,7 @@ func (s Service) gatewayReady(ctx context.Context) bool {
 	if ready, ok := s.seamGatewayReady(); ok {
 		return ready
 	}
-	if pin, err := embeddedGatewayReleasePin(runtime.GOOS, runtime.GOARCH); err == nil {
+	if pin, err := s.gatewayPin(runtime.GOOS, runtime.GOARCH); err == nil {
 		if !s.verifiedGatewayProcess(ctx, pin) {
 			return false
 		}

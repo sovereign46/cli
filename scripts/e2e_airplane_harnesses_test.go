@@ -194,11 +194,16 @@ func TestAirplaneHarnessTerminatesDetachedCandidateServices(t *testing.T) {
 	checks := fmt.Sprintf(`python3 - %q %q %q <<'PY'
 import subprocess
 import sys
+import time
 pid_file, llama, gateway = sys.argv[1:]
 processes = [
     subprocess.Popen([llama], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True),
     subprocess.Popen([gateway], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True),
 ]
+# Darwin may report a detached child's executable to ps after Popen returns.
+time.sleep(1)
+if any(process.poll() is not None for process in processes):
+    raise SystemExit("fake detached service exited before the runner could inspect it")
 with open(pid_file, "w", encoding="utf-8") as output:
     for process in processes:
         print(process.pid, file=output)

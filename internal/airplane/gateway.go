@@ -66,8 +66,11 @@ func (s Service) startGateway(ctx context.Context, assumeVerifiedModel bool) err
 		return err
 	}
 	env := append([]string{"S46_ENV=airplane", "S46_ADDR=127.0.0.1:8080", "S46_LOCAL_MODEL=" + s.backendModel()}, AirplaneGatewayEnv(s.Env)...)
-	pin, pinErr := embeddedGatewayReleasePin(runtime.GOOS, runtime.GOARCH)
+	pin, pinErr := s.gatewayPin(runtime.GOOS, runtime.GOARCH)
 	if pinErr != nil {
+		if s.candidateMode() {
+			return fmt.Errorf("unsigned diagnostic Gateway pin is invalid: %w", pinErr)
+		}
 		return s.startDevelopmentGateway(command, env)
 	}
 	if err := s.cleanupStaleGatewayRuntimeSnapshot(); err != nil {
@@ -124,7 +127,7 @@ func (s Service) GatewayInstallDescription() string {
 	if _, ok := s.seamGatewayDownloadAvailable(); ok {
 		return fmt.Sprintf("test-qualified gateway release into %s", s.gatewayInstallDir())
 	}
-	pin, err := embeddedGatewayReleasePin(runtime.GOOS, runtime.GOARCH)
+	pin, err := s.gatewayPin(runtime.GOOS, runtime.GOARCH)
 	if err != nil {
 		return "unavailable until an exact gateway release and platform digests are approved"
 	}
@@ -166,11 +169,14 @@ func (s Service) gatewayCommand() (gatewayCommand, bool) {
 		}
 		return gatewayCommand{Path: path, Description: path}, true
 	}
-	if pin, err := embeddedGatewayReleasePin(runtime.GOOS, runtime.GOARCH); err == nil {
+	if pin, err := s.gatewayPin(runtime.GOOS, runtime.GOARCH); err == nil {
 		path := s.managedGatewayBinaryPath()
 		if s.verifyManagedGateway(pin) == nil {
 			return gatewayCommand{Path: path, Description: path}, true
 		}
+	}
+	if s.candidateMode() {
+		return gatewayCommand{}, false
 	}
 	return s.developmentGatewayCommand()
 }
