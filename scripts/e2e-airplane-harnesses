@@ -1540,6 +1540,8 @@ write_qualification_evidence() {
 import datetime
 import json
 import os
+import platform
+import socket
 import stat
 import sys
 
@@ -1590,6 +1592,53 @@ if identity.get("kind") != "archive":
     raise SystemExit("release qualification evidence requires a validated release archive")
 if qualification.get("requested") is not True:
     raise SystemExit("cannot write qualification evidence for a non-qualification run")
+if os.environ.get("S46_E2E_PROVENANCE", "actions") == "direct-mac":
+    if platform.system() != "Darwin" or platform.machine() != "arm64":
+        raise SystemExit("direct Mac qualification must run on Darwin/arm64")
+    execution = {
+        "provenance": "direct-mac",
+        "runnerOs": platform.system(),
+        "runnerArch": platform.machine(),
+        "osVersion": platform.mac_ver()[0],
+        "runnerName": socket.gethostname(),
+        "releaseAuthorityOrigin": os.environ["S46_E2E_RELEASE_AUTHORITY_ORIGIN"],
+        "releaseAuthorityId": os.environ["S46_E2E_RELEASE_AUTHORITY_ID"],
+        "candidateSequence": int(os.environ["S46_E2E_CANDIDATE_SEQUENCE"]),
+        "candidateEtag": os.environ["S46_E2E_CANDIDATE_ETAG"],
+        "candidateRecordSha256": os.environ["S46_E2E_CANDIDATE_RECORD_SHA256"],
+        "candidateStaleIfMatchStatus": int(os.environ["S46_E2E_CANDIDATE_STALE_IF_MATCH_STATUS"]),
+        "isolationProfileSha256": os.environ["S46_E2E_ISOLATION_PROFILE_SHA256"],
+    }
+else:
+    execution = {
+        "runnerOs": os.environ["S46_E2E_RUNNER_OS"],
+        "runnerArch": os.environ["S46_E2E_RUNNER_ARCH"],
+        "osVersion": os.environ["S46_E2E_OS_VERSION"],
+        "runnerEnvironment": os.environ["S46_E2E_RUNNER_ENVIRONMENT"],
+        "runnerName": os.environ["S46_E2E_RUNNER_NAME"],
+        "workflowRef": os.environ["S46_E2E_WORKFLOW_REF"],
+        "workflowSha": os.environ["S46_E2E_WORKFLOW_SHA"],
+        "runId": os.environ["S46_E2E_RUN_ID"],
+        "runAttempt": os.environ["S46_E2E_RUN_ATTEMPT"],
+        "environment": os.environ["S46_E2E_ENVIRONMENT"],
+        "environmentApprover": os.environ["S46_E2E_ENVIRONMENT_APPROVER"],
+        "environmentReviewers": os.environ["S46_E2E_ENVIRONMENT_REVIEWERS"].split(","),
+        "environmentPreventSelfReview": os.environ["S46_E2E_ENVIRONMENT_PREVENT_SELF_REVIEW"] == "true",
+        "environmentAdminsBypass": os.environ["S46_E2E_ENVIRONMENT_ADMINS_BYPASS"] == "true",
+        "releaseAuthorityOrigin": os.environ["S46_E2E_RELEASE_AUTHORITY_ORIGIN"],
+        "releaseAuthorityId": os.environ["S46_E2E_RELEASE_AUTHORITY_ID"],
+        "candidateSequence": int(os.environ["S46_E2E_CANDIDATE_SEQUENCE"]),
+        "candidateEtag": os.environ["S46_E2E_CANDIDATE_ETAG"],
+        "candidateRecordSha256": os.environ["S46_E2E_CANDIDATE_RECORD_SHA256"],
+        "candidateStaleIfMatchStatus": int(os.environ["S46_E2E_CANDIDATE_STALE_IF_MATCH_STATUS"]),
+        "environmentApprovalSha256": os.environ["S46_E2E_ENVIRONMENT_APPROVAL_SHA256"],
+        "runnerIdentitySha256": os.environ["S46_E2E_RUNNER_IDENTITY_SHA256"],
+        "isolationProfileSha256": os.environ["S46_E2E_ISOLATION_PROFILE_SHA256"],
+    }
+build = {**identity["build"], "sourceTree": os.environ["S46_E2E_SOURCE_TREE"]}
+if os.environ.get("S46_E2E_PROVENANCE", "actions") != "direct-mac":
+    build["buildReceiptSha256"] = os.environ["S46_E2E_BUILD_RECEIPT_SHA256"]
+    build["buildSignatureSha256"] = os.environ["S46_E2E_BUILD_SIGNATURE_SHA256"]
 evidence = {
     "schema": "s46.release-qualification.v1",
     "result": "passed",
@@ -1605,12 +1654,7 @@ evidence = {
         "size": identity["binarySize"],
         "sourceMode": identity["binarySourceMode"],
     },
-    "build": {
-        **identity["build"],
-        "sourceTree": os.environ["S46_E2E_SOURCE_TREE"],
-        "buildReceiptSha256": os.environ["S46_E2E_BUILD_RECEIPT_SHA256"],
-        "buildSignatureSha256": os.environ["S46_E2E_BUILD_SIGNATURE_SHA256"],
-    },
+    "build": build,
     "qualification": {
         "expectedVersion": qualification["expectedVersion"],
         "expectedCommit": qualification["expectedCommit"],
@@ -1618,31 +1662,7 @@ evidence = {
         "filesystemIsolation": "external",
         "capabilities": capabilities,
         "airplaneHarnesses": harnesses,
-        "execution": {
-            "runnerOs": os.environ["S46_E2E_RUNNER_OS"],
-            "runnerArch": os.environ["S46_E2E_RUNNER_ARCH"],
-            "osVersion": os.environ["S46_E2E_OS_VERSION"],
-            "runnerEnvironment": os.environ["S46_E2E_RUNNER_ENVIRONMENT"],
-            "runnerName": os.environ["S46_E2E_RUNNER_NAME"],
-            "workflowRef": os.environ["S46_E2E_WORKFLOW_REF"],
-            "workflowSha": os.environ["S46_E2E_WORKFLOW_SHA"],
-            "runId": os.environ["S46_E2E_RUN_ID"],
-            "runAttempt": os.environ["S46_E2E_RUN_ATTEMPT"],
-            "environment": os.environ["S46_E2E_ENVIRONMENT"],
-            "environmentApprover": os.environ["S46_E2E_ENVIRONMENT_APPROVER"],
-            "environmentReviewers": os.environ["S46_E2E_ENVIRONMENT_REVIEWERS"].split(","),
-            "environmentPreventSelfReview": os.environ["S46_E2E_ENVIRONMENT_PREVENT_SELF_REVIEW"] == "true",
-            "environmentAdminsBypass": os.environ["S46_E2E_ENVIRONMENT_ADMINS_BYPASS"] == "true",
-            "releaseAuthorityOrigin": os.environ["S46_E2E_RELEASE_AUTHORITY_ORIGIN"],
-            "releaseAuthorityId": os.environ["S46_E2E_RELEASE_AUTHORITY_ID"],
-            "candidateSequence": int(os.environ["S46_E2E_CANDIDATE_SEQUENCE"]),
-            "candidateEtag": os.environ["S46_E2E_CANDIDATE_ETAG"],
-            "candidateRecordSha256": os.environ["S46_E2E_CANDIDATE_RECORD_SHA256"],
-            "candidateStaleIfMatchStatus": int(os.environ["S46_E2E_CANDIDATE_STALE_IF_MATCH_STATUS"]),
-            "environmentApprovalSha256": os.environ["S46_E2E_ENVIRONMENT_APPROVAL_SHA256"],
-            "runnerIdentitySha256": os.environ["S46_E2E_RUNNER_IDENTITY_SHA256"],
-            "isolationProfileSha256": os.environ["S46_E2E_ISOLATION_PROFILE_SHA256"],
-        },
+        "execution": execution,
         "runner": {
             "script": runtime_identity["runner"],
             "id": cleanup_identity["runnerId"],
@@ -1657,6 +1677,15 @@ evidence = {
 }
 if runtime is not None:
     evidence["qualification"]["runtime"] = runtime
+if runtime is not None and os.environ.get("S46_E2E_PROVENANCE", "actions") == "direct-mac":
+    evidence["qualification"]["installation"] = {
+        "command": "s46 airplane setup --mode=on --harness=pi --yes",
+        "harnessConfiguration": ["s46 connect local --harness=claude-code",
+                                 "s46 connect local --harness=codex"],
+        "home": "runner-created",
+        "tmpdir": "runner-created",
+        "installedRuntimeVerified": True,
+    }
 flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
 try:
     output_fd = os.open(destination, flags, 0o600)
@@ -2181,6 +2210,7 @@ network_isolation="${S46_E2E_NETWORK_ISOLATION:-proxy}"
 filesystem_isolation="${S46_E2E_FILESYSTEM_ISOLATION:-none}"
 qualification="${S46_E2E_QUALIFICATION:-0}"
 qualification_scope="${S46_E2E_QUALIFICATION_SCOPE:-airplane}"
+qualification_provenance="${S46_E2E_PROVENANCE:-actions}"
 expected_version="${S46_E2E_EXPECTED_VERSION:-}"
 expected_commit="${S46_E2E_EXPECTED_COMMIT:-}"
 qualification_evidence="${S46_E2E_QUALIFICATION_EVIDENCE:-}"
@@ -2254,6 +2284,16 @@ case "$qualification_scope" in
   cloud|airplane) ;;
   *) fail "S46_E2E_QUALIFICATION_SCOPE must be cloud or airplane" ;;
 esac
+case "$qualification_provenance" in
+  actions|direct-mac) ;;
+  *) fail "S46_E2E_PROVENANCE must be actions or direct-mac" ;;
+esac
+if [ "$qualification_provenance" = "direct-mac" ] && [ "$qualification_scope" != "airplane" ]; then
+  fail "direct Mac provenance is only valid for airplane qualification"
+fi
+if [ "$qualification" = "1" ] && [ "$qualification_provenance" = "direct-mac" ] && [ "$keep_sandbox" != "1" ]; then
+  fail "direct Mac qualification requires a retained private sandbox for reviewer inspection"
+fi
 if [ "$qualification" = "1" ] && [ "$network_isolation" != "external" ]; then
   fail "S46_E2E_QUALIFICATION=1 requires a pre-established external OS-level egress block"
 fi
@@ -2264,27 +2304,43 @@ if [ "$qualification" = "1" ]; then
   [ -n "$expected_version" ] || fail "S46_E2E_QUALIFICATION=1 requires S46_E2E_EXPECTED_VERSION"
   [ -n "$expected_commit" ] || fail "S46_E2E_QUALIFICATION=1 requires S46_E2E_EXPECTED_COMMIT"
   [ -n "$qualification_evidence" ] || fail "S46_E2E_QUALIFICATION=1 requires S46_E2E_QUALIFICATION_EVIDENCE"
-  for value in "$qualification_runner_os" "$qualification_runner_arch" "$qualification_os_version" "$qualification_runner_environment" "$qualification_runner_name" "$qualification_workflow_ref" "$qualification_workflow_sha" "$qualification_run_id" "$qualification_run_attempt" "$qualification_environment" "$qualification_environment_approver" "$qualification_environment_reviewers" "$qualification_environment_prevent_self_review" "$qualification_environment_admins_bypass" "$qualification_source_tree" "$qualification_build_receipt_sha256" "$qualification_build_signature_sha256" "$qualification_release_authority_origin" "$qualification_release_authority_id" "$qualification_candidate_sequence" "$qualification_candidate_etag" "$qualification_candidate_record_sha256" "$qualification_candidate_stale_if_match_status"; do
-    [ -n "$value" ] || fail "qualification requires complete runner, OS, workflow, run, environment, and authority identity"
-  done
-  [ "$qualification_environment_reviewers" = "goncalossilva" ] || fail "qualification requires the exact protected-environment reviewer set"
-  [ "$qualification_environment_prevent_self_review" = "true" ] || fail "qualification environment must prevent self-review"
-  [ "$qualification_environment_admins_bypass" = "false" ] || fail "qualification environment must prevent administrator bypass"
-  [ "$qualification_release_authority_origin" = "https://models.s46.dev/release-authority/v1" ] || fail "qualification requires the exact production release authority"
-  [[ "$qualification_release_authority_id" =~ ^sha256-[0-9a-f]{64}$ ]] || fail "qualification requires the derived release authority id"
-  [ "$qualification_candidate_sequence" = "2" ] || fail "qualification requires the exact sequence-2 candidate"
-  [[ "$qualification_candidate_etag" =~ ^\"sha256:[0-9a-f]{64}\"$ ]] || fail "qualification requires the exact strong sequence-2 ETag"
-  [ "$qualification_candidate_stale_if_match_status" = "412" ] || fail "qualification requires empirical stale authority write rejection"
-  case "$qualification_run_id:$qualification_run_attempt" in
-    *[!0-9:]*|*:|:*) fail "qualification workflow run identity must be numeric" ;;
-  esac
-  case "$qualification_environment_approval_sha256:$qualification_runner_identity_sha256:$qualification_isolation_profile_sha256:$qualification_source_tree:$qualification_build_receipt_sha256:$qualification_build_signature_sha256:$qualification_candidate_record_sha256" in
-    [0-9a-f][0-9a-f][0-9a-f][0-9a-f]*:[0-9a-f][0-9a-f][0-9a-f][0-9a-f]*:[0-9a-f][0-9a-f][0-9a-f][0-9a-f]*:[0-9a-f][0-9a-f][0-9a-f][0-9a-f]*:[0-9a-f][0-9a-f][0-9a-f][0-9a-f]*:[0-9a-f][0-9a-f][0-9a-f][0-9a-f]*:[0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
-    *) fail "qualification requires source, build, authority, approval, runner, and isolation SHA-256 identities" ;;
-  esac
-  case "$qualification_environment_approval_sha256$qualification_runner_identity_sha256$qualification_isolation_profile_sha256$qualification_source_tree$qualification_build_receipt_sha256$qualification_build_signature_sha256$qualification_candidate_record_sha256" in *[!0-9a-f]*) fail "qualification execution digests must be lowercase hexadecimal" ;; esac
-  [ "${#qualification_environment_approval_sha256}" -eq 64 ] && [ "${#qualification_runner_identity_sha256}" -eq 64 ] && [ "${#qualification_isolation_profile_sha256}" -eq 64 ] && [ "${#qualification_build_receipt_sha256}" -eq 64 ] && [ "${#qualification_build_signature_sha256}" -eq 64 ] && [ "${#qualification_candidate_record_sha256}" -eq 64 ] || fail "qualification execution digests must be SHA-256"
-  case "${#qualification_source_tree}" in 40|64) ;; *) fail "qualification source tree must be a full object id" ;; esac
+  if [ "$qualification_provenance" = "actions" ]; then
+    for value in "$qualification_runner_os" "$qualification_runner_arch" "$qualification_os_version" "$qualification_runner_environment" "$qualification_runner_name" "$qualification_workflow_ref" "$qualification_workflow_sha" "$qualification_run_id" "$qualification_run_attempt" "$qualification_environment" "$qualification_environment_approver" "$qualification_environment_reviewers" "$qualification_environment_prevent_self_review" "$qualification_environment_admins_bypass" "$qualification_source_tree" "$qualification_build_receipt_sha256" "$qualification_build_signature_sha256" "$qualification_release_authority_origin" "$qualification_release_authority_id" "$qualification_candidate_sequence" "$qualification_candidate_etag" "$qualification_candidate_record_sha256" "$qualification_candidate_stale_if_match_status"; do
+      [ -n "$value" ] || fail "qualification requires complete runner, OS, workflow, run, environment, and authority identity"
+    done
+    [ "$qualification_environment_reviewers" = "goncalossilva" ] || fail "qualification requires the exact protected-environment reviewer set"
+    [ "$qualification_environment_prevent_self_review" = "true" ] || fail "qualification environment must prevent self-review"
+    [ "$qualification_environment_admins_bypass" = "false" ] || fail "qualification environment must prevent administrator bypass"
+    [ "$qualification_release_authority_origin" = "https://models.s46.dev/release-authority/v1" ] || fail "qualification requires the exact production release authority"
+    [[ "$qualification_release_authority_id" =~ ^sha256-[0-9a-f]{64}$ ]] || fail "qualification requires the derived release authority id"
+    [ "$qualification_candidate_sequence" = "2" ] || fail "qualification requires the exact sequence-2 candidate"
+    [[ "$qualification_candidate_etag" =~ ^\"sha256:[0-9a-f]{64}\"$ ]] || fail "qualification requires the exact strong sequence-2 ETag"
+    [ "$qualification_candidate_stale_if_match_status" = "412" ] || fail "qualification requires empirical stale authority write rejection"
+    case "$qualification_run_id:$qualification_run_attempt" in
+      *[!0-9:]*|*:|:*) fail "qualification workflow run identity must be numeric" ;;
+    esac
+    case "$qualification_environment_approval_sha256:$qualification_runner_identity_sha256:$qualification_isolation_profile_sha256:$qualification_source_tree:$qualification_build_receipt_sha256:$qualification_build_signature_sha256:$qualification_candidate_record_sha256" in
+      [0-9a-f][0-9a-f][0-9a-f][0-9a-f]*:[0-9a-f][0-9a-f][0-9a-f][0-9a-f]*:[0-9a-f][0-9a-f][0-9a-f][0-9a-f]*:[0-9a-f][0-9a-f][0-9a-f][0-9a-f]*:[0-9a-f][0-9a-f][0-9a-f][0-9a-f]*:[0-9a-f][0-9a-f][0-9a-f][0-9a-f]*:[0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
+      *) fail "qualification requires source, build, authority, approval, runner, and isolation SHA-256 identities" ;;
+    esac
+    case "$qualification_environment_approval_sha256$qualification_runner_identity_sha256$qualification_isolation_profile_sha256$qualification_source_tree$qualification_build_receipt_sha256$qualification_build_signature_sha256$qualification_candidate_record_sha256" in *[!0-9a-f]*) fail "qualification execution digests must be lowercase hexadecimal" ;; esac
+    [ "${#qualification_environment_approval_sha256}" -eq 64 ] && [ "${#qualification_runner_identity_sha256}" -eq 64 ] && [ "${#qualification_isolation_profile_sha256}" -eq 64 ] && [ "${#qualification_build_receipt_sha256}" -eq 64 ] && [ "${#qualification_build_signature_sha256}" -eq 64 ] && [ "${#qualification_candidate_record_sha256}" -eq 64 ] || fail "qualification execution digests must be SHA-256"
+    case "${#qualification_source_tree}" in 40|64) ;; *) fail "qualification source tree must be a full object id" ;; esac
+  else
+    [ "$(uname -s)" = "Darwin" ] && [ "$(uname -m)" = "arm64" ] || fail "direct Mac qualification requires a Darwin/arm64 runner"
+    [[ "$(sw_vers -productVersion)" =~ ^26\.[0-9]+(\.[0-9]+)?$ ]] || fail "direct Mac qualification requires macOS 26"
+    for value in "$qualification_source_tree" "$qualification_release_authority_origin" "$qualification_release_authority_id" "$qualification_candidate_sequence" "$qualification_candidate_etag" "$qualification_candidate_record_sha256" "$qualification_candidate_stale_if_match_status" "$qualification_isolation_profile_sha256"; do
+      [ -n "$value" ] || fail "direct Mac qualification requires source, build, authority, and isolation identities"
+    done
+    [ "$qualification_release_authority_origin" = "https://models.s46.dev/release-authority/v1" ] || fail "direct Mac qualification requires the production release authority"
+    [[ "$qualification_release_authority_id" =~ ^sha256-[0-9a-f]{64}$ ]] || fail "direct Mac qualification requires a derived authority id"
+    [ "$qualification_candidate_sequence" = "2" ] && [ "$qualification_candidate_stale_if_match_status" = "412" ] || fail "direct Mac qualification requires the observed sequence-2 CAS check"
+    [[ "$qualification_candidate_etag" =~ ^\"sha256:[0-9a-f]{64}\"$ ]] || fail "direct Mac qualification requires a strong sequence-2 ETag"
+    for value in "$qualification_candidate_record_sha256" "$qualification_isolation_profile_sha256"; do
+      [[ "$value" =~ ^[0-9a-f]{64}$ ]] || fail "direct Mac qualification identities must be SHA-256"
+    done
+    case "${#qualification_source_tree}" in 40|64) ;; *) fail "direct Mac source tree must be a full object id" ;; esac
+  fi
 fi
 if [ "$qualification" = "1" ] && [ "$qualification_scope" = "airplane" ]; then
   [ "$verify_candidate_only" = "0" ] || fail "airplane qualification cannot be combined with S46_E2E_VERIFY_CANDIDATE_ONLY=1"
@@ -2300,7 +2356,7 @@ if [ "$qualification" = "1" ] && [ "$qualification_scope" = "airplane" ]; then
   [ -n "$qualification_gateway_sha256" ] || fail "airplane qualification requires S46_E2E_GATEWAY_SHA256"
 fi
 
-mkdir -p "$sandbox/home" "$sandbox/bin" "$sandbox/project" "$sandbox/candidate" "$sandbox/invocations"
+mkdir -p "$sandbox/home" "$sandbox/tmp" "$sandbox/bin" "$sandbox/project" "$sandbox/candidate" "$sandbox/invocations"
 capture_candidate_invocation_root_identity
 candidate_seed="$sandbox/candidate/s46"
 candidate_metadata="$sandbox/candidate-package.json"
@@ -2326,6 +2382,8 @@ if [ "$qualification" = "1" ]; then
 fi
 
 export HOME="$sandbox/home"
+export TMPDIR="$sandbox/tmp"
+export S46_E2E_PROVENANCE="$qualification_provenance"
 export XDG_CONFIG_HOME="$HOME/.config"
 export XDG_DATA_HOME="$HOME/.local/share"
 export XDG_CACHE_HOME="$HOME/.cache"
@@ -2340,7 +2398,11 @@ else
   export S46_AIRPLANE_MODEL_DIR="${S46_AIRPLANE_MODEL_DIR:-$host_home/.local/share/s46/models/devstral}"
   candidate_path="$sandbox/bin:$PATH"
 fi
-export S46_LOG_DIR="${S46_LOG_DIR:-$host_home/.cache/s46}"
+if [ "$qualification" = "1" ] && [ "$qualification_provenance" = "direct-mac" ]; then
+  export S46_LOG_DIR="$sandbox/logs"
+else
+  export S46_LOG_DIR="${S46_LOG_DIR:-$host_home/.cache/s46}"
+fi
 export PI_OFFLINE=1
 export S46_E2E_RUNNER_ID="$runner_identity"
 export S46_AIRPLANE_TOKEN="${S46_AIRPLANE_TOKEN:-local-airplane-e2e-token}"
