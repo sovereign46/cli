@@ -151,8 +151,22 @@ def diagnostic_files(root, manifest_identity):
     return {item["path"]: evidence_file(root, item) for item in records}
 
 
-def observed_file(files, root, record, name):
-    require(isinstance(record, dict) and record.get("path") == str(root / name) and
+def recorded_origin(result):
+    before = result.get("llamaBeforeRequest")
+    process = before.get("process") if isinstance(before, dict) else None
+    executable = process.get("executable") if isinstance(process, dict) else None
+    suffix = "/runtime/llama/llama-b9270/llama-server"
+    require(isinstance(executable, str) and executable.endswith(suffix),
+            "diagnostic recorded origin is missing")
+    origin = executable[:-len(suffix)]
+    require(origin.startswith("/") and origin != "/" and str(Path(origin)) == origin and
+            not any(part in (".", "..") for part in Path(origin).parts),
+            "diagnostic recorded origin is not canonical")
+    return Path(origin)
+
+
+def observed_file(files, recorded_root, record, name):
+    require(isinstance(record, dict) and record.get("path") == str(recorded_root / name) and
             record.get("sha256") == sha256(files[name]) and
             type(record.get("sizeBytes")) is int and record["sizeBytes"] == len(files[name]) and
             type(record.get("exit")) is int and record["exit"] == 0,
@@ -160,17 +174,17 @@ def observed_file(files, root, record, name):
     return files[name].decode("utf-8", errors="replace")
 
 
-def verify_process(files, root, snapshot, role, binary_sha, binary_path, model=None):
+def verify_process(files, recorded_root, snapshot, role, binary_sha, binary_path, model=None):
     require(isinstance(snapshot, dict) and isinstance(snapshot.get("process"), dict),
             f"diagnostic {role} process is missing")
     process = snapshot["process"]
     pid = process.get("pid")
-    require(type(pid) is int and pid > 0 and process.get("executable") == str(root / binary_path) and
+    require(type(pid) is int and pid > 0 and process.get("executable") == str(recorded_root / binary_path) and
             process.get("executableSha256") == binary_sha, f"diagnostic {role} executable differs")
-    lsof = observed_file(files, root, snapshot.get("lsof"), f"out/{role}-lsof.txt")
-    observed_file(files, root, snapshot.get("ps"), f"out/{role}-ps.txt")
-    vmmap = observed_file(files, root, snapshot.get("vmmap"), f"out/{role}-vmmap.txt")
-    require(any(line.split()[1:2] == [str(pid)] and line.endswith(str(root / binary_path))
+    lsof = observed_file(files, recorded_root, snapshot.get("lsof"), f"out/{role}-lsof.txt")
+    observed_file(files, recorded_root, snapshot.get("ps"), f"out/{role}-ps.txt")
+    vmmap = observed_file(files, recorded_root, snapshot.get("vmmap"), f"out/{role}-vmmap.txt")
+    require(any(line.split()[1:2] == [str(pid)] and line.endswith(str(recorded_root / binary_path))
                 for line in lsof.splitlines()), f"diagnostic {role} executable is not in lsof")
     if model is not None:
         path = model["path"]
@@ -178,16 +192,17 @@ def verify_process(files, root, snapshot, role, binary_sha, binary_path, model=N
                 any(line.split()[1:2] == [str(pid)] and
                     re.search(rf"\b{model['sizeBytes']}\s+{model['inode']}\s+{re.escape(path)}$", line)
                     for line in lsof.splitlines()) and path in vmmap and
-                str(root / "runtime/llama/llama-b9270/libggml-metal.0.12.0.dylib") in vmmap,
+                str(recorded_root / "runtime/llama/llama-b9270/libggml-metal.0.12.0.dylib") in vmmap,
                 f"diagnostic {role} model or Metal mapping is missing")
     return pid
 
 
-def verify_diagnostic(files, root, candidate_record):
+def verify_diagnostic(files, candidate_record):
     result = parse_json(files["result.json"], "diagnostic result")
     require(isinstance(result, dict) and result.get("kind") == DIAGNOSTIC_KIND and
             result.get("error") is None and result.get("projectInitiallyEmpty") is True,
             "diagnostic result or fresh project differs")
+    origin = recorded_origin(result)
     inputs = result.get("inputs")
     gateway = candidate_record["gateway"]
     require(isinstance(inputs, dict) and inputs.get("gatewayArchiveSha256") == gateway["archiveSha256"] and
@@ -209,15 +224,15 @@ def verify_diagnostic(files, root, candidate_record):
             probe[name].get("type") == "PermissionError" and
             type(probe[name].get("errno")) is int and probe[name]["errno"] == 1
             for name in ("file", "network")), "diagnostic sandbox denial is missing")
-    before = verify_process(files, root, result.get("llamaBeforeRequest"), "llama-before",
+    before = verify_process(files, origin, result.get("llamaBeforeRequest"), "llama-before",
                             LLAMA_BINARY_SHA256, "runtime/llama/llama-b9270/llama-server", model)
-    after = verify_process(files, root, result.get("llamaAfterRequest"), "llama-after",
+    after = verify_process(files, origin, result.get("llamaAfterRequest"), "llama-after",
                            LLAMA_BINARY_SHA256, "runtime/llama/llama-b9270/llama-server", model)
     require(before == after, "diagnostic llama process changed during requests")
-    verify_process(files, root, result.get("gatewayBeforeRequest"), "gateway-before",
+    verify_process(files, origin, result.get("gatewayBeforeRequest"), "gateway-before",
                    gateway["binarySha256"], "gateway/s46-gateway")
     verify_client_results(files, result.get("harnesses"))
-    verify_streams(files, root, result.get("streams"))
+    verify_streams(files, origin, result.get("streams"))
     inference = result.get("inference")
     choices = inference.get("body", {}).get("choices") if isinstance(inference, dict) and isinstance(
         inference.get("body"), dict) else None
@@ -258,7 +273,7 @@ def verify_client_results(files, harnesses):
                 f"diagnostic {name} client did not pass")
 
 
-def verify_streams(files, root, streams):
+def verify_streams(files, recorded_root, streams):
     terminals = {"openai": b"data: [DONE]", "anthropic": b"event: message_stop",
                  "codex": b"event: response.completed"}
     require(isinstance(streams, dict) and set(streams) == set(terminals),
@@ -267,7 +282,7 @@ def verify_streams(files, root, streams):
         record = streams[name]
         raw = files[f"out/{name}-stream.sse"]
         final_block = raw.strip().split(b"\n\n")[-1]
-        require(isinstance(record, dict) and record.get("path") == str(root / f"out/{name}-stream.sse") and
+        require(isinstance(record, dict) and record.get("path") == str(recorded_root / f"out/{name}-stream.sse") and
                 type(record.get("status")) is int and record["status"] == 200 and
                 record.get("contentType") == "text/event-stream" and
                 record.get("rawSha256") == sha256(raw) and
@@ -301,7 +316,7 @@ def validate_qualification(value, evidence_root, candidate_record, candidate_sha
     require(isinstance(manifest_identity, dict) and manifest_identity.get("path") ==
             "evidence-manifest.json", "qualification does not bind the diagnostic manifest")
     diagnostic_bytes = diagnostic_files(evidence_root, manifest_identity)
-    verify_diagnostic(diagnostic_bytes, evidence_root, candidate_record)
+    verify_diagnostic(diagnostic_bytes, candidate_record)
     for name in ("independentIsolationReview", "loadedProcessBinding"):
         item = evidence[name]
         require(isinstance(item, dict) and item.get("path") not in diagnostic_bytes and
