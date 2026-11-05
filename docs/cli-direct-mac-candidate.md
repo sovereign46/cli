@@ -46,8 +46,7 @@ The output contains deterministic sequence-1 and sequence-2 candidate records,
 their ETags, a stale-write probe, and the derived authority ID. The record's
 `bundleSha256` is the SHA-256 of the canonical sorted asset inventory; its
 annotation and asset entry separately pin the Mac CLI archive. This command
-does not upload the candidate, create release or qualification signatures,
-append a qualified record, tag, publish, or enable `qualified:true`. A separate
-Mac CLI qualification and publication decision must define those steps, including
-verification of the CLI's own build and end-to-end installer run. The existing
+does not upload the candidate, create signatures, append a qualified record,
+tag, publish, or enable `qualified:true`. The remaining direct Mac steps are in
+[`cli-direct-mac-release.md`](cli-direct-mac-release.md). The existing
 four-platform profile, updater, and release workflow remain unchanged.

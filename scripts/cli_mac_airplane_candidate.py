@@ -32,13 +32,13 @@ PROFILE = {
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
-def candidate_assets(bundle, expected_archive_sha256, gateway_bundle, qualification, evidence_root):
+def candidate_assets(bundle, expected_archive_sha256, gateway_bundle, qualification, evidence_root, *, extra=()):
     bundle = Path(bundle)
     if not bundle.is_absolute() or bundle.is_symlink() or not bundle.is_dir():
         raise SystemExit("Mac candidate bundle must be an absolute real directory")
     entries = list(bundle.iterdir())
-    if len(entries) != len(PROFILE) or {item.name for item in entries} != set(PROFILE):
-        raise SystemExit("Mac candidate bundle must contain only its four exact assets")
+    if len(entries) != len(PROFILE) + len(extra) or {item.name for item in entries} != set(PROFILE) | set(extra):
+        raise SystemExit("Mac candidate bundle does not contain its exact asset profile")
     if not SHA256.fullmatch(expected_archive_sha256):
         raise SystemExit("Mac CLI archive needs an independently supplied SHA-256")
 

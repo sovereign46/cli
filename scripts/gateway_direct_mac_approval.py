@@ -358,16 +358,16 @@ def checked_subject(bundle, qualification, evidence_root):
     return canonical(subject_for(candidate_record, candidate_raw, qualification_raw))
 
 
-def trusted_reviewers(trust_path=None):
+def trusted_reviewers(trust_path=None, *, schema=TRUST_SCHEMA, purpose=PURPOSE, label="Gateway"):
     trust, _ = read_canonical(trust_path or TRUST, 4096)
-    require(set(trust) == {"schema", "purpose", "reviewers"} and trust["schema"] == TRUST_SCHEMA
-            and trust["purpose"] == PURPOSE and isinstance(trust["reviewers"], dict)
-            and set(trust["reviewers"]) == set(REVIEWERS), "Gateway approval trust is not explicitly enrolled")
+    require(set(trust) == {"schema", "purpose", "reviewers"} and trust["schema"] == schema
+            and trust["purpose"] == purpose and isinstance(trust["reviewers"], dict)
+            and set(trust["reviewers"]) == set(REVIEWERS), f"{label} approval trust is not explicitly enrolled")
     keys = {}
     for reviewer in REVIEWERS:
         key = trust["reviewers"][reviewer]
         require(isinstance(key, str) and re.fullmatch(r"ssh-ed25519 [A-Za-z0-9+/]+={0,2}", key),
-                f"Gateway approval key for {reviewer} is not enrolled")
+                f"{label} approval key for {reviewer} is not enrolled")
         try:
             wire = base64.b64decode(key.split()[1], validate=True)
         except ValueError as error:
@@ -375,20 +375,20 @@ def trusted_reviewers(trust_path=None):
         require(len(wire) == 51 and wire[:15] == b"\x00\x00\x00\x0bssh-ed25519" and wire[15:19] == b"\x00\x00\x00 " and
                 base64.b64encode(wire).decode() == key.split()[1], f"invalid SSH Ed25519 key for {reviewer}")
         keys[reviewer] = key
-    require(keys[REVIEWERS[0]] != keys[REVIEWERS[1]], "Gateway approval reviewers must have distinct keys")
+    require(keys[REVIEWERS[0]] != keys[REVIEWERS[1]], f"{label} approval reviewers must have distinct keys")
     return keys
 
 
-def verify_approval(subject, reviewer, signature, keys):
+def verify_approval(subject, reviewer, signature, keys, *, purpose=PURPOSE, label="Gateway"):
     require(reviewer in REVIEWERS, "Gateway approval reviewer is not recognized")
     read_exact(signature, 8192)
     with tempfile.TemporaryDirectory(prefix="s46-gateway-approval-") as temporary:
         signers = Path(temporary) / "allowed_signers"
         signers.write_text(f"{reviewer} {keys[reviewer]}\n", encoding="ascii")
         result = subprocess.run(["/usr/bin/ssh-keygen", "-Y", "verify", "-f", str(signers),
-                                 "-I", reviewer, "-n", PURPOSE, "-s", str(signature)],
+                                 "-I", reviewer, "-n", purpose, "-s", str(signature)],
                                 input=subject, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
-    require(result.returncode == 0, f"{reviewer} signature is invalid for the exact Gateway subject")
+    require(result.returncode == 0, f"{reviewer} signature is invalid for the exact {label} subject")
 
 
 def verify_approvals(subject, approvals):
