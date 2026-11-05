@@ -3,7 +3,9 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +20,61 @@ import (
 	"github.com/sovereign46/cli/internal/api"
 	"github.com/sovereign46/cli/internal/config"
 )
+
+type fixedProductionTeamClient struct {
+	api.Client
+	team api.Team
+}
+
+func (c fixedProductionTeamClient) Team(_ context.Context, name string, opts api.TeamOptions) (api.Team, error) {
+	if name != c.team.Name || opts.AccessToken == "" {
+		return api.Team{}, fmt.Errorf("unexpected unauthenticated team discovery")
+	}
+	return c.team, nil
+}
+
+func TestProductionTwoModelConnectMatrixWithInertTeamFixture(t *testing.T) {
+	env := testEnv(t)
+	requireOK(t, run(t, env, "login", "--email", "dscape@s46.dev"))
+	app, err := newApp(Runtime{Env: env}, &options{noInput: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	trueValue, falseValue := true, false
+	team := api.Team{
+		Name: api.DefaultTeam, Endpoint: api.DefaultGatewayURL,
+		DefaultModel:        api.DevstralModelID,
+		Models:              []string{api.DevstralModelID, api.DeepSeekModelID},
+		ReleaseChannel:      api.ProductionReleaseChannel,
+		ProductionCertified: &trueValue, ProductionAPIPath: &trueValue,
+		ModelMetadata: map[string]api.ModelRuntime{
+			api.DevstralModelID: {Engine: "llama.cpp", Version: "b72050d03ae14bb3cb5138ecefab3f3f65157d31", ContextWindow: 65536, MaxTokens: 4096, Reasoning: &falseValue},
+			api.DeepSeekModelID: {Engine: "vllm", Version: "0.31.0", ClosureSHA256: testRuntimeClosureSHA256, ClosureSizeBytes: 4096, ContextWindow: 32768, MaxTokens: 4096, Reasoning: &trueValue},
+		},
+	}
+	if err := api.ValidateTeamReleaseMetadata(team, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	app.api = fixedProductionTeamClient{Client: app.api, team: team}
+	for _, model := range team.Models {
+		for _, harnessName := range []string{"pi", "claude-code", "codex"} {
+			if err := runConnect(context.Background(), app, connectRequest{
+				TeamName: team.Name, Harness: harnessName, Model: model,
+				Mode: config.ModeCloud, Scope: "user",
+			}); err != nil {
+				t.Fatalf("%s/%s fixture connect failed: %v", model, harnessName, err)
+			}
+			cfg, err := app.config.LoadConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			saved := cfg.Teams[team.Name]
+			if saved.DefaultHarness != harnessName || saved.DefaultModel != model || saved.ReleaseChannel != api.ProductionReleaseChannel {
+				t.Fatalf("%s/%s saved wrong route: %+v", model, harnessName, saved)
+			}
+		}
+	}
+}
 
 func TestCloudConnectRefusesUnavailableModelWithoutMutation(t *testing.T) {
 	for _, harness := range []string{"pi", "claude-code", "codex", "standard"} {

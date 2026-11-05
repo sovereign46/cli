@@ -33,8 +33,16 @@ func (a Adapter) Detect(ctx context.Context, env map[string]string) (harness.Det
 }
 
 func (a Adapter) Launch(ctx context.Context, req harness.LaunchRequest) error {
-	args := []string{"-c", `web_search="disabled"`, "-c", "features.multi_agent=false", "--profile", "s46", "--model", req.Model, "--", req.Task}
+	args := codexLaunchArgs(req)
 	return harness.LaunchExecutable(ctx, "codex", args, req)
+}
+
+func codexLaunchArgs(req harness.LaunchRequest) []string {
+	args := []string{}
+	if req.NonInteractive {
+		args = append(args, "-a", "never", "exec", "--sandbox", "workspace-write")
+	}
+	return append(args, "-c", `web_search="disabled"`, "-c", "features.multi_agent=false", "--profile", "s46", "--model", req.Model, "--", req.Task)
 }
 
 func (a Adapter) PlanConnect(ctx context.Context, req harness.ConnectRequest) (harness.Plan, error) {

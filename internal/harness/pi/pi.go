@@ -53,12 +53,20 @@ func (a Adapter) Detect(ctx context.Context, env map[string]string) (harness.Det
 }
 
 func (a Adapter) Launch(ctx context.Context, req harness.LaunchRequest) error {
+	args := piLaunchArgs(req)
+	return harness.LaunchExecutable(ctx, "pi", args, req)
+}
+
+func piLaunchArgs(req harness.LaunchRequest) []string {
 	args := []string{"--provider", "s46", "--model", req.Model}
+	if req.NonInteractive {
+		args = append(args, "--print")
+	}
 	if req.SessionID != "" {
 		args = append(args, "--session-id", req.SessionID)
 	}
 	args = append(args, "--", req.Task)
-	return harness.LaunchExecutable(ctx, "pi", args, req)
+	return args
 }
 
 func (a Adapter) ValidateLaunchConfig(_ context.Context, req harness.LaunchConfigRequest) error {

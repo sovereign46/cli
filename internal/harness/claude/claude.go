@@ -35,12 +35,20 @@ func (a Adapter) Detect(ctx context.Context, env map[string]string) (harness.Det
 }
 
 func (a Adapter) Launch(ctx context.Context, req harness.LaunchRequest) error {
+	args := claudeLaunchArgs(req)
+	return harness.LaunchExecutable(ctx, "claude", args, req)
+}
+
+func claudeLaunchArgs(req harness.LaunchRequest) []string {
 	args := []string{"--model", req.Model}
+	if req.NonInteractive {
+		args = append(args, "--print", "--permission-mode", "acceptEdits")
+	}
 	if req.SessionID != "" {
 		args = append(args, "--session-id", req.SessionID)
 	}
 	args = append(args, req.Task)
-	return harness.LaunchExecutable(ctx, "claude", args, req)
+	return args
 }
 
 func (a Adapter) PlanConnect(ctx context.Context, req harness.ConnectRequest) (harness.Plan, error) {

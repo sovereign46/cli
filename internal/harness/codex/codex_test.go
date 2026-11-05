@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -17,6 +18,19 @@ import (
 	"github.com/sovereign46/cli/internal/api"
 	"github.com/sovereign46/cli/internal/harness"
 )
+
+func TestLaunchArgsSelectNonInteractiveMode(t *testing.T) {
+	req := harness.LaunchRequest{Model: api.DeepSeekModelID, Task: "create hello.go"}
+	wantInteractive := []string{"-c", `web_search="disabled"`, "-c", "features.multi_agent=false", "--profile", "s46", "--model", api.DeepSeekModelID, "--", "create hello.go"}
+	if got := codexLaunchArgs(req); !reflect.DeepEqual(got, wantInteractive) {
+		t.Fatalf("interactive args = %q, want %q", got, wantInteractive)
+	}
+	req.NonInteractive = true
+	wantBatch := append([]string{"-a", "never", "exec", "--sandbox", "workspace-write"}, wantInteractive...)
+	if got := codexLaunchArgs(req); !reflect.DeepEqual(got, wantBatch) {
+		t.Fatalf("non-interactive args = %q, want %q", got, wantBatch)
+	}
+}
 
 func TestPlanConnectUsesValidCodexProfile(t *testing.T) {
 	home := t.TempDir()
