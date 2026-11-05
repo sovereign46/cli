@@ -7,7 +7,8 @@ checks the purpose-specific trust file against authenticated CLI `main`, and
 requires the reviewer's GitHub login to be exactly `fredoliveira` or
 `goncalossilva`. It verifies the SSH signature locally before posting it to
 an open issue in the private `sovereign46/models-cli` repository, then reads
-the persisted comment back and checks its author and exact body.
+the persisted comment back and checks its author and exact body. After the
+reviewer confirms, it checks the packet again before touching the private key.
 
 ```sh
 python3 scripts/gateway_direct_mac_submit.py \

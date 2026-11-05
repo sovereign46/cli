@@ -26,6 +26,7 @@ ISSUE_URL = re.compile(r"https://github\.com/sovereign46/models-cli/issues/([1-9
 TRUST_API_PATH = "repos/sovereign46/cli/contents/scripts/gateway-direct-mac-approval-trust.json?ref=main"
 REVIEW_REPOSITORY = "sovereign46/models-cli"
 RECORD_SCHEMA = "s46.gateway-direct-mac-reviewer-submission.v1"
+SSH_KEYGEN = "/usr/bin/ssh-keygen"
 
 
 def require(condition, message):
@@ -121,7 +122,7 @@ def checked_trust(trust_file):
 
 
 def checked_private_key(key_path, login, trusted_key):
-    result = subprocess.run(["ssh-keygen", "-y", "-f", str(key_path)], stdout=subprocess.PIPE,
+    result = subprocess.run([SSH_KEYGEN, "-y", "-f", str(key_path)], stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, timeout=30)
     require(result.returncode == 0, "cannot read the reviewer's SSH private key")
     fields = result.stdout.decode("ascii", "replace").split()
@@ -130,7 +131,7 @@ def checked_private_key(key_path, login, trusted_key):
 
 
 def sign_subject(subject, key_path, login, trusted_keys):
-    result = subprocess.run(["ssh-keygen", "-Y", "sign", "-f", str(key_path), "-n", approval.PURPOSE],
+    result = subprocess.run([SSH_KEYGEN, "-Y", "sign", "-f", str(key_path), "-n", approval.PURPOSE],
                             input=subject, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
     require(result.returncode == 0, "SSH signing failed")
     with tempfile.TemporaryDirectory(prefix="s46-gateway-review-") as directory:
@@ -192,11 +193,12 @@ def submit(packet, key, issue_url, trust_file):
     subject = checked_packet(packet)
     trusted_keys, trust_digest = checked_trust(trust_file)
     login, issue_number = checked_issue(issue_url, trust_digest)
-    checked_private_key(key, login, trusted_keys[login])
     print(f"Reviewer: {login}\nSubject SHA-256: {SUBJECT_SHA256}\n"
           f"Packet manifest SHA-256: {PACKET_MANIFEST_SHA256}\nTrust SHA-256: {trust_digest}")
     require(input("Type the subject SHA-256 after reviewing the packet to approve publication: ").strip()
             == SUBJECT_SHA256, "Gateway publication approval was not confirmed")
+    require(checked_packet(packet) == subject, "Gateway review packet changed during confirmation")
+    checked_private_key(key, login, trusted_keys[login])
     signature = sign_subject(subject, key, login, trusted_keys)
     record = {"schema": RECORD_SCHEMA, "githubLogin": login, "subjectSha256": SUBJECT_SHA256,
               "packetManifestSha256": PACKET_MANIFEST_SHA256, "trustSha256": trust_digest,
