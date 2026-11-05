@@ -358,8 +358,8 @@ def checked_subject(bundle, qualification, evidence_root):
     return canonical(subject_for(candidate_record, candidate_raw, qualification_raw))
 
 
-def trusted_reviewers():
-    trust, _ = read_canonical(TRUST, 4096)
+def trusted_reviewers(trust_path=None):
+    trust, _ = read_canonical(trust_path or TRUST, 4096)
     require(set(trust) == {"schema", "purpose", "reviewers"} and trust["schema"] == TRUST_SCHEMA
             and trust["purpose"] == PURPOSE and isinstance(trust["reviewers"], dict)
             and set(trust["reviewers"]) == set(REVIEWERS), "Gateway approval trust is not explicitly enrolled")
@@ -379,18 +379,22 @@ def trusted_reviewers():
     return keys
 
 
+def verify_approval(subject, reviewer, signature, keys):
+    require(reviewer in REVIEWERS, "Gateway approval reviewer is not recognized")
+    read_exact(signature, 8192)
+    with tempfile.TemporaryDirectory(prefix="s46-gateway-approval-") as temporary:
+        signers = Path(temporary) / "allowed_signers"
+        signers.write_text(f"{reviewer} {keys[reviewer]}\n", encoding="ascii")
+        result = subprocess.run(["/usr/bin/ssh-keygen", "-Y", "verify", "-f", str(signers),
+                                 "-I", reviewer, "-n", PURPOSE, "-s", str(signature)],
+                                input=subject, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
+    require(result.returncode == 0, f"{reviewer} signature is invalid for the exact Gateway subject")
+
+
 def verify_approvals(subject, approvals):
     keys = trusted_reviewers()
     for reviewer in REVIEWERS:
-        signature = Path(approvals) / f"{reviewer}.sig"
-        read_exact(signature, 8192)
-        with tempfile.TemporaryDirectory(prefix="s46-gateway-approval-") as temporary:
-            signers = Path(temporary) / "allowed_signers"
-            signers.write_text(f"{reviewer} {keys[reviewer]}\n", encoding="ascii")
-            result = subprocess.run(["/usr/bin/ssh-keygen", "-Y", "verify", "-f", str(signers),
-                                     "-I", reviewer, "-n", PURPOSE, "-s", str(signature)],
-                                    input=subject, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
-        require(result.returncode == 0, f"{reviewer} signature is invalid for the exact Gateway subject")
+        verify_approval(subject, reviewer, Path(approvals) / f"{reviewer}.sig", keys)
 
 
 def main():
