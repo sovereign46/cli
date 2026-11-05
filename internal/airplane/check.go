@@ -298,6 +298,9 @@ func (s Service) writeModelProbeProgress(done <-chan struct{}, finished chan<- s
 }
 
 func (s Service) modelProbe(ctx context.Context) (bool, string) {
+	if LlamacppURL(s.Env) == "" {
+		return false, "airplane llama.cpp URL is not the exact local endpoint"
+	}
 	if probeOK, message, ok := s.seamModelProbe(); ok {
 		return probeOK, message
 	}
@@ -339,6 +342,9 @@ func (s Service) modelProbe(ctx context.Context) (bool, string) {
 }
 
 func (s Service) gatewayReady(ctx context.Context) bool {
+	if s.gatewayURL() == "" {
+		return false
+	}
 	if ready, ok := s.seamGatewayReady(); ok {
 		return ready
 	}
@@ -378,6 +384,9 @@ func (s Service) gatewayReady(ctx context.Context) bool {
 }
 
 func (s Service) gatewayResponding(ctx context.Context) bool {
+	if s.gatewayURL() == "" {
+		return false
+	}
 	if responding, ok := s.seamGatewayResponding(); ok {
 		return responding
 	}

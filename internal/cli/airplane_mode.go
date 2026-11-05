@@ -476,10 +476,10 @@ func localAirplaneTeam(teamName string, existing config.TeamConfig, req connectR
 	teamName = strs.FirstNonEmpty(teamName, localAirplaneTeamName)
 	return api.Team{
 		Name:         teamName,
-		Endpoint:     strs.FirstNonEmpty(req.Endpoint, airplane.LocalGatewayURL),
+		Endpoint:     airplane.LocalGatewayURL,
 		Region:       strs.FirstNonEmpty(req.Region, existing.Region, "local"),
 		WorkerHosts:  []string{"localhost"},
-		DefaultModel: strs.FirstNonEmpty(req.Model, airplane.LocalModelID),
+		DefaultModel: airplane.LocalModelID,
 		Models:       []string{airplane.LocalModelID},
 	}
 }

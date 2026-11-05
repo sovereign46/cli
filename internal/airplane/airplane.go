@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -72,14 +73,14 @@ func (s Service) LogFiles() []LogFile {
 
 func (s Service) processEnv(extra ...string) []string {
 	values := map[string]string{}
-	for _, entry := range os.Environ() {
-		key, value, ok := strings.Cut(entry, "=")
-		if ok {
+	for _, key := range []string{"HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "S46_E2E_RUNNER_ID"} {
+		value, ok := s.Env[key]
+		if !ok {
+			value, ok = os.LookupEnv(key)
+		}
+		if ok && value != "" {
 			values[key] = value
 		}
-	}
-	for key, value := range s.Env {
-		values[key] = value
 	}
 	for _, entry := range extra {
 		key, value, ok := strings.Cut(entry, "=")
@@ -87,9 +88,14 @@ func (s Service) processEnv(extra ...string) []string {
 			values[key] = value
 		}
 	}
-	env := make([]string, 0, len(values))
-	for key, value := range values {
-		env = append(env, key+"="+value)
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	env := make([]string, 0, len(keys))
+	for _, key := range keys {
+		env = append(env, key+"="+values[key])
 	}
 	return env
 }

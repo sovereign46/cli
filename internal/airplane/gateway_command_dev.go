@@ -32,3 +32,14 @@ func (s Service) developmentGatewayCommand() (gatewayCommand, bool) {
 	}
 	return gatewayCommand{}, false
 }
+
+func (s Service) startDevelopmentGateway(command gatewayCommand, env []string) error {
+	cmd := exec.Command(command.Path, command.Args...)
+	cmd.Dir = command.Dir
+	cmd.Env = os.Environ()
+	for key, value := range s.Env {
+		cmd.Env = append(cmd.Env, key+"="+value)
+	}
+	cmd.Env = append(cmd.Env, env...)
+	return s.startDetached(cmd, "s46-gateway-airplane.log")
+}

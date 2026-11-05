@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/sovereign46/cli/internal/airplane"
 	"github.com/sovereign46/cli/internal/api"
 	"github.com/sovereign46/cli/internal/config"
 	"github.com/sovereign46/cli/internal/harness"
@@ -393,6 +394,12 @@ func resolveConnectMode(cfg config.Config, existing config.TeamConfig, req conne
 
 func connectTeam(ctx context.Context, app *app, mode string, existing config.TeamConfig, req connectRequest) (api.Team, error) {
 	if mode == config.ModeAirplane {
+		if req.Endpoint != "" && req.Endpoint != airplane.LocalGatewayURL {
+			return api.Team{}, fmt.Errorf("airplane mode requires the exact local endpoint %q", airplane.LocalGatewayURL)
+		}
+		if req.Model != "" && req.Model != airplane.LocalModelID {
+			return api.Team{}, fmt.Errorf("airplane mode requires the exact local model %q", airplane.LocalModelID)
+		}
 		return localAirplaneTeam(req.TeamName, existing, req), nil
 	}
 	if !isCanonicalCloudTeam(req.TeamName) {

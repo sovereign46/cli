@@ -18,7 +18,6 @@ import (
 
 	"github.com/sovereign46/cli/internal/airplane"
 	"github.com/sovereign46/cli/internal/contextx"
-	"github.com/sovereign46/cli/internal/strs"
 )
 
 func airplaneLogsCommand(runtime Runtime, opts *options) *cobra.Command {
@@ -143,7 +142,7 @@ func airplaneLogPort(env map[string]string, name string) string {
 	case "llamacpp":
 		return localServerPort(airplane.LlamacppURL(env))
 	case "gateway":
-		return localServerPort(strs.FirstNonEmpty(strs.EnvValue(env, "S46_AIRPLANE_GATEWAY_URL"), airplane.LocalGatewayURL))
+		return localServerPort(airplane.GatewayURL(env))
 	default:
 		return ""
 	}

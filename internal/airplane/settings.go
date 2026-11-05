@@ -41,7 +41,17 @@ func AirplaneLlamacppArgs(env map[string]string, modelPath string) []string {
 }
 
 func BackendModelForEnv(env map[string]string) string {
+	if !airplaneRuntimeOverridesAllowed() {
+		return BackendModel
+	}
 	return strs.FirstNonEmpty(strs.EnvValue(env, "S46_LOCAL_MODEL"), BackendModel)
+}
+
+func qualifiedAirplaneURL(value, fallback string) string {
+	if value == "" || value == fallback {
+		return fallback
+	}
+	return ""
 }
 
 func AirplaneGatewayEnv(env map[string]string) []string {
@@ -63,6 +73,7 @@ func MaxTokens(env map[string]string) int {
 }
 
 func KeepAlive(env map[string]string) string {
+	env = effectiveAirplaneSettings(env)
 	return strs.FirstNonEmpty(strs.EnvValue(env, "S46_AIRPLANE_KEEP_ALIVE"), strs.EnvValue(env, "LLAMA_SERVER_TIMEOUT"), DefaultKeepAlive)
 }
 
@@ -82,6 +93,7 @@ func KeepAliveSeconds(env map[string]string) int {
 }
 
 func GatewayWriteTimeout(env map[string]string) string {
+	env = effectiveAirplaneSettings(env)
 	return strs.FirstNonEmpty(strs.EnvValue(env, "S46_WRITE_TIMEOUT"), DefaultGatewayWriteTimeout)
 }
 
@@ -90,6 +102,7 @@ func NumParallel(env map[string]string) int {
 }
 
 func FlashAttention(env map[string]string) string {
+	env = effectiveAirplaneSettings(env)
 	value := strs.FirstNonEmpty(strs.EnvValue(env, "S46_AIRPLANE_FLASH_ATTENTION"), strs.EnvValue(env, "LLAMA_ARG_FLASH_ATTN"), DefaultFlashAttention)
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "1", "true", "yes":
@@ -104,14 +117,17 @@ func FlashAttention(env map[string]string) string {
 }
 
 func KVCacheType(env map[string]string) string {
+	env = effectiveAirplaneSettings(env)
 	return strs.FirstNonEmpty(strs.EnvValue(env, "S46_AIRPLANE_KV_CACHE_TYPE"), strs.EnvValue(env, "LLAMA_ARG_CACHE_TYPE_K"), DefaultKVCacheType)
 }
 
 func GPULayers(env map[string]string) string {
+	env = effectiveAirplaneSettings(env)
 	return strs.FirstNonEmpty(strs.EnvValue(env, "S46_AIRPLANE_GPU_LAYERS"), strs.EnvValue(env, "LLAMA_ARG_N_GPU_LAYERS"), DefaultGPULayers)
 }
 
 func positiveIntSetting(env map[string]string, fallback int, keys ...string) int {
+	env = effectiveAirplaneSettings(env)
 	for _, key := range keys {
 		value := strings.TrimSpace(strs.EnvValue(env, key))
 		if value == "" {
@@ -123,4 +139,11 @@ func positiveIntSetting(env map[string]string, fallback int, keys ...string) int
 		}
 	}
 	return fallback
+}
+
+func effectiveAirplaneSettings(env map[string]string) map[string]string {
+	if !airplaneRuntimeOverridesAllowed() {
+		return map[string]string{}
+	}
+	return env
 }

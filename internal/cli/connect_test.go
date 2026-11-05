@@ -62,6 +62,27 @@ func TestResolveConnectModePrecedence(t *testing.T) {
 	}
 }
 
+func TestAirplaneConnectRejectsRouteOverrides(t *testing.T) {
+	for _, req := range []connectRequest{
+		{Endpoint: "https://remote.invalid"},
+		{Endpoint: "http://127.0.0.1:8082"},
+		{Model: "unapproved-model"},
+	} {
+		if _, err := connectTeam(context.Background(), nil, config.ModeAirplane, config.TeamConfig{}, req); err == nil {
+			t.Fatalf("airplane connect accepted route override: %#v", req)
+		}
+	}
+	team, err := connectTeam(context.Background(), nil, config.ModeAirplane, config.TeamConfig{}, connectRequest{
+		Endpoint: airplane.LocalGatewayURL, Model: airplane.LocalModelID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if team.Endpoint != airplane.LocalGatewayURL || team.DefaultModel != airplane.LocalModelID {
+		t.Fatalf("airplane connect route = %#v", team)
+	}
+}
+
 func TestAirplaneReconnectPreservesUnclassifiedProtectedSnapshot(t *testing.T) {
 	const teamName = "@s46/engineering"
 	existing := config.TeamConfig{
