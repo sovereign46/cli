@@ -28,7 +28,7 @@ The `s46.llamacpp-runtime-inventory.v1` digest is SHA-256 over lexicographically
 
 The 14 GB model path is opened without following links and copied into a size-bounded unlinked snapshot on the cache filesystem. Darwin verifies the child's inherited FD 3 device/inode before writing the process receipt. Exact llama-server may close FD 3 after mapping; later status therefore requires that launch-time FD proof together with the native microsecond process-start identity, immutable runtime receipt, descriptor-only `-m /dev/fd/3` command, backend alias, and live model inference. Partial snapshots are closed and removed on error; launch fails before copying unless the cache filesystem has space for the exact model plus the bounded runtime closure.
 
-## First cloud test: Pi only
+## Cloud testing
 
 ### Prelaunch acceptance
 
@@ -47,18 +47,36 @@ S46_API_BASE_URL=https://gateway.s46.dev \
 pi --provider s46 --model s46/deepseek-v4-flash-0731
 ```
 
-Do not persist `S46_API_BASE_URL`; the prelaunch gateway intentionally does not provide login or token refresh. `connect` and `status` must identify the saved route as `prelaunch`, `not production-certified`, and `not the production API path`, including in structured output. Preserve those statements with any test evidence. A passing file-writing/tool-result round trip is prelaunch compatibility evidence only; it is not model certification, release approval, production serving authority, or production accounting evidence.
+Do not persist `S46_API_BASE_URL`; the prelaunch gateway intentionally does not provide login or token refresh. Structured output must retain `releaseChannel: "prelaunch"`, `productionCertified: false`, and `productionAPIPath: false`. Human-readable `connect` and `status` must identify the saved route as `prelaunch`, `not production-certified`, and `not the production API path`. Preserve those statements with any test evidence. A passing file-writing/tool-result round trip is prelaunch compatibility evidence only; it is not model certification, release approval, production serving authority, or production accounting evidence.
 
 ### Production acceptance
 
-Production testing remains blocked until all of the following have been separately approved and provisioned:
+Production routes support Pi, Claude Code, and Codex when authenticated team discovery explicitly returns `releaseChannel=production`, `productionCertified=true`, and `productionAPIPath=true`. The current model is DeepSeek V4 Flash-0731, public ID `s46/deepseek-v4-flash-0731`; there is no `DeepSeek 4.1` alias. The team must authorize the exact release, and current serving authority must remain valid. The following prerequisites are separate from the CLI build:
 
 - Reviewed API/CLI independent-policy loading and initial-serving gates, followed by independently authenticated complete trust policy and current signed registry/audit/advisory evidence.
 - An authenticated production gateway and a team authorized for the exact released model and runtime.
-- The exact corrected checkpoint, a complete protected/hash-locked vLLM executable closure, independent fresh-load certification evidence, signed release, and verified deployment readiness. A working prelaunch or legacy backend and building this CLI do not satisfy those gates.
+- The exact checkpoint, protected/hash-locked vLLM executable closure, signed release with its stated assurance scope, deployment authorization, and current loaded-runtime evidence. A working prelaunch or legacy backend and building this CLI do not satisfy those gates.
 - A restricted test environment for the agent, with only the intended files and narrowly scoped credentials accessible.
 
-Use the public model ID returned by production team discovery. The acceptance target is an actual file-writing/tool-result round trip and a hello-world application through the production-authorized gateway; mock, prelaunch, and direct-backend responses do not satisfy it.
+The current published stable CLI is still 0.2.5 and lacks this contract. Use the [validated source build](../README.md#deepseek-cloud), not a claimed stable 0.3.0 installation. The source build also reports version 0.2.5, so verify its full commit and `release: false` flag. Put it first on `PATH`, install the desired harness, and use normal production login and discovery without a prelaunch endpoint override:
+
+```sh
+unset S46_API_BASE_URL
+s46 login --user 'you@example.com' --device-id 'my-laptop' --team @s46/engineering
+s46 connect @s46/engineering --harness=pi --mode=cloud --scope=user \
+  --model=s46/deepseek-v4-flash-0731 --no-input --json
+s46 status
+smoke_dir="$(mktemp -d)"
+cd "$smoke_dir"
+s46 run 'Create hello.py that prints "hello from DeepSeek".' \
+  --model=s46/deepseek-v4-flash-0731 --non-interactive --no-input
+```
+
+Approve the magic link sent to the login email. The connect result must identify `https://gateway.s46.dev`, the selected model and harness, and `releaseChannelAtConnect: "production"`, `productionCertifiedAtConnect: true`, and `productionAPIPathAtConnect: true`. A missing team membership or release grant fails at discovery; changing endpoints does not grant access.
+
+For Claude Code or Codex, reconnect with `--harness=claude-code` or `--harness=codex` before running. The retained three-client diagnostic passed file creation and execution through all three clients. Its Claude Code run used `CLAUDE_CODE_MAX_OUTPUT_TOKENS=4096 MAX_THINKING_TOKENS=0 CLAUDE_CODE_EFFORT_LEVEL=unset` on the `s46 run` command; these cap output and omit thinking and effort requests. Its Codex run used an external macOS sandbox with the inner sandbox disabled; this is diagnostic evidence for that exact setup, not evidence for every local sandbox configuration.
+
+The acceptance target is an actual file-writing/tool-result round trip and a hello-world application through the production-authorized gateway, with separately bound settled usage. Mock, prelaunch, and direct-backend responses do not satisfy it. CLI classification records what authenticated discovery reports; it does not upgrade the signed model release's assurance scope.
 
 `connect` changes the S46 provider in `~/.pi/agent/models.json`, retaining other providers and creating a backup. It is not a sandbox: Pi's tools have the permissions of the account running Pi. Use an isolated account, container, or VM for the first real tool run. A separate working directory alone does not confine its tools.
 
@@ -67,7 +85,7 @@ Use the public model ID returned by production team discovery. The acceptance ta
 - OpenAI Chat Completions through the team's gateway, with the public model ID retained.
 - Context and output limits come from authorized runtime metadata, not name-based guesses.
 - Only the exact ID `s46/deepseek-v4-flash-0731` on vLLM 0.31.0 with reasoning enabled and syntactically usable closure binding metadata derived from the team API gets `thinkingLevelMap: {"off":"none"}`. Prelaunch rejects a different or incomplete runtime identity rather than omitting the disable mapping. The CLI checks metadata syntax and bounds, not its signature or authenticity. Unrelated production model IDs are not subject to this closure check. Other thinking levels are unchanged.
-- This mapping was qualified against Pi 1.3.0's local wire behavior and captured backend source. The generated `providers.s46` object contains exactly `baseUrl`, `api`, `apiKey`, `authHeader`, and `models`; launch preflight rejects any additional provider field or changed model behavior. Live reasoning and generated tool-loop behavior still need qualification.
-- Devstral/llama.cpp airplane mode retains its limits and restoration behavior, but release installation now requires one qualified closure that pins the GGUF, complete llama.cpp runtime inventory, and gateway. Model activation still requires the currently absent approved bundled policy, and the gateway closure is not yet available.
+- This mapping was qualified against Pi 1.3.0's local wire behavior and captured backend source. The generated `providers.s46` object contains exactly `baseUrl`, `api`, `apiKey`, `authHeader`, and `models`; launch preflight rejects any additional provider field or changed model behavior. The retained production diagnostic passed a tool loop for all three clients; that does not establish every reasoning setting or client configuration.
+- Devstral/llama.cpp airplane mode retains its limits and restoration behavior, but release installation now requires one qualified closure that pins the GGUF, complete llama.cpp runtime inventory, and gateway. The CLI embeds the approved model activation policy, but the qualified airplane gateway closure is not yet available.
 
-Claude Code and Codex qualification are deferred for this cloud runtime. Classified/prelaunch catalogs containing DeepSeek are therefore rejected unless Pi is selected, both at connect and again from saved state before launch. Their adapters remain available for ordinary unclassified cloud teams and valid airplane routes whose active endpoint, default model, and sole catalog entry exactly match the built-in local projection; saved cloud API provenance may remain only for restoration.
+Claude Code and Codex are supported for fully classified production DeepSeek routes. Prelaunch and other DeepSeek catalogs lacking the complete production classification are rejected unless Pi is selected, both at connect and again from saved state before launch. Their adapters remain available for ordinary unclassified cloud teams and valid airplane routes whose active endpoint, default model, and sole catalog entry exactly match the built-in local projection; saved cloud API provenance may remain only for restoration.
