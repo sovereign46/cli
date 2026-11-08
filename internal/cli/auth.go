@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"strings"
@@ -215,7 +216,16 @@ func validateProtectedTokenHelper(ctx context.Context, app *app) error {
 	}
 	validator, ok := adapter.(harness.LaunchConfigValidator)
 	if !ok {
-		return fmt.Errorf("refusing token helper: harness %s cannot validate its live configuration", adapter.Name())
+		plan, err := adapter.PlanConnect(ctx, harness.ConnectRequest{Env: app.runtime.Env, Team: team, Model: teamConfig.DefaultModel, Mode: config.ModeCloud, Scope: "user"})
+		if err != nil || len(plan.Files) == 0 {
+			return fmt.Errorf("refusing token helper: cannot validate %s configuration; reconnect", adapter.Name())
+		}
+		for _, file := range plan.Files {
+			if !bytes.Equal(file.OldContent, file.Content) {
+				return fmt.Errorf("refusing token helper: %s configuration differs from the saved connection; reconnect", adapter.Name())
+			}
+		}
+		return nil
 	}
 	request := harness.LaunchConfigRequest{Env: app.runtime.Env, Team: team, Mode: config.ModeCloud, Model: teamConfig.DefaultModel}
 	if err := validator.ValidateLaunchConfig(ctx, request); err != nil {

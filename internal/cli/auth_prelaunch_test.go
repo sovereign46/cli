@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -15,7 +16,80 @@ import (
 
 	"github.com/sovereign46/cli/internal/api"
 	"github.com/sovereign46/cli/internal/config"
+	"github.com/sovereign46/cli/internal/harness"
 )
+
+func TestProtectedTokenHelperChecksClaudeAndCodexConfiguration(t *testing.T) {
+	for _, name := range []string{"claude-code", "codex"} {
+		for _, mutation := range []string{"none", "endpoint", "model", "helper", "missing"} {
+			t.Run(name+"/"+mutation, func(t *testing.T) {
+				env := testEnv(t)
+				team := testPrelaunchDeepSeekTeam(api.DefaultGatewayURL)
+				certified := true
+				team.ReleaseChannel = api.ProductionReleaseChannel
+				team.ProductionCertified, team.ProductionAPIPath = &certified, &certified
+				team.PolicySHA256, team.PolicyExpiresAt, team.UpstreamCredentialExpiresAt = "", "", ""
+				cfg := config.Config{ActiveTeam: team.Name, Mode: config.ModeCloud, Teams: map[string]config.TeamConfig{
+					team.Name: config.TeamConfigFromAPI(team, name, team.DefaultModel, config.ModeCloud),
+				}}
+				if err := config.NewStore(env, "").SaveConfig(cfg); err != nil {
+					t.Fatal(err)
+				}
+				app, err := newApp(Runtime{Env: env}, &options{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				adapter, err := app.harness.Get(name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				requested := team
+				model := team.DefaultModel
+				if mutation == "endpoint" {
+					requested.Endpoint = "https://hostile.example"
+				}
+				if mutation == "model" {
+					model = api.DefaultModel
+				}
+				plan, err := adapter.PlanConnect(context.Background(), harness.ConnectRequest{Env: env, Team: requested, Model: model, Mode: config.ModeCloud, Scope: "user"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := adapter.Apply(context.Background(), plan); err != nil {
+					t.Fatal(err)
+				}
+				path := plan.Files[0].Path
+				before, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if mutation == "helper" {
+					before = []byte(strings.ReplaceAll(string(before), "token", "logout"))
+					if err := os.WriteFile(path, before, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if mutation == "missing" {
+					if err := os.Remove(path); err != nil {
+						t.Fatal(err)
+					}
+				}
+				err = validateProtectedTokenHelper(context.Background(), app)
+				if (err == nil) != (mutation == "none") {
+					t.Fatalf("helper validation for %s: %v", mutation, err)
+				}
+				after, readErr := os.ReadFile(path)
+				if mutation == "missing" {
+					if !os.IsNotExist(readErr) {
+						t.Fatal("validation created missing configuration")
+					}
+				} else if readErr != nil || string(after) != string(before) {
+					t.Fatal("validation changed configuration")
+				}
+			})
+		}
+	}
+}
 
 func TestProtectedCredentialsValidateBeforeEffects(t *testing.T) {
 	for _, mutation := range []string{"endpoint", "provider", "policy", "credential"} {
