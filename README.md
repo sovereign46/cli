@@ -69,13 +69,47 @@ Encrypted shares are uploaded to `S46_SHARE_API_URL` (default `https://gist.s46.
 
 The unsigned Darwin/arm64 Devstral airplane diagnostic is documented in [docs/airplane-mac-diagnostic.md](docs/airplane-mac-diagnostic.md). It is an explicit non-release path and does not change the signed release status.
 
-## DeepSeek cloud candidate: Pi first
+## DeepSeek cloud
 
-The DeepSeek cloud qualification path is Pi-only: the CLI rejects classified/prelaunch catalogs containing DeepSeek when another harness is selected, and rechecks the saved catalog before launch. Claude Code, Codex, and the standard adapter remain unchanged for ordinary unclassified cloud teams and valid airplane routes. Before any airplane harness launch, the active route must use the exact built-in local gateway and sole local model; saved cloud API provenance may remain only as restoration state. See [candidate testing](docs/testing-candidate.md) for the distinct prelaunch and production acceptance contracts.
+The current CLI supports Pi, Claude Code, and Codex for production DeepSeek routes whose authenticated team catalog explicitly reports `releaseChannel=production`, `productionCertified=true`, and `productionAPIPath=true`. The exact public model ID is `s46/deepseek-v4-flash-0731` (DeepSeek V4 Flash-0731); `DeepSeek 4.1` is not an alias. The team must authorize that released model. Production login and discovery use `https://api.s46.dev`; harness traffic uses the discovered `https://gateway.s46.dev` endpoint.
 
-The authenticated prelaunch route is explicitly non-production. It requires an exact release-tagged **0.3.0 candidate** carrying this contract; the currently published Homebrew 0.2.5 build is not a supported prelaunch qualification client. No 0.3.0 stable release is claimed here. The CLI retains the route's policy identity and expiries and labels connect/status output `prelaunch`, `not production-certified`, and `not the production API path`; malformed, expired, or contradictory channel metadata is refused.
+For an ordinary OpenAI-compatible application, sign in as a team admin and create a key in [the admin site](https://admin.s46.dev), under **API keys**, for the team authorized to use the model. Set the application's base URL to `https://gateway.s46.dev/v1`, its model to `s46/deepseek-v4-flash-0731`, and its API key to the full key shown once after creation. These inference keys have no automatic expiry and can be revoked in the admin site. This path does not require the S46 CLI or a coding harness. The remaining instructions in this section apply to the native S46 CLI workflow.
 
-Pi uses the team's authorized model list, default, context window, and output limit. For the exact ID `s46/deepseek-v4-flash-0731` on vLLM `0.31.0` with reasoning enabled, syntactically usable runtime-closure binding metadata derived from the team API is also mandatory; its model configuration then maps thinking `off` to an explicit `reasoning_effort: "none"`. Prelaunch requires that exact runtime identity and rejects incomplete metadata rather than silently treating it as ordinary cloud. The CLI checks metadata syntax and bounds; it does not sign or independently authenticate the closure or establish production certification. Other thinking levels, models, runtimes, and Devstral airplane settings are unchanged.
+As of 2026-11-08, GitHub and Homebrew still publish stable 0.2.5, which lacks the current DeepSeek client contract. No 0.3.0 stable release is published. Build this validated source revision with Go 1.26.9+ and an authenticated GitHub account that can read this repository:
+
+```sh
+source_dir="$(mktemp -d)"
+gh repo clone sovereign46/cli "$source_dir" -- --quiet
+cd "$source_dir"
+git checkout --detach 16e62e407b04160f1e75bad9650e3a1a0fa22182
+install_dir="$HOME/.local/opt/s46-deepseek-16e62e4/bin"
+mkdir -p "$install_dir"
+GOWORK=off GOTOOLCHAIN=go1.26.9 go build -trimpath -o "$install_dir/s46" ./cmd/s46
+export PATH="$install_dir:$PATH"
+s46 version --json
+```
+
+This source build reports version `0.2.5`, commit `16e62e407b04160f1e75bad9650e3a1a0fa22182`, and `release: false`. Check the commit and release flag; the version number alone does not distinguish it from the older published release. Keep this executable first on `PATH` so harness token helpers use the same CLI. Retain `export PATH="$HOME/.local/opt/s46-deepseek-16e62e4/bin:$PATH"` in your shell profile for later terminals.
+
+Install the harness you intend to use, then authenticate with your own email and approve the emailed magic link. The Pi diagnostic used `@earendil-works/pi-coding-agent` 1.3.0, which requires Node.js 22.19 or newer. Install that version with `npm install -g --ignore-scripts @earendil-works/pi-coding-agent@1.3.0` and confirm `pi --version` reports `1.3.0`. For a team member authorized for `@s46/engineering`:
+
+```sh
+unset S46_API_BASE_URL
+s46 login --user 'you@example.com' --device-id 'my-laptop' --team @s46/engineering
+s46 connect @s46/engineering --harness=pi --mode=cloud --scope=user \
+  --model=s46/deepseek-v4-flash-0731 --no-input
+s46 status
+smoke_dir="$(mktemp -d)"
+cd "$smoke_dir"
+s46 run 'Create hello.py that prints "hello from DeepSeek".' \
+  --model=s46/deepseek-v4-flash-0731 --non-interactive --no-input
+```
+
+Replace `--harness=pi` with `--harness=claude-code` or `--harness=codex` to configure that installed client. `connect` checks team authorization, backs up and merges the selected harness configuration, and selects it for `s46 run`. It does not install the harness. See [candidate testing](docs/testing-candidate.md#production-acceptance) for the tested client settings and the separate serving and usage evidence.
+
+Prelaunch remains a separate Pi-only, non-production route. It requires an exact release-tagged 0.3.0 candidate carrying its contract; this does not mean a 0.3.0 stable release exists. Prelaunch output retains its policy identity, expiries, `not production-certified`, and `not the production API path` statements. The CLI rejects other harnesses for DeepSeek catalogs without the complete production classification, both when connecting and before launch.
+
+Pi uses the team's authorized model list, default, context window, and output limit. For the exact ID `s46/deepseek-v4-flash-0731` on vLLM `0.31.0` with reasoning enabled, syntactically usable runtime-closure binding metadata derived from the team API is also mandatory; its model configuration maps thinking `off` to an explicit `reasoning_effort: "none"`. The CLI checks metadata syntax and bounds; it does not sign or independently authenticate the closure or establish production certification. Other thinking levels, models, runtimes, and Devstral airplane settings are unchanged.
 
 ## Airplane mode
 

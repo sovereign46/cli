@@ -11,11 +11,11 @@ func TestDefaultModelIsPublishedDevstral(t *testing.T) {
 		t.Fatalf("DefaultModel = %q, want %q", DefaultModel, DevstralModelID)
 	}
 	if DefaultModel == DeepSeekModelID {
-		t.Fatalf("unpublished DeepSeek must not be the generic default: %q", DefaultModel)
+		t.Fatalf("DeepSeek must require explicit team authorization rather than the generic default: %q", DefaultModel)
 	}
 }
 
-func TestCandidateGuideScopesDeepSeekCommandToExplicitPrelaunch(t *testing.T) {
+func TestCandidateGuideSeparatesPrelaunchAndProductionDeepSeek(t *testing.T) {
 	raw, err := os.ReadFile("../../docs/testing-candidate.md")
 	if err != nil {
 		t.Fatal(err)
@@ -25,11 +25,20 @@ func TestCandidateGuideScopesDeepSeekCommandToExplicitPrelaunch(t *testing.T) {
 		t.Fatal("candidate guide does not separate prelaunch from production acceptance")
 	}
 	command := "--model=" + DeepSeekModelID
-	if !strings.Contains(prelaunch, command) || !strings.Contains(prelaunch, "S46_API_BASE_URL=https://gateway.s46.dev") || !strings.Contains(prelaunch, "not production-certified") {
-		t.Fatalf("candidate guide does not bind the DeepSeek command to explicit non-production prelaunch: %q", command)
+	for _, required := range []string{command, "S46_API_BASE_URL=https://gateway.s46.dev", "--endpoint=https://gateway.s46.dev", "--harness=pi", `releaseChannel: "prelaunch"`, "productionCertified: false", "productionAPIPath: false"} {
+		if !strings.Contains(prelaunch, required) {
+			t.Errorf("prelaunch guide omits its explicit non-production contract: %q", required)
+		}
 	}
-	if strings.Contains(production, command) || strings.Contains(production, "--model "+DeepSeekModelID) {
-		t.Fatalf("production guide advertises unpublished DeepSeek in an actionable command: %q", command)
+	for _, required := range []string{command, "unset S46_API_BASE_URL", "s46 login", "validated source build", "team must authorize the exact release", `releaseChannelAtConnect: "production"`, "productionCertifiedAtConnect: true", "productionAPIPathAtConnect: true", "--harness=pi", "--harness=claude-code", "--harness=codex"} {
+		if !strings.Contains(production, required) {
+			t.Errorf("production guide omits authenticated production onboarding: %q", required)
+		}
+	}
+	for _, forbidden := range []string{"S46_API_BASE_URL=https://gateway.s46.dev", "--endpoint=https://gateway.s46.dev"} {
+		if strings.Contains(production, forbidden) {
+			t.Errorf("production guide uses the prelaunch gateway override: %q", forbidden)
+		}
 	}
 }
 
