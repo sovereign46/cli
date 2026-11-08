@@ -230,7 +230,8 @@ func (p *codexJSONLParser) consumeMessage(payload codexPayload, at time.Time) {
 	switch payload.Role {
 	case "user":
 		text := codexContentText(payload.Content, "input_text")
-		if text == "" || strings.HasPrefix(text, "# AGENTS.md instructions for ") {
+		if text == "" || strings.HasPrefix(text, "# AGENTS.md instructions for ") ||
+			(strings.HasPrefix(text, "<environment_context>\n") && strings.HasSuffix(text, "\n</environment_context>")) {
 			return
 		}
 		if p.task == "" {

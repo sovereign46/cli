@@ -20,6 +20,7 @@ func TestShareArtifactIngestsCodexJSONL(t *testing.T) {
 {"timestamp":"2026-05-21T10:00:00.000Z","type":"session_meta","payload":{"id":"019e4594-d23f-7e93-8871-a1a823631500","cwd":"$HOME/dev/app"}}
 {"timestamp":"2026-05-21T10:00:00.000Z","type":"turn_context","payload":{"cwd":"$HOME/dev/app","model":"gpt-5.5"}}
 {"timestamp":"2026-05-21T10:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for $HOME/dev/app\nsecret instructions"}]}}
+{"timestamp":"2026-05-21T10:00:01.500Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\n  <cwd>$HOME/dev/app</cwd>\n  <shell>zsh</shell>\n</environment_context>"}]}}
 {"timestamp":"2026-05-21T10:00:02.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"do an architectural review"}]}}
 {"timestamp":"2026-05-21T10:00:03.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"I'll inspect the code."}],"usage":{"cost":{"input":0.25,"output":0.25,"total":0.5}}}}
 {"timestamp":"2026-05-21T10:00:04.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"go test ./...\",\"workdir\":\"$HOME/dev/app\"}","call_id":"call_test"}}
