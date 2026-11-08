@@ -121,8 +121,8 @@ func codexBlock(req harness.ConnectRequest) string {
 	return strings.Join([]string{
 		"# BEGIN s46",
 		"# checksum: sha256:" + checksum(body),
-		body,
-		"# END s46",
+		// Keep the marker with its key when Codex appends project tables.
+		body + " # END s46",
 		"",
 	}, "\n")
 }
@@ -181,7 +181,7 @@ func replaceMarkedBlock(existing string, name string, replacement string) (strin
 		}
 		afterEnd := endIndex + len(end)
 		prefix := strings.TrimRight(existing[:startIndex], " \t\n")
-		suffix := strings.TrimLeft(existing[afterEnd:], " \t\n")
+		suffix := strings.Trim(existing[afterEnd:], " \t\n")
 		parts := []string{}
 		if prefix != "" {
 			parts = append(parts, prefix)
@@ -200,13 +200,14 @@ func replaceMarkedBlock(existing string, name string, replacement string) (strin
 }
 
 func validateManagedBlock(block string) error {
-	lines := strings.Split(strings.TrimSpace(block), "\n")
-	if len(lines) < 3 || strings.TrimSpace(lines[0]) != "# BEGIN s46" || strings.TrimSpace(lines[len(lines)-1]) != "# END s46" {
+	withoutEnd, found := strings.CutSuffix(strings.TrimSpace(block), "# END s46")
+	lines := strings.Split(strings.TrimSpace(withoutEnd), "\n")
+	if !found || len(lines) < 2 || strings.TrimSpace(lines[0]) != "# BEGIN s46" {
 		return fmt.Errorf("invalid s46 codex block")
 	}
 	bodyLines := []string{}
 	checksumValue := ""
-	for _, line := range lines[1 : len(lines)-1] {
+	for _, line := range lines[1:] {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "# checksum: sha256:") {
 			checksumValue = strings.TrimPrefix(trimmed, "# checksum: sha256:")

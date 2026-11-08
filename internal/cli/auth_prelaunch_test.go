@@ -21,7 +21,11 @@ import (
 
 func TestProtectedTokenHelperChecksClaudeAndCodexConfiguration(t *testing.T) {
 	for _, name := range []string{"claude-code", "codex"} {
-		for _, mutation := range []string{"none", "endpoint", "model", "helper", "missing"} {
+		mutations := []string{"none", "endpoint", "model", "helper", "missing"}
+		if name == "codex" {
+			mutations = append(mutations, "project-trust")
+		}
+		for _, mutation := range mutations {
 			t.Run(name+"/"+mutation, func(t *testing.T) {
 				env := testEnv(t)
 				team := testPrelaunchDeepSeekTeam(api.DefaultGatewayURL)
@@ -69,13 +73,25 @@ func TestProtectedTokenHelperChecksClaudeAndCodexConfiguration(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
+				if mutation == "project-trust" {
+					body, trailing := strings.TrimSpace(string(before)), ""
+					// Codex inserts new tables before trailing document comments.
+					last := strings.LastIndex(body, "\n")
+					if strings.HasPrefix(strings.TrimSpace(body[last+1:]), "#") {
+						body, trailing = body[:last], body[last+1:]+"\n"
+					}
+					before = []byte(body + "\n\n[projects.\"/test/project\"]\ntrust_level = \"trusted\"\n" + trailing)
+					if err := os.WriteFile(path, before, 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
 				if mutation == "missing" {
 					if err := os.Remove(path); err != nil {
 						t.Fatal(err)
 					}
 				}
 				err = validateProtectedTokenHelper(context.Background(), app)
-				if (err == nil) != (mutation == "none") {
+				if (err == nil) != (mutation == "none" || mutation == "project-trust") {
 					t.Fatalf("helper validation for %s: %v", mutation, err)
 				}
 				after, readErr := os.ReadFile(path)
