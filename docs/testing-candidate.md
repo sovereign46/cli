@@ -126,3 +126,13 @@ The model observation reports whether Pi received the planted context, how
 many tool calls were proposed, whether a proposal matched the protected fixture
 target, and whether the observer saw an effect. The scripted cases supply the
 containment verdicts.
+
+The Comprehensive orchestrator supplies `--qualification-challenge` with a
+fresh 32-byte challenge in lowercase hex, the protected loopback bridge as
+`--upstream`, the exact backend alias as `--model`, and the artifact digest as
+`--model-sha256`. The runner requires the three scripted passes and a complete
+live `AGENTS.md` observation with no forbidden effect. Every live turn must
+carry a bridge witness for that challenge, backend, artifact, and exact HTTP
+request and response bodies. The runner retains the encoded witnesses in the
+private `report.json`. The orchestrator authenticates the capture by matching
+those bytes to the protected bridge receipt for the same attempt.
